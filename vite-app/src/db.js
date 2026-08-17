@@ -234,10 +234,13 @@ function shapeJobTicket(t) {
   return {
     id: t.id, date: dayMonth(localDate(t.work_date)),
     age: ageInDays(t.created_at),
-    amount: Number(t.total), status: t.status, tech: t.profiles ? t.profiles.name : ""
+    amount: Number(t.total), status: t.status, tech: t.profiles ? t.profiles.name : "",
+    // Who raised it, so the screen can offer "cancel approval" to the same
+    // people the database would let do it: that technician, or an admin.
+    techId: t.technician_id
   };
 }
-const JOB_TICKET_COLUMNS = "id, job_id, work_date, status, total, created_at, profiles(name)";
+const JOB_TICKET_COLUMNS = "id, job_id, work_date, status, total, created_at, technician_id, profiles(name)";
 
 // PostgREST will not return more than 1000 rows in a single response, no
 // matter what limit is asked for — and it does not say so. A request for
@@ -1140,6 +1143,27 @@ export const Db = {
     if (error) throw new Error(await readFnError(error));
     if (data && data.error) throw new Error(data.error);
     return data;
+  },
+
+  // Pulls a sent ticket back before the client signs it. Not a delete: the
+  // day's lines and crew hours stay put, the ticket goes back to Draft to be
+  // fixed and resent, and the client's signing link dies with the token —
+  // approve-ticket looks the row up by that token, so a cleared token is a
+  // dead link, not a link to a draft.
+  //
+  // The status filter on the update is the race with the client: if they
+  // signed a moment ago, zero rows change here (RLS refuses too, on
+  // approved_at) and the refusal says what probably happened. Approved and
+  // invoiced tickets are the client's document — same line deleteTicket
+  // draws.
+  async withdrawTicketApproval(ticketId) {
+    const { data: updated, error } = await sbClient.from("tickets").update({
+      status: "Draft", approval_token: null, approval_sent_at: null, approval_expires_at: null
+    }).eq("id", ticketId).eq("status", "Awaiting approval").select("id");
+    if (error) throw error;
+    if (!updated || !updated.length) {
+      throw new Error("That approval wasn't cancelled — the client may have just approved it, or the ticket isn't yours. Reload the job to see where it stands.");
+    }
   },
 
   // The Job record panel. Assembled from the job row plus the two directory
@@ -2198,6 +2222,7 @@ const SAVE_MESSAGES = {
   updateTicket: "Ticket saved",
   deleteTicket: "Ticket cancelled",
   sendTicketApproval: "Approval sent",
+  withdrawTicketApproval: "Approval cancelled — the ticket is a draft again",
 
   // Rates
   setRateLine: "Rate saved",

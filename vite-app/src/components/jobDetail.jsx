@@ -20,6 +20,7 @@ export function JobDetailScreen({ job, currentUser, onStartJha, onOpenTicket, jo
   const [sendingReport, setSendingReport] = useState(null);
   const [deletingJhaId, setDeletingJhaId] = useState(null);
   const [deletingReportId, setDeletingReportId] = useState(null);
+  const [withdrawingId, setWithdrawingId] = useState(null);
   const [deleting, setDeleting] = useState(false);
   // A ticket opened to be read rather than edited. Holds the ticket id; the
   // dialog fetches its lines and crew itself.
@@ -90,6 +91,17 @@ export function JobDetailScreen({ job, currentUser, onStartJha, onOpenTicket, jo
     setDeletingReportId(null);
   };
   const refreshTickets = () => Db.listTicketsForJob(job.dbId).then(setTickets).catch(e => console.error("Failed to load tickets:", e.message));
+
+  // Pulling a sent ticket back before the client signs it. The wording says
+  // exactly what changes: the link dies, the ticket reopens as a draft.
+  const cancelApproval = async t => {
+    if (!confirm(`Cancel the approval request for ${t.id}? The client's signing link stops working and the ticket goes back to Draft to be fixed and resent.`)) return;
+    setWithdrawingId(t.id);
+    setRowError(p => ({ ...p, [t.id]: "" }));
+    try { await Db.withdrawTicketApproval(t.id); await refreshTickets(); }
+    catch (e) { setRowError(p => ({ ...p, [t.id]: e.message || "Couldn't cancel the approval." })); }
+    setWithdrawingId(null);
+  };
   const refresh = async () => {
     setLoading(true);
     await Promise.all([refreshJhas(), refreshReports(), refreshTickets()]);
@@ -338,10 +350,10 @@ export function JobDetailScreen({ job, currentUser, onStartJha, onOpenTicket, jo
                 : "Tap a draft to add the day's welds, hours and crew. Tap a sent ticket to read it."}
             </div>
             <TableScroll><table className="table">
-              <thead><tr><th>Ticket</th><th>Date</th><th>Technician</th><th>Amount</th><th>Status</th></tr></thead>
+              <thead><tr><th>Ticket</th><th>Date</th><th>Technician</th><th>Amount</th><th>Status</th><th></th></tr></thead>
               <tbody>
-                {loading && <LoadingRow cols={5} />}
-                {!loading && tickets.length === 0 && <tr><td colSpan={5} style={{ color: "color-mix(in srgb, var(--color-text) 55%, transparent)" }}>None raised yet.</td></tr>}
+                {loading && <LoadingRow cols={6} />}
+                {!loading && tickets.length === 0 && <tr><td colSpan={6} style={{ color: "color-mix(in srgb, var(--color-text) 55%, transparent)" }}>None raised yet.</td></tr>}
                 {tickets.map(t => {
                   // A draft on an open job is still being built, so its row
                   // opens the billing screen. Everything else opens read-only.
@@ -354,16 +366,35 @@ export function JobDetailScreen({ job, currentUser, onStartJha, onOpenTicket, jo
                   // a client who never signed. Reading is not editing.
                   const editable = t.status === "Draft" && !complete;
                   const open = editable ? () => onOpenTicket(t.id) : () => setViewingTicket(t.id);
+                  // Sent but not signed: still ours to pull back. The same
+                  // people the tickets update policy names — that technician,
+                  // or an admin.
+                  const canWithdraw = t.status === "Awaiting approval" && (isAdmin || t.techId === currentUser.id);
                   return (
                     <tr key={t.id} onClick={open}
                       tabIndex={0}
                       role="button"
                       title={editable ? "Open this draft to add the day's charges" : "Read this ticket"}
-                      onKeyDown={e => { if (e.key === "Enter" || e.key === " ") { e.preventDefault(); open(); } }}
+                      // Only the row's own key presses: an Enter on the cancel
+                      // button bubbles up here too, and would open the ticket
+                      // it just cancelled.
+                      onKeyDown={e => { if (e.target !== e.currentTarget) return; if (e.key === "Enter" || e.key === " ") { e.preventDefault(); open(); } }}
                       style={{ cursor: "pointer" }}>
                       <td style={{ fontFamily: "var(--font-heading)", fontWeight: 600, color: "var(--color-accent)" }}>{t.id}</td>
                       <td>{t.date}</td><td>{t.tech}</td><td className="tabular">{money(t.amount)}</td>
                       <td><StatusTag status={t.status} /></td>
+                      <td style={{ textAlign: "right" }}>
+                        {canWithdraw && (
+                          <div style={{ display: "flex", gap: 8, justifyContent: "flex-end", alignItems: "center" }}>
+                            {rowError[t.id] && <span style={{ fontSize: 11, color: "var(--color-accent-700)", maxWidth: 320, textAlign: "left" }}>{rowError[t.id]}</span>}
+                            <Btn variant="ghost" disabled={complete || withdrawingId === t.id}
+                              title={complete ? "Reopen the job first — a withdrawn ticket reopens as a draft, and drafts can't be edited on a complete job" : undefined}
+                              onClick={e => { e.stopPropagation(); cancelApproval(t); }}>
+                              {withdrawingId === t.id ? "Cancelling…" : "Cancel approval"}
+                            </Btn>
+                          </div>
+                        )}
+                      </td>
                     </tr>
                   );
                 })}
