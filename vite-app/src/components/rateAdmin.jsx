@@ -1,7 +1,7 @@
 import React, { useState, useEffect, useRef } from "react";
 import { SIZE_LABELS, METHODS, STANDARD_RATE_LINES } from "../data.js";
 import { Db, DEFAULT_SCHEDULE } from "../db.js";
-import { Blueprint, Btn, useDebounced, TagX, Field, Dialog, ErrorBox, Switch, NumField, useMissingFields, SearchSelect , Loading } from "./common.jsx";
+import { Blueprint, Btn, useDebounced, TagX, Field, Dialog, ErrorBox, Switch, NumField, useMissingFields, SearchSelect, TableScroll, Loading } from "./common.jsx";
 
 export function RateAdminScreen() {
   const [clients, setClients] = useState([]);
@@ -306,7 +306,9 @@ export function RateAdminScreen() {
 
               <div style={{ fontSize: 11, textTransform: "uppercase", letterSpacing: ".08em", color: "var(--color-accent)", margin: "14px 0 6px" }}>RT rate per weld by size</div>
               <div>
-              <table className="table">
+              {/* Wrapped like every other table — bare, this one stretched a
+                  phone's viewport to 397px and the whole screen panned. */}
+              <TableScroll><table className="table">
                 <thead><tr><th>Size</th><th style={{ width: 92 }}>Film</th><th style={{ width: 92 }}>CR</th><th style={{ width: 92 }}>DR</th><th style={{ width: 44 }}></th></tr></thead>
                 <tbody>
                   {SIZE_LABELS.map(sz => (
@@ -337,11 +339,11 @@ export function RateAdminScreen() {
                   ))}
                   {!isDefault && <tr><td colSpan={5} style={{ color: "color-mix(in srgb, var(--color-text) 55%, transparent)" }}>Minimum call-out — {client.minimum_callout || "not set"}</td></tr>}
                 </tbody>
-              </table>
+              </table></TableScroll>
               <AddLineBox onAdd={label => addCustom("custom_weld", label)} placeholder='e.g. 16" NPS' />
 
               <div style={{ fontSize: 11, textTransform: "uppercase", letterSpacing: ".08em", color: "var(--color-accent)", margin: "16px 0 6px" }}>Other methods — rate per weld</div>
-              <table className="table">
+              <TableScroll><table className="table">
                 <thead><tr><th>Method</th><th style={{ width: 92 }}>Rate</th><th style={{ width: 44 }}></th></tr></thead>
                 <tbody>
                   {METHODS.map(m => {
@@ -367,11 +369,11 @@ export function RateAdminScreen() {
                     </tr>
                   ))}
                 </tbody>
-              </table>
+              </table></TableScroll>
               <AddLineBox onAdd={label => addCustom("custom_method", label)} placeholder="e.g. PAUT" />
 
               <div style={{ fontSize: 11, textTransform: "uppercase", letterSpacing: ".08em", color: "var(--color-accent)", margin: "16px 0 6px" }}>Time &amp; expense</div>
-              <table className="table">
+              <TableScroll><table className="table">
                 <thead><tr><th>Item</th><th style={{ width: 92 }}>Rate</th><th style={{ width: 44 }}></th></tr></thead>
                 <tbody>
                   {["Technician — straight", "Technician — overtime", "Mileage", "Film & consumables", "Subsistence / LOA"].map(label => {
@@ -397,7 +399,7 @@ export function RateAdminScreen() {
                     </tr>
                   ))}
                 </tbody>
-              </table>
+              </table></TableScroll>
               <AddLineBox onAdd={label => addCustom("custom_expense", label)} placeholder="e.g. Drone survey" />
               </div>
 
@@ -424,7 +426,7 @@ export function RateAdminScreen() {
               <Btn variant="secondary" style={{ marginLeft: "auto", padding: "4px 12px" }}
                 onClick={() => setShowNewOverride(true)}>+ New override</Btn>
             </div>
-            <table className="table">
+            <TableScroll><table className="table">
               <thead><tr><th>Job</th><th>Scope</th><th>Basis</th><th>Bid reference</th><th style={{ width: 90 }}></th></tr></thead>
               <tbody>
                 {overrides.length === 0 && <tr><td colSpan={5} style={{ color: "color-mix(in srgb, var(--color-text) 55%, transparent)" }}>None on file.</td></tr>}
@@ -447,7 +449,7 @@ export function RateAdminScreen() {
                   </tr>
                 ))}
               </tbody>
-            </table>
+            </table></TableScroll>
             <div style={{ fontSize: 11, color: "color-mix(in srgb, var(--color-text) 55%, transparent)", marginTop: 10 }}>Overrides lock automatically once a ticket on the job is client-approved.</div>
           </Blueprint>
         </div>

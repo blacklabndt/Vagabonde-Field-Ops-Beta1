@@ -545,7 +545,9 @@ export function Toast({ message, tone = "ok", onDone, duration = 2600 }) {
 // client — the ticket totals up short with nothing anywhere reporting an
 // error, which is the worst way for a number to be wrong.
 export function nonNegative(value) {
-  const n = typeof value === "number" ? value : parseFloat(value);
+  // A comma decimal is a decimal: "1,5" is how half the world's keyboards
+  // type one and a half, and parseFloat would silently read it as 1.
+  const n = typeof value === "number" ? value : parseFloat(String(value).replace(",", "."));
   return Number.isFinite(n) && n > 0 ? n : 0;
 }
 
@@ -558,7 +560,15 @@ export function nonNegative(value) {
 // contents first, on a phone, with gloves on. Now an emptied box stays empty
 // on screen and reads as 0 to everything downstream, so the running total
 // never shows NaN mid-edit, and blur settles it back to a plain number.
-export function NumField({ value, onChange, step = 1, style, ...rest }) {
+// A text input with a decimal keypad, not type="number" — the same lesson
+// the dose dialog learned, now applied where the money is. On a phone,
+// type="number" raises the full keyboard, and hands back "" for anything
+// the browser considers half-typed or locale-wrong (a comma decimal, a
+// stray key) — so a quantity that was visibly on screen reached the total
+// as zero, with no error anywhere. Beta testing found ten of these on the
+// billing ticket alone. The keystroke filter below replaces the old
+// minus/e key blocking: nothing but digits and separators ever lands.
+export function NumField({ value, onChange, step, style, ...rest }) {
   const [text, setText] = useState(() => String(value == null ? 0 : value));
   const [editing, setEditing] = useState(false);
 
@@ -572,21 +582,17 @@ export function NumField({ value, onChange, step = 1, style, ...rest }) {
   const commit = raw => { setText(String(nonNegative(raw))); onChange(nonNegative(raw)); };
 
   return (
-    <input className="input tabular" type="number" min="0" step={step} value={text}
+    <input className="input tabular" type="text" inputMode="decimal" value={text}
       style={style}
       // Selecting the contents on focus means one tap then type, rather than
       // clear-then-type, which is what people actually do with these.
       onFocus={e => { setEditing(true); e.target.select(); }}
       onBlur={e => { setEditing(false); commit(e.target.value); }}
-      // Refused at the keyboard, so the sign never lands in the box rather
-      // than being corrected after the fact. "e" goes with it — type="number"
-      // otherwise accepts 1e-3 as scientific notation.
-      onKeyDown={e => { if (e.key === "-" || e.key === "e" || e.key === "E") e.preventDefault(); }}
       onChange={e => {
-        setText(e.target.value);
-        // Still floored on the way out, which catches a pasted "-5" and the
-        // spinner on browsers that ignore min.
-        onChange(nonNegative(e.target.value));
+        const raw = e.target.value.replace(/[^\d.,]/g, "");
+        setText(raw);
+        // Floored on the way out, which also catches a pasted "-5".
+        onChange(nonNegative(raw));
       }}
       {...rest} />
   );

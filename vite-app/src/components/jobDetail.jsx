@@ -170,7 +170,11 @@ export function JobDetailScreen({ job, currentUser, onStartJha, onOpenTicket, jo
       {/* One column: the job record leads (order: -1), then the work filed
          against it. The record used to sit in a 320px rail beside all of it,
          which pushed the whole page wider than the header. */}
-      <div style={{ display: "grid", gridTemplateColumns: "1fr", gap: 20 }}>
+      {/* minmax(0, 1fr), never bare 1fr: a 1fr track floors at its widest
+          child's min-content, so one table stretched the whole screen past
+          a phone. Zero lets the track shrink and the TableScrolls inside
+          actually scroll. */}
+      <div style={{ display: "grid", gridTemplateColumns: "minmax(0, 1fr)", gap: 20 }}>
         <div style={{ display: "flex", flexDirection: "column", gap: 20 }}>
 
           {/* Hazard assessment */}
@@ -189,7 +193,7 @@ export function JobDetailScreen({ job, currentUser, onStartJha, onOpenTicket, jo
                 on the job invited reading the panel as the current state of
                 the job rather than as a record of what was filed. The list of
                 assessments is what this panel is for. */}
-            <table className="table">
+            <TableScroll><table className="table">
               <thead><tr><th>File</th><th>Signed</th><th>Signer</th><th>Status</th><th></th></tr></thead>
               <tbody>
                 {loading && <LoadingRow cols={5} />}
@@ -227,7 +231,7 @@ export function JobDetailScreen({ job, currentUser, onStartJha, onOpenTicket, jo
                   </tr>
                 ))}
               </tbody>
-            </table>
+            </table></TableScroll>
           </Blueprint>
 
           {/* Radiographic reports */}
@@ -237,7 +241,7 @@ export function JobDetailScreen({ job, currentUser, onStartJha, onOpenTicket, jo
               <span style={{ fontSize: 12, color: "color-mix(in srgb, var(--color-text) 55%, transparent)" }}>{reports.length} on file</span>
               <Btn variant="primary" style={{ marginLeft: "auto" }} disabled={complete} onClick={() => setShowUpload(true)}>+ Upload report</Btn>
             </div>
-            <table className="table">
+            <TableScroll><table className="table">
               <thead><tr><th>File</th><th>Last numbers</th><th>Uploaded</th><th>Sent</th></tr></thead>
               <tbody>
                 {loading && <LoadingRow cols={4} />}
@@ -246,7 +250,7 @@ export function JobDetailScreen({ job, currentUser, onStartJha, onOpenTicket, jo
                   <tr key={i}><td><PdfLink file={r.file} pdfKey={r.pdfKey} bucket="reports" /></td><td>{r.welds}</td><td>{r.at}</td><td>{r.sent}</td></tr>
                 ))}
               </tbody>
-            </table>
+            </table></TableScroll>
           </Blueprint>
 
           {/* Daily billing */}

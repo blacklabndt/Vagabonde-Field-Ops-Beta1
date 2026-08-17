@@ -336,7 +336,12 @@ export function TimesheetsScreen({ currentUser }) {
                   </Btn>}
                 </div>
 
-                <div className="strip" style={{ gridTemplateColumns: `repeat(${statCount}, 1fr)` }}>
+                {/* auto-fit, not repeat(N, 1fr): a 1fr track will not shrink
+                    below its content, so six stats forced the layout to
+                    ~540px and a phone viewport stretched to match — the
+                    whole screen scrolled sideways. Wrapping to two rows on
+                    narrow screens is the correct trade. */}
+                <div className="strip" style={{ gridTemplateColumns: "repeat(auto-fit, minmax(104px, 1fr))" }}>
                   <Stat label="Reg hrs" value={hours(person.straight)} unit="h" />
                   <Stat label="OT hrs" value={hours(person.ot)} unit="h" />
                   {showSolo && <Stat label="Solo reg" value={hours(person.solo)} unit="h" />}
