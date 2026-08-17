@@ -14,6 +14,10 @@ export function JobDetailScreen({ job, currentUser, onStartJha, onOpenTicket, jo
   const [statusBusy, setStatusBusy] = useState(false);
   const [statusError, setStatusError] = useState("");
   const [closingJha, setClosingJha] = useState(null);
+  // The assessment being emailed — holds the row so the dialog can name the
+  // file it's about to send.
+  const [sendingJha, setSendingJha] = useState(null);
+  const [deletingJhaId, setDeletingJhaId] = useState(null);
   const [deleting, setDeleting] = useState(false);
   // A ticket opened to be read rather than edited. Holds the ticket id; the
   // dialog fetches its lines and crew itself.
@@ -32,6 +36,10 @@ export function JobDetailScreen({ job, currentUser, onStartJha, onOpenTicket, jo
   // client gets invoiced for, so it isn't a field decision.
   const complete = job && job.status === "Complete";
   const isAdmin = currentUser.role === "Admin";
+  // Admins and technicians — the techs who file assessments clean up their
+  // own. Matches the jhas delete policy; a helper doesn't get the button
+  // because the database would refuse them anyway.
+  const canDeleteJha = isAdmin || currentUser.role === "Technician";
 
   const toggleComplete = async () => {
     if (!complete && !confirm(`Mark ${job.id} complete? No more JHAs, reports or tickets can be added to it until it's reopened.`)) return;
@@ -56,6 +64,17 @@ export function JobDetailScreen({ job, currentUser, onStartJha, onOpenTicket, jo
   // used to re-download its whole JHA/report/ticket record after every
   // single save.
   const refreshJhas = () => Db.listJhasForJob(job.dbId).then(setJhas).catch(e => console.error("Failed to load JHAs:", e.message));
+
+  // Removing an assessment. confirm() rather than a dialog of its own: one
+  // row, named by its file, and the database re-checks who may do it.
+  const deleteJha = async j => {
+    if (!confirm(`Delete ${j.file}? The assessment and its PDF are removed for good.`)) return;
+    setDeletingJhaId(j.id);
+    setJhaRenderError(p => ({ ...p, [j.id]: "" }));
+    try { await Db.deleteJha(j.id); await refreshJhas(); }
+    catch (e) { setJhaRenderError(p => ({ ...p, [j.id]: e.message || "Couldn't delete the assessment." })); }
+    setDeletingJhaId(null);
+  };
   const refreshReports = () => Db.listReportsForJob(job.dbId).then(setReports).catch(e => console.error("Failed to load reports:", e.message));
   const refreshTickets = () => Db.listTicketsForJob(job.dbId).then(setTickets).catch(e => console.error("Failed to load tickets:", e.message));
   const refresh = async () => {
@@ -207,6 +226,11 @@ export function JobDetailScreen({ job, currentUser, onStartJha, onOpenTicket, jo
                           covers {dayMonth(localDate(j.workDate))}
                         </div>
                       )}
+                      {j.sentAt && (
+                        <div style={{ fontSize: 11, color: "color-mix(in srgb, var(--color-text) 55%, transparent)" }}>
+                          Sent {j.sentAt}{j.sentTo ? " · " + j.sentTo.split(",").join(", ") : ""}
+                        </div>
+                      )}
                     </td>
                     <td>{j.at}</td>
                     <td>{j.by}</td>
@@ -225,6 +249,14 @@ export function JobDetailScreen({ job, currentUser, onStartJha, onOpenTicket, jo
                         }}>{rendering === j.id ? "Rendering…" : "Re-render PDF"}</Btn>
                         {j.status === "Open" && !complete && (
                           <Btn variant="secondary" onClick={() => setClosingJha(j)}>Close out</Btn>
+                        )}
+                        <Btn variant="secondary" disabled={!j.pdfKey}
+                          title={j.pdfKey ? undefined : "Render the PDF first"}
+                          onClick={() => setSendingJha(j)}>Send to…</Btn>
+                        {canDeleteJha && (
+                          <Btn variant="ghost" disabled={complete || deletingJhaId === j.id}
+                            title={complete ? "Reopen the job first" : undefined}
+                            onClick={() => deleteJha(j)}>{deletingJhaId === j.id ? "Deleting…" : "Delete"}</Btn>
                         )}
                       </div>
                     </td>
@@ -431,6 +463,14 @@ export function JobDetailScreen({ job, currentUser, onStartJha, onOpenTicket, jo
         <JhaCloseOutDialog jha={closingJha} currentUser={currentUser}
           onClose={() => setClosingJha(null)}
           onDone={async () => { setClosingJha(null); await refreshJhas(); }} />
+      )}
+
+      {sendingJha && (
+        <SendJhaDialog job={job} jha={sendingJha}
+          clientContacts={forOrg("client", job.clientId)}
+          contractorContacts={forOrg("contractor", job.contractorId)}
+          onClose={() => setSendingJha(null)}
+          onSent={async () => { setSendingJha(null); await refreshJhas(); }} />
       )}
 
       {viewingTicket && (
@@ -876,6 +916,119 @@ function JhaCloseOutDialog({ jha, currentUser, onClose, onDone }) {
           </div>
         </div>
       ))}
+    </Dialog>
+  );
+}
+
+// Emails an assessment to whoever needs it on file. Recipients are picked
+// off the job's own client and contractor people — searchable, since a big
+// outfit keeps a long directory — plus a typed address for anyone not on
+// file. The send itself happens in the send-jha function, which re-checks
+// the caller's session and stamps sent_at/sent_to on the row.
+function SendJhaDialog({ job, jha, clientContacts, contractorContacts, onClose, onSent }) {
+  const [picked, setPicked] = useState([]);
+  const [custom, setCustom] = useState("");
+  const [message, setMessage] = useState("Attached: the signed hazard assessment for the work noted below. Let us know if you have questions.");
+  const [error, setError] = useState("");
+  const [sending, setSending] = useState(false);
+  const muted = "color-mix(in srgb, var(--color-text) 55%, transparent)";
+
+  // Picking someone without an email is answered out loud rather than by a
+  // chip that silently can't be sent to.
+  const addPick = c => {
+    const email = (c.email || "").trim();
+    if (!email) {
+      setError(`${c.name} has no email on file — add one on the Contacts screen, or type the address below.`);
+      return;
+    }
+    setError("");
+    setPicked(p => p.some(x => x.email.toLowerCase() === email.toLowerCase())
+      ? p : [...p, { key: c.org_type + ":" + c.id, name: c.name, email }]);
+  };
+
+  // A local filter, not a server search — the directory for one job's client
+  // and contractor is already in hand.
+  const searchIn = list => text => {
+    const q = text.trim().toLowerCase();
+    return list.filter(c => !q || [c.name, c.title, c.email].some(v => (v || "").toLowerCase().includes(q)));
+  };
+  const renderContact = c => (
+    <>
+      <div style={{ fontSize: 15 }}>{c.name}{c.title ? " · " + c.title : ""}{c.is_primary ? " (primary)" : ""}</div>
+      <div style={{ fontSize: 11, color: c.email ? muted : "var(--color-accent-700)" }}>{c.email || "No email on file"}</div>
+    </>
+  );
+
+  const send = async () => {
+    // The custom field takes "name@co.com" or a pasted "Joe <name@co.com>" —
+    // whatever part looks like an address is what gets used.
+    const extra = emailIn(custom);
+    if (custom.trim() && !extra) { setError(`"${custom.trim()}" doesn't look like an email address.`); return; }
+    const to = [...picked.map(p => p.email), ...(extra ? [extra] : [])];
+    if (!to.length) { setError("Pick at least one contact, or type an address."); return; }
+    setSending(true);
+    setError("");
+    try {
+      await Db.sendJhaEmail({ jhaId: jha.id, to: to.join(", "), cc: "", message: message.trim() });
+      onSent();
+    } catch (e) {
+      setSending(false);
+      setError(e.message || "Couldn't send the assessment.");
+    }
+  };
+
+  return (
+    <Dialog title="Send assessment" maxWidth={540} onClose={onClose}
+      actions={<>
+        <Btn variant="secondary" onClick={onClose} disabled={sending}>Cancel</Btn>
+        <Btn variant="primary" onClick={send} disabled={sending}>{sending ? "Sending…" : "Send"}</Btn>
+      </>}>
+      <ErrorBox>{error}</ErrorBox>
+      <div style={{ fontSize: 13 }}>
+        <PdfGlyph /> {jha.file}
+        <span style={{ color: muted }}> — {job.id} · {job.project}</span>
+      </div>
+
+      {picked.length > 0 && (
+        <div style={{ display: "flex", flexWrap: "wrap", gap: 6 }}>
+          {picked.map(p => (
+            <TagX key={p.key} variant="accent">
+              {p.name} · {p.email}
+              <button type="button" aria-label={`Remove ${p.name}`}
+                onClick={() => setPicked(list => list.filter(x => x.key !== p.key))}
+                style={{ background: "none", border: 0, cursor: "pointer", color: "inherit", font: "inherit", padding: "0 0 0 6px" }}>
+                ×
+              </button>
+            </TagX>
+          ))}
+        </div>
+      )}
+
+      <Field label={`Client contacts${job.client ? " — " + job.client : ""}`}>
+        {clientContacts.length ? (
+          <SearchSelect style={{ maxWidth: "none" }} listId="send-jha-client-list"
+            ariaLabel="Search client contacts" placeholder="Search by name, title or email…"
+            search={searchIn(clientContacts)} optionKey={c => c.id}
+            onPick={addPick} renderOption={renderContact} />
+        ) : (
+          <div style={{ fontSize: 12, color: muted }}>No client contacts on file for this job.</div>
+        )}
+      </Field>
+      <Field label={`Contractor contacts${job.contractor ? " — " + job.contractor : ""}`}>
+        {contractorContacts.length ? (
+          <SearchSelect style={{ maxWidth: "none" }} listId="send-jha-contractor-list"
+            ariaLabel="Search contractor contacts" placeholder="Search by name, title or email…"
+            search={searchIn(contractorContacts)} optionKey={c => c.id}
+            onPick={addPick} renderOption={renderContact} />
+        ) : (
+          <div style={{ fontSize: 12, color: muted }}>No contractor contacts on file for this job.</div>
+        )}
+      </Field>
+      <Field label="Someone else">
+        <input className="input" type="email" value={custom} placeholder="name@company.com"
+          onChange={e => { setError(""); setCustom(e.target.value); }} />
+      </Field>
+      <Field label="Message"><textarea className="input" value={message} onChange={e => setMessage(e.target.value)} /></Field>
     </Dialog>
   );
 }

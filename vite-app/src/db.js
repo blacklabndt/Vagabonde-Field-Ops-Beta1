@@ -206,7 +206,9 @@ function shapeJha(j) {
     closedAt: stamp(j.closed_at),
     file: j.pdf_key ? j.pdf_key.split("/").pop() : (j.template ? j.template.replace(/s+/g, "-") + ".pdf" : "jha.pdf"),
     at: stamp(j.signed_at),
-    by: j.profiles ? j.profiles.name : ""
+    by: j.profiles ? j.profiles.name : "",
+    sentAt: stamp(j.sent_at),
+    sentTo: j.sent_to || ""
   };
 }
 // `hazards` is deliberately not selected. Job detail used to summarise the
@@ -214,7 +216,7 @@ function shapeJha(j) {
 // was the only reader — a jsonb array of a dozen objects per JHA, carried
 // over field data and written into the offline cache for nothing. The PDF
 // renderer reads the column itself, server-side, from the row.
-const JHA_COLUMNS = "id, job_id, template, pdf_key, signed_at, work_date, status, closed_at, dosimetry, details, unit_number, site_rep, profiles(name)";
+const JHA_COLUMNS = "id, job_id, template, pdf_key, signed_at, work_date, status, closed_at, dosimetry, details, unit_number, site_rep, sent_at, sent_to, profiles(name)";
 
 function shapeReport(r) {
   return {
@@ -928,6 +930,45 @@ export const Db = {
     const { data, error } = await sbClient.functions.invoke("render-jha", { body: { jhaId } });
     if (error) throw new Error(await readFnError(error));
     return data;
+  },
+
+  // Emails the assessment's PDF. Unlike a report — which is stored first and
+  // emailed second, so it can sit as Pending and be resent — a JHA already
+  // exists by the time anyone sends it, so this is only the send. The
+  // function stamps sent_at/sent_to on success.
+  async sendJhaEmail({ jhaId, to, cc, message }) {
+    const { data, error } = await sbClient.functions.invoke("send-jha", {
+      body: { jhaId, to, cc, message }
+    });
+    if (error) throw new Error(await readFnError(error));
+    if (data && data.error) throw new Error(data.error);
+    return data;
+  },
+
+  // Removes an assessment and its stored PDF. Admin or Technician — the RLS
+  // policy is the enforcement; this reports the refusal rather than letting
+  // a delete that touched nothing pass as success.
+  async deleteJha(jhaId) {
+    const { data: rows, error: readErr } = await sbClient
+      .from("jhas").select("pdf_key").eq("id", jhaId);
+    if (readErr) throw readErr;
+    const pdfKey = rows && rows[0] ? rows[0].pdf_key : null;
+
+    const { data: gone, error } = await sbClient
+      .from("jhas").delete().eq("id", jhaId).select("id");
+    if (error) throw error;
+    // A delete no policy allows is not an error: it reports success having
+    // removed nothing. Ask for the rows back and treat silence as a refusal.
+    if (!gone || !gone.length) {
+      throw new Error("That assessment wasn't deleted — deleting a hazard assessment takes an Admin or Technician account.");
+    }
+    // The PDF goes with the row, best effort: an orphaned object in a private
+    // bucket is untidy, not wrong, and must not resurrect the delete's error
+    // state after the record is already gone.
+    if (pdfKey) {
+      try { await sbClient.storage.from("jhas").remove([pdfKey]); }
+      catch (e) { console.warn("JHA deleted, but its PDF wasn't removed:", e.message); }
+    }
   },
 
   // ── Equipment ────────────────────────────────────────────────────────
@@ -2117,6 +2158,8 @@ const SAVE_MESSAGES = {
   // Hazard assessments
   createJha: "JHA filed",
   closeOutJha: "JHA closed out",
+  sendJhaEmail: "Assessment sent",
+  deleteJha: "Assessment deleted",
 
   // Reports and files
   uploadReport: "Report uploaded",
