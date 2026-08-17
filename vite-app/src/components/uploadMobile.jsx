@@ -17,21 +17,28 @@ export function UploadMobileScreen({ job, jobRecord, currentUser, onSent }) {
     // change event and looks like the app ignored the second tap.
     e.target.value = "";
     if (!f) return;
-    setItems(p => [...p, { file: f, welds: [], state: "Queued" }]);
+    // A stable key per attachment, not the array index: everything below —
+    // the row, its weld chips, its half-typed draft — is keyed by it, so
+    // removing one file can't shift another file's state onto the wrong row.
+    const key = crypto.randomUUID ? crypto.randomUUID() : String(Date.now()) + Math.random();
+    setItems(p => [...p, { key, file: f, welds: [], state: "Queued" }]);
   };
   // Typed inline rather than through prompt(): a native prompt is a no-op in
   // some embedded preview hosts (it returns immediately with no dialog), and
   // on a phone it hides the file it is asking about behind a system sheet.
   const [weldDraft, setWeldDraft] = useState({});
-  const addWeld = idx => {
-    const w = (weldDraft[idx] || "").trim();
+  const addWeld = key => {
+    const w = (weldDraft[key] || "").trim();
     if (!w) return;
-    setItems(p => p.map((it, i) => i === idx ? { ...it, welds: [...it.welds, w] } : it));
-    setWeldDraft(p => ({ ...p, [idx]: "" }));
+    setItems(p => p.map(it => it.key === key ? { ...it, welds: [...it.welds, w] } : it));
+    setWeldDraft(p => ({ ...p, [key]: "" }));
   };
-  const removeWeld = (idx, weld) =>
-    setItems(p => p.map((it, i) => i === idx ? { ...it, welds: it.welds.filter(w => w !== weld) } : it));
-  const removeItem = idx => setItems(p => p.filter((_, i) => i !== idx));
+  const removeWeld = (key, weld) =>
+    setItems(p => p.map(it => it.key === key ? { ...it, welds: it.welds.filter(w => w !== weld) } : it));
+  const removeItem = key => {
+    setItems(p => p.filter(it => it.key !== key));
+    setWeldDraft(p => { const next = { ...p }; delete next[key]; return next; });
+  };
 
   const recipient = emailIn(jobRecord.contractorRep);
 
@@ -102,8 +109,8 @@ export function UploadMobileScreen({ job, jobRecord, currentUser, onSent }) {
           </div>
 
           <div style={{ display: "flex", flexDirection: "column", gap: 10 }}>
-            {items.map((it, idx) => (
-              <div key={idx} className="blueprint" style={{ padding: 10, position: "relative" }}>
+            {items.map(it => (
+              <div key={it.key} className="blueprint" style={{ padding: 10, position: "relative" }}>
                 <i className="corner tl" /><i className="corner tr" /><i className="corner bl" /><i className="corner br" />
                 <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
                   <span className="pdf-glyph" style={{ width: 20, height: 26 }}>PDF</span>
@@ -113,21 +120,21 @@ export function UploadMobileScreen({ job, jobRecord, currentUser, onSent }) {
                   </div>
                   <TagX variant="neutral">{it.state}</TagX>
                   <button type="button" className="row-x" aria-label={`Remove ${it.file.name}`}
-                    onClick={() => removeItem(idx)}>×</button>
+                    onClick={() => removeItem(it.key)}>×</button>
                 </div>
                 <div style={{ display: "flex", flexWrap: "wrap", gap: 6, marginTop: 8, alignItems: "center" }}>
                   {it.welds.map(w => (
                     <button key={w} type="button" className="tag tag-neutral"
                       title={`Remove ${w}`} aria-label={`Remove weld ${w}`}
                       style={{ cursor: "pointer", background: "none" }}
-                      onClick={() => removeWeld(idx, w)}>{w} ×</button>
+                      onClick={() => removeWeld(it.key, w)}>{w} ×</button>
                   ))}
-                  <input className="input" value={weldDraft[idx] || ""} placeholder="+ weld"
+                  <input className="input" value={weldDraft[it.key] || ""} placeholder="+ weld"
                     aria-label={`Add a weld ID to ${it.file.name}`}
                     style={{ width: 110, minHeight: 34, fontSize: 12 }}
-                    onChange={e => setWeldDraft(p => ({ ...p, [idx]: e.target.value }))}
-                    onKeyDown={e => { if (e.key === "Enter") { e.preventDefault(); addWeld(idx); } }}
-                    onBlur={() => addWeld(idx)} />
+                    onChange={e => setWeldDraft(p => ({ ...p, [it.key]: e.target.value }))}
+                    onKeyDown={e => { if (e.key === "Enter") { e.preventDefault(); addWeld(it.key); } }}
+                    onBlur={() => addWeld(it.key)} />
                 </div>
               </div>
             ))}

@@ -284,14 +284,17 @@ export function JhaBuilderScreen({ job, jobRecord, contacts, currentUser, onSubm
           <Field label="Exposure device (R.E.D.) serial"><input className="input" value={equip.redSerial} placeholder="Delta 880" onChange={e => setEquip(p => ({ ...p, redSerial: e.target.value }))} /></Field>
           <Field label="Device surface survey (mR/h)">
             {/* Kept as a string, not a number, so an unfilled box stays blank
-                rather than reading as a surveyed 0.0 mR/h. A dose rate can't
-                be negative, so the sign is refused at the keyboard and any
-                pasted one is dropped. */}
-            <input className="input" type="number" inputMode="decimal" min="0" value={equip.redSurveyMr}
-              onKeyDown={e => { if (e.key === "-" || e.key === "e" || e.key === "E") e.preventDefault(); }}
-              onChange={e => setEquip(p => ({ ...p, redSurveyMr: e.target.value.replace(/-/g, "") }))} />
+                rather than reading as a surveyed 0.0 mR/h. A text input with a
+                decimal keypad, not type="number" — the same lesson as the dose
+                dialog and NumField: on a phone, a number input hands back ""
+                for anything the browser considers half-typed or locale-wrong
+                (a comma decimal, a stray key), so a reading that was visibly
+                on screen arrived here empty. The filter only ever admits
+                digits and separators, which also covers a pasted minus. */}
+            <input className="input" type="text" inputMode="decimal" value={equip.redSurveyMr}
+              onChange={e => setEquip(p => ({ ...p, redSurveyMr: e.target.value.replace(/[^\d.,]/g, "") }))} />
           </Field>
-          {Number(equip.redSurveyMr) > 200 && (
+          {Number(String(equip.redSurveyMr).replace(",", ".")) > 200 && (
             <div style={{ fontSize: 12, color: "var(--color-accent-700)" }}>
               Over the 200 mR/h surface limit — the device must not be used until this is resolved.
             </div>

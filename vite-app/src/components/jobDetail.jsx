@@ -1031,10 +1031,13 @@ function SendPdfDialog({ title, file, job, clientContacts, contractorContacts, d
   };
 
   // A local filter, not a server search — the directory for one job's client
-  // and contractor is already in hand.
-  const searchIn = list => text => {
+  // and contractor is already in hand. Sliced to the dropdown's cap with the
+  // true total, so a long directory says "keep typing to narrow it down"
+  // instead of rendering every match.
+  const searchIn = list => (text, max) => {
     const q = text.trim().toLowerCase();
-    return list.filter(c => !q || [c.name, c.title, c.email].some(v => (v || "").toLowerCase().includes(q)));
+    const rows = list.filter(c => !q || [c.name, c.title, c.email].some(v => (v || "").toLowerCase().includes(q)));
+    return { rows: rows.slice(0, max), total: rows.length };
   };
   const renderContact = c => (
     <>

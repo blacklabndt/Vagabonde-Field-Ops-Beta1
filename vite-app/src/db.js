@@ -957,7 +957,11 @@ export const Db = {
     const { data: rows, error: readErr } = await sbClient
       .from("jhas").select("pdf_key").eq("id", jhaId);
     if (readErr) throw readErr;
-    const pdfKey = rows && rows[0] ? rows[0].pdf_key : null;
+    // Already gone — deleted from another device, or a double-tap. The goal
+    // state is reached; without this, the zero-row delete below would blame
+    // the person's permissions for a row that simply no longer exists.
+    if (!rows || !rows.length) return;
+    const pdfKey = rows[0].pdf_key;
 
     const { data: gone, error } = await sbClient
       .from("jhas").delete().eq("id", jhaId).select("id");
@@ -1099,7 +1103,9 @@ export const Db = {
     const { data: rows, error: readErr } = await sbClient
       .from("reports").select("pdf_key").eq("id", reportId);
     if (readErr) throw readErr;
-    const pdfKey = rows && rows[0] ? rows[0].pdf_key : null;
+    // Already gone — same idempotence as deleteJha, for the same reason.
+    if (!rows || !rows.length) return;
+    const pdfKey = rows[0].pdf_key;
 
     const { data: gone, error } = await sbClient
       .from("reports").delete().eq("id", reportId).select("id");
@@ -1735,15 +1741,26 @@ export const Db = {
     if (row.status === "Approved" || row.status === "Invoiced") {
       throw new Error(`Ticket ${ticketId} is ${row.status.toLowerCase()} — it can't be cancelled. Raise a credit or a corrected ticket instead.`);
     }
-    // Crew rows cascade, but delete them explicitly first: if the cascade was
-    // ever dropped from the schema, orphaned hours would keep showing on a
-    // timesheet with no ticket to explain them.
-    const { error: cErr } = await sbClient.from("ticket_crew").delete().eq("ticket_id", ticketId);
-    if (cErr) throw cErr;
-    const { error: lErr } = await sbClient.from("ticket_lines").delete().eq("ticket_id", ticketId);
-    if (lErr) throw lErr;
-    const { error } = await sbClient.from("tickets").delete().eq("id", ticketId);
+    // The row itself goes first, and it is the guarded step. The old order —
+    // crew, then lines, then the row — had a real failure mode: a client
+    // approving in the seconds between the status read above and the delete
+    // meant RLS refused the row (approved_at set) but the crew and lines were
+    // already destroyed, leaving an approved ticket gutted and a "cancelled"
+    // toast on screen. Row-first can't do that: the children cascade with it,
+    // and in a schema that ever lost the cascade the parent delete would
+    // refuse on the foreign keys before touching anything.
+    //
+    // A delete no policy allows reports success having removed nothing, so
+    // ask for the row back and treat silence as the refusal it is.
+    const { data: gone, error } = await sbClient.from("tickets").delete().eq("id", ticketId).select("id");
     if (error) throw error;
+    if (!gone || !gone.length) {
+      throw new Error(`Ticket ${ticketId} wasn't cancelled — the client may have just approved it. Reload to see where it stands.`);
+    }
+    // Cascade has taken the crew and lines with the row; these are the
+    // belt-and-braces sweep and expect to find nothing.
+    await sbClient.from("ticket_crew").delete().eq("ticket_id", ticketId).then(() => {}, () => {});
+    await sbClient.from("ticket_lines").delete().eq("ticket_id", ticketId).then(() => {}, () => {});
   },
 
   // The last ticket raised on this job, with its lines and crew — what "start
