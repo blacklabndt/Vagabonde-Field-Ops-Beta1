@@ -1,4 +1,4 @@
-// ─────────────────────────────────────────────────────────────────────────
+﻿// ─────────────────────────────────────────────────────────────────────────
 // Shared constants and pure helpers: money and date formatting, ticket
 // numbering, pay periods, the tab and role tables, and the standing hazard
 // and rate-card lists every screen builds from.
@@ -211,6 +211,23 @@ export const GST_RATE = 0.05;
 // Mirrored in supabase/functions/_shared/invoice.ts. The two must agree to
 // the cent or the app and the client's copy quote different totals.
 export const gstOn = subtotal => Math.round(Math.round(subtotal * 100) * GST_RATE) / 100;
+
+// Storage object keys are stricter than filenames: the API refuses
+// non-ASCII outright ("Invalid key"), % breaks the request before it
+// leaves, and # or ? silently truncate the key at what a URL considers
+// the end of a path. Found in beta testing with a phone-style filename.
+// Accents fold to their plain letters so "Réport.pdf" stays readable as
+// "Report.pdf"; everything else the key can't carry becomes a dash. The
+// original name is still shown everywhere — only the key is boring.
+export const storageKeySafe = (name, fallback = "file") => {
+  const cleaned = String(name || "")
+    .normalize("NFKD").replace(/[\u0300-\u036f]/g, "")
+    .replace(/[^A-Za-z0-9._-]+/g, "-")
+    .replace(/-{2,}/g, "-")
+    .replace(/^[-.]+|[-.]+$/g, "")
+    .slice(0, 100);
+  return cleaned || fallback;
+};
 
 // Reads the film and MPI numbering off an interpreted report's text and
 // answers the Upload dialog's "Last numbers" field in its own format:

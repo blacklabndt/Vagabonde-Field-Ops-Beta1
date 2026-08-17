@@ -1,6 +1,6 @@
 import { createClient } from "@supabase/supabase-js";
 import { sbClient, SUPABASE_URL, SUPABASE_ANON_KEY } from "./config.js";
-import { todayLocal, localDate, dayMonth, ticketDateStamp, primaryContact, ageInDays, SIZE_LABELS, METHODS, STANDARD_RATE_LINES, EXPENSE_LABELS } from "./data.js";
+import { todayLocal, localDate, dayMonth, ticketDateStamp, primaryContact, ageInDays, storageKeySafe, SIZE_LABELS, METHODS, STANDARD_RATE_LINES, EXPENSE_LABELS } from "./data.js";
 import { OfflineCache } from "./offlineCache.js";
 import { Toasts } from "./toastBus.js";
 import { OfflineQueue, isNetworkError } from "./offlineQueue.js";
@@ -1006,9 +1006,18 @@ export const Db = {
     await this.assertJobOpen(jobDbId);
     let pdfKey = null;
     if (file) {
-      const path = `${jobNumber}/${Date.now()}-${file.name}`;
+      // The key is sanitised, the display name is not: storage refuses
+      // non-ASCII keys and mangles # ? % — a phone-named "Réport 📷.pdf"
+      // failed outright in beta testing. The reports row below keeps the
+      // original name for every screen that shows it.
+      const path = `${storageKeySafe(jobNumber, "job")}/${Date.now()}-${storageKeySafe(file.name, "report.pdf")}`;
       const { error: upErr } = await sbClient.storage.from("reports").upload(path, file);
-      if (upErr) throw upErr;
+      if (upErr) {
+        if (/row-level security/i.test(upErr.message || "")) {
+          throw new Error("Your account doesn't have the Report upload or Job detail tab, so the file can't be stored — an admin can grant access in Users & access.");
+        }
+        throw upErr;
+      }
       pdfKey = path;
     }
     const { data, error } = await sbClient.from("reports").insert({
@@ -1239,8 +1248,10 @@ export const Db = {
   },
 
   async createFolder(prefix, name) {
-    const clean = name.trim().replace(/[/\\]/g, "-");
-    if (!clean) throw new Error("Give the folder a name.");
+    // Folder names live inside storage keys, which refuse what filenames
+    // allow — same sanitiser as report uploads, same reason.
+    const clean = storageKeySafe(name.trim(), "");
+    if (!clean) throw new Error("Give the folder a name — letters and numbers, mostly.");
     const path = (prefix ? `${prefix}/` : "") + clean + "/" + FOLDER_MARKER;
     const { error } = await sbClient.storage
       .from("shared").upload(path, new Blob([""]), { upsert: true });
@@ -1249,7 +1260,7 @@ export const Db = {
   },
 
   async uploadSharedFile(prefix, file) {
-    const path = (prefix ? `${prefix}/` : "") + file.name;
+    const path = (prefix ? `${prefix}/` : "") + storageKeySafe(file.name, "file");
     const { error } = await sbClient.storage
       .from("shared").upload(path, file, { upsert: false });
     if (error) {
