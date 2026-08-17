@@ -574,13 +574,17 @@ function NewJobDialog({ currentUser, clients, contractors, contacts, onClose, on
         <Btn variant="primary" onClick={submit} disabled={saving}>{saving ? "Creating…" : "Create job"}</Btn>
       </>}>
       <ErrorBox>{error}</ErrorBox>
+      {/* The caps are generous — the longest real project name on file is
+          under forty characters — and exist because beta testing saved a
+          ten-thousand-character one, which the database accepted happily
+          and every table and invoice then had to wear. */}
       <Field label="Project name" missing={miss.is("project")}>
-        <input {...miss.props("project")} value={form.project} onChange={e => set("project", e.target.value)} />
+        <input {...miss.props("project")} maxLength={140} value={form.project} onChange={e => set("project", e.target.value)} />
       </Field>
       {/* Flagged either because submit found it empty, or because the live
           check found the number already on a job. */}
       <Field label="Job #" missing={miss.is("jobNumber") || numberTaken}>
-        <input value={form.jobNumber} placeholder={placeholderNum}
+        <input value={form.jobNumber} placeholder={placeholderNum} maxLength={40}
           className={`input${miss.is("jobNumber") || numberTaken ? " invalid" : ""}`}
           aria-invalid={miss.is("jobNumber") || numberTaken || undefined}
           onChange={e => set("jobNumber", e.target.value)} />
@@ -602,7 +606,7 @@ function NewJobDialog({ currentUser, clients, contractors, contacts, onClose, on
         {addingClient && (
           <div style={{ display: "flex", gap: 6, marginTop: 6 }}>
             <input className="input" style={{ flex: 1 }} autoFocus value={newClientName}
-              placeholder="New client name"
+              maxLength={120} placeholder="New client name"
               onChange={e => setNewClientName(e.target.value)}
               onKeyDown={e => { if (e.key === "Enter") addClient(); }} />
             <Btn variant="primary" onClick={addClient} disabled={addingBusy}>{addingBusy ? "Adding…" : "Add"}</Btn>
@@ -615,7 +619,7 @@ function NewJobDialog({ currentUser, clients, contractors, contacts, onClose, on
         )}
       </Field>
       <Field label="Site · LSD" missing={miss.is("lsd")}>
-        <input {...miss.props("lsd")} value={form.lsd} onChange={e => set("lsd", e.target.value)} placeholder="13-22-047-05 W5M" />
+        <input {...miss.props("lsd")} maxLength={80} value={form.lsd} onChange={e => set("lsd", e.target.value)} placeholder="13-22-047-05 W5M" />
       </Field>
       <Field label="Created by"><input className="input" value={currentUser.name} disabled /></Field>
 

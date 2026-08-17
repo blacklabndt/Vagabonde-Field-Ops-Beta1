@@ -102,6 +102,27 @@ const cleanLine = l => ({
 });
 const totalOf = lines => lines.reduce((s, l) => s + l.quantity * l.unit_rate, 0);
 
+// tickets.total is numeric(10,2): eight digits before the point. Found in
+// beta testing by billing a nine-figure ticket — the database refused it
+// with "numeric field overflow", which is not a sentence a technician can
+// act on, and the two-step write left debris behind. Checked here, before
+// anything is written.
+const MAX_TICKET_TOTAL = 99999999.99;
+const assertBillable = total => {
+  if (total > MAX_TICKET_TOTAL) {
+    throw new Error(
+      `This ticket adds up to $${total.toLocaleString("en-CA")}, which cannot be right — check the quantities and rates against what was actually worked.`
+    );
+  }
+};
+
+// The same database refusal, translated, for anything that slips past the
+// client-side check (a stale tab, a hand-crafted request).
+const friendlyLineError = e =>
+  e && e.code === "22003"
+    ? new Error("A figure on this ticket is too large to bill — check the quantities and rates.")
+    : e;
+
 // 23505 is a unique violation; the constraint name tells us which one. Jobs
 // have two unique columns (the id and the number), and only the number is
 // something a person chose.
@@ -1558,6 +1579,7 @@ export const Db = {
     await this.assertJobOpen(jobDbId);
     lines = lines.map(cleanLine);
     const total = totalOf(lines);
+    assertBillable(total);
 
     let id = null;
     for (let attempt = 0; ; attempt++) {
@@ -1586,7 +1608,14 @@ export const Db = {
       const { error: lErr } = await sbClient.from("ticket_lines").insert(
         lines.map(l => ({ ticket_id: id, ...l }))
       );
-      if (lErr) throw lErr;
+      if (lErr) {
+        // The ticket row is already in — a failure here would strand an
+        // empty draft nobody asked for. It has no lines and was never sent,
+        // so deleting it is safe; if even the delete fails, the empty draft
+        // is the honest leftover state and the error still surfaces.
+        await sbClient.from("tickets").delete().eq("id", id).then(() => {}, () => {});
+        throw friendlyLineError(lErr);
+      }
     }
     return { id, total };
   },
@@ -1667,6 +1696,7 @@ export const Db = {
     }
     lines = lines.map(cleanLine);
     const total = totalOf(lines);
+    assertBillable(total);
     // No total in the patch. The old lines are still in place at this point,
     // so writing the new sum here would leave the row disagreeing with them
     // until the replacement below lands — which is the window the constraint
@@ -1679,13 +1709,31 @@ export const Db = {
     const { error: uErr } = await sbClient.from("tickets").update(patch).eq("id", ticketId);
     if (uErr) throw uErr;
 
+    // Replacing the lines is delete-then-insert, and the gap between the two
+    // is where a dropped connection or a refused insert used to destroy a
+    // ticket's existing billing — found in beta testing, when an overflow on
+    // the insert left the ticket empty at $0. The old lines are held here
+    // and put back if the replacement fails; the edit fails, the money
+    // doesn't vanish.
+    const { data: oldLines, error: oErr } = await sbClient
+      .from("ticket_lines").select("kind, label, unit, quantity, unit_rate")
+      .eq("ticket_id", ticketId);
+    if (oErr) throw oErr;
+
     const { error: dErr } = await sbClient.from("ticket_lines").delete().eq("ticket_id", ticketId);
     if (dErr) throw dErr;
     if (lines.length) {
       const { error: lErr } = await sbClient.from("ticket_lines").insert(
         lines.map(l => ({ ticket_id: ticketId, ...l }))
       );
-      if (lErr) throw lErr;
+      if (lErr) {
+        if (oldLines && oldLines.length) {
+          await sbClient.from("ticket_lines")
+            .insert(oldLines.map(l => ({ ticket_id: ticketId, ...l })))
+            .then(() => {}, () => {});
+        }
+        throw friendlyLineError(lErr);
+      }
     }
     return { id: ticketId, total };
   },
