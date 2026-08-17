@@ -33,7 +33,6 @@ const UsersAccessScreen = lazy(() => import("./components/usersAccess.jsx").then
 // downloads a game they have not gone looking for — the first lives behind
 // the drawer-footer name, the second behind the top-bar one.
 const Flappy880 = lazy(() => import("./components/flappy880.jsx").then(m => ({ default: m.Flappy880 })));
-const SuperHelper = lazy(() => import("./components/superHelper.jsx").then(m => ({ default: m.SuperHelper })));
 
 const ScreenFallback = () => (
   <div className="page"><Loading /></div>
@@ -92,7 +91,6 @@ export function App() {
   const [queued, setQueued] = useState([]);
   const [showQueue, setShowQueue] = useState(false);
   const [egg, setEgg] = useState(false);
-  const [egg2, setEgg2] = useState(false);
   // Every save in the app arrives here, from db.js by way of the toast bus.
   const [toast, setToast] = useState(null);
   useEffect(() => Toasts.subscribe(setToast), []);
@@ -477,12 +475,7 @@ export function App() {
             hidden at that width — so having it in both was a second button
             for the same job on exactly one screen size. */}
         <div className="topbar-who" style={{ fontSize: 13, display: "flex", alignItems: "center", marginLeft: "auto" }}>
-          {/* The other double-click. Same reasoning as the drawer footer:
-              nothing announces it, and nobody double-clicks a label on the
-              way to anything. Hidden on phones with the rest of the bar. */}
-          <span onDoubleClick={() => setEgg2(true)} style={{ userSelect: "none" }}>
-            {currentUser.name}
-          </span>
+          <span>{currentUser.name}</span>
         </div>
       </header>
 
@@ -527,13 +520,6 @@ export function App() {
         <EggBoundary onBroken={() => setEgg(false)}>
           <Suspense fallback={null}>
             <Flappy880 onClose={() => setEgg(false)} me={currentUser} />
-          </Suspense>
-        </EggBoundary>
-      )}
-      {egg2 && (
-        <EggBoundary onBroken={() => setEgg2(false)}>
-          <Suspense fallback={null}>
-            <SuperHelper onClose={() => setEgg2(false)} me={currentUser} />
           </Suspense>
         </EggBoundary>
       )}
