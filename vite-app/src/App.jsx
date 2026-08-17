@@ -1,6 +1,6 @@
 import React, { useState, useEffect, useMemo, useRef, Suspense, lazy } from "react";
 import { sbClient } from "./config.js";
-import { TABS, EMPTY_JOB_RECORD, Store } from "./data.js";
+import { TABS, CONTEXT_TABS, EMPTY_JOB_RECORD, Store } from "./data.js";
 import { Db } from "./db.js";
 import { tabList, Blueprint, Btn, ErrorBox, ErrorBoundary, TagX, Toast, Loading } from "./components/common.jsx";
 import { Toasts } from "./toastBus.js";
@@ -270,11 +270,13 @@ export function App() {
     );
   }
   if (!currentUser) {
-    return <SignInScreen onSignIn={u => { setCurrentUser(u); setScreen(tabList(u.tabs)[0] || "board"); }} />;
+    return <SignInScreen onSignIn={u => { setCurrentUser(u); setScreen(tabList(u.tabs).filter(t => !CONTEXT_TABS.includes(t))[0] || "board"); }} />;
   }
 
   const myTabs = tabList(currentUser.tabs);
-  const allowedTabs = TABS.filter(t => myTabs.includes(t.key));
+  // The drawer never lists the contextual screens, whatever the account may
+  // access — see CONTEXT_TABS. They are reached from a job, deliberately.
+  const allowedTabs = TABS.filter(t => myTabs.includes(t.key) && !CONTEXT_TABS.includes(t.key));
   const goto = key => { if (myTabs.includes(key)) { if (key === "ticket") setActiveTicket(null); setContextScreen(""); setScreen(key); setMenuOpen(false); } };
   // Reached from a button inside another screen (a job card, "Start JHA",
   // "New ticket") rather than the tab menu — always allowed, even when the

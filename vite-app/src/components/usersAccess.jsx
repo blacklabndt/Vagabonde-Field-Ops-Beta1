@@ -1,5 +1,5 @@
 import React, { useState, useEffect } from "react";
-import { TABS, ROLE_PRESETS, TECH_LEVELS } from "../data.js";
+import { TABS, CONTEXT_TABS, ROLE_PRESETS, TECH_LEVELS } from "../data.js";
 import { Db } from "../db.js";
 import { UNIVERSAL_TABS, tabList, Blueprint, Btn, CheckBox, PickerRow, TagX, Field, Dialog, ErrorBox, Switch, emailIn, useMissingFields , Loading } from "./common.jsx";
 
@@ -104,9 +104,14 @@ export function UsersAccessScreen({ currentUser }) {
 
               <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 24 }} className="grid-2col">
                 <div>
-                  <div style={{ fontSize: 11, textTransform: "uppercase", letterSpacing: ".08em", color: "var(--color-accent)", marginBottom: 8 }}>Sections shown</div>
+                  <div style={{ fontSize: 11, textTransform: "uppercase", letterSpacing: ".08em", color: "var(--color-accent)", marginBottom: 8 }}>Access</div>
                   <div style={{ fontSize: 12, color: "color-mix(in srgb, var(--color-text) 60%, transparent)", marginBottom: 10 }}>
-                    Unticking a section takes it out of their menu. It isn't a lock: nothing they've already filed is affected, and ticking it back puts it straight back.
+                    Most sections appear in the menu when ticked. The ones marked
+                    “from a job” never sit in anyone's menu — they open from a
+                    job's own page — but the tick still decides whether this
+                    account may use them, including uploading the files they
+                    produce. Unticking is not a lock on past work: nothing
+                    already filed is affected, and ticking it back restores it.
                   </div>
                   {TABS.map(t => {
                     const allowed = tabList(account.tab_access).includes(t.key);
@@ -115,12 +120,19 @@ export function UsersAccessScreen({ currentUser }) {
                     // shown ticked and disabled rather than pretending to be a
                     // switch that does nothing.
                     const universal = UNIVERSAL_TABS.includes(t.key);
+                    // Contextual screens are permission-only: hidden from every
+                    // menu by design after two admins hid them by unticking —
+                    // which also, invisibly, revoked their upload rights.
+                    const contextual = CONTEXT_TABS.includes(t.key);
                     return (
                       <div key={t.key} style={{ display: "flex", alignItems: "center", gap: 10, padding: "6px 0", opacity: lockedSelf || universal ? 0.55 : 1 }}>
                         <CheckBox on={allowed} size={22} disabled={lockedSelf || universal}
-                          label={`Show ${t.label}`} onChange={() => toggleTab(t.key)} />
-                        <span style={{ fontSize: 14, flex: 1 }}>{t.label}</span>
-                        <TagX variant={allowed ? "accent" : "outline"}>{universal ? "Everyone" : allowed ? "Shown" : "Hidden"}</TagX>
+                          label={`${contextual ? "Allow" : "Show"} ${t.label}`} onChange={() => toggleTab(t.key)} />
+                        <span style={{ fontSize: 14, flex: 1 }}>
+                          {t.label}
+                          {contextual && <span style={{ fontSize: 11, marginLeft: 6, color: "color-mix(in srgb, var(--color-text) 50%, transparent)" }}>from a job</span>}
+                        </span>
+                        <TagX variant={allowed ? "accent" : "outline"}>{universal ? "Everyone" : contextual ? (allowed ? "Allowed" : "Blocked") : (allowed ? "Shown" : "Hidden")}</TagX>
                       </div>
                     );
                   })}

@@ -31,6 +31,11 @@ Cloudflare Worker `solitary-snowflake-ee22` (assets + `/approve` proxy in
   are timesheet-only and never billed.
 - The offline queue is for work only — scores, telemetry and other
   nice-to-haves call the API directly and fail soft.
+- Tabs are PERMISSION; drawer visibility is code. The contextual screens
+  (`CONTEXT_TABS`: job, jha, upload, ticket) never appear in anyone's
+  menu — they open from a job's own page, per Kyle. Never "hide" a screen
+  by removing its tab from a profile: that revokes RLS/storage access too,
+  which is exactly the invisible breakage that rule replaced.
 - Client-facing HTML is rendered by `supabase/functions/_shared/invoice.ts`
   and escaped with `esc()`; the in-app viewer iframe stays sandboxed.
 

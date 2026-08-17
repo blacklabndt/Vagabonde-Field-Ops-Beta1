@@ -83,6 +83,19 @@ export const TABS = [
   { key: "users", label: "Users & access" }
 ];
 
+// Screens that only make sense with a job under them. They never appear in
+// the drawer — for anyone — because a JHA builder opened from the menu
+// operates on whichever job happens to be active, which is how the wrong
+// job gets edited. The route to them is the one Kyle described: Home or
+// Open tickets, pick the job, work from its own buttons.
+//
+// The tabs themselves still exist and still matter: they are PERMISSION.
+// Row-level security and the storage buckets gate on them, which is how
+// hiding them by deleting them from tab_access broke report uploads for
+// two admins without a visible symptom. Visibility is decided here, in
+// code, for everybody; access is decided per person, in Users & access.
+export const CONTEXT_TABS = ["job", "jha", "upload", "ticket"];
+
 // Kept in step with public.tabs_for_role() in the migrations, which is what
 // the signup trigger seeds a new account from — the two had drifted, leaving
 // accounts created in the app without the tabs this table promises them.
