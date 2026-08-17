@@ -67,7 +67,7 @@ export function SignInScreen({ onSignIn }) {
           <Field label="Email">
             <input className="input" style={{ minHeight: 42 }} type="email" value={email}
               name="email" autoComplete="username" required
-              onChange={e => setEmail(e.target.value)} placeholder="you@meridiannde.ca" />
+              onChange={e => setEmail(e.target.value)} placeholder="you@vagabonde.ca" />
           </Field>
           <Field label="Password">
             <input className="input" style={{ minHeight: 42 }} type="password" value={password}
