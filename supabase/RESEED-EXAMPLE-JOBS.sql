@@ -29,14 +29,6 @@ delete from public.jhas;
 delete from public.rate_overrides;
 delete from public.jobs;
 
--- The status column carries a CHECK constraint listing the old ladder
--- (Unassigned / Dispatched / In progress / Complete), so 'Active' is rejected
--- until the constraint is replaced. Two values now: a job is being worked, or
--- an admin has closed it.
-alter table public.jobs drop constraint if exists jobs_status_check;
-alter table public.jobs
-  add constraint jobs_status_check check (status in ('Active', 'Complete'));
-
 -- Clients and contractors are matched by position, not by name, so this runs
 -- against whatever is on file rather than assuming the seeded names. If there
 -- are fewer of either than the jobs reference, the modulo wraps around.

@@ -17,7 +17,11 @@ Cloudflare Worker `solitary-snowflake-ee22` (assets + `/approve` proxy in
 - The build must be green **before** the commit, never beside it.
 - Migrations: apply live first (timestamps come from the applier), then
   write the matching file under `supabase/migrations/` with that version.
-  Repo files and applied migrations must reconcile 1:1.
+  Repo files and applied migrations must reconcile 1:1. The history starts
+  at `20260817040000_beta1_baseline.sql` — the whole schema squashed into
+  one file, generated from the live catalogs; the 77 evolutionary
+  migrations it replaced live in the prototype archive. Never apply the
+  baseline to the live project; it is for fresh environments.
 - RLS changes get probed live with `set_config('request.jwt.claims', …)`
   role simulation before they ship. Permissive policies OR together — a
   new `FOR ALL` policy can silently void an older condition.
