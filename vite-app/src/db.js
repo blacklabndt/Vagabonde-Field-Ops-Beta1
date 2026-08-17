@@ -224,7 +224,9 @@ function shapeReport(r) {
     id: r.id,
     file: r.filename, welds: r.welds, result: r.result,
     at: stamp(r.uploaded_at),
-    sent: r.sent_at ? "Yes" : "Pending"
+    sent: r.sent_at ? "Yes" : "Pending",
+    sentAt: stamp(r.sent_at),
+    sentTo: r.sent_to || ""
   };
 }
 
@@ -1084,6 +1086,29 @@ export const Db = {
   // The Postmark token lives as a Supabase secret and is only ever read
   // server-side — hence going through a function rather than calling the
   // Postmark API from the browser.
+
+  // Removes a report and its stored PDF. The same shape as deleteJha, for the
+  // same reasons: RLS is the enforcement (Admin or Technician), a delete that
+  // touched no rows is reported as the refusal it is, and the storage object
+  // goes second, best effort, so a failed cleanup can't resurrect an error
+  // after the record is already gone.
+  async deleteReport(reportId) {
+    const { data: rows, error: readErr } = await sbClient
+      .from("reports").select("pdf_key").eq("id", reportId);
+    if (readErr) throw readErr;
+    const pdfKey = rows && rows[0] ? rows[0].pdf_key : null;
+
+    const { data: gone, error } = await sbClient
+      .from("reports").delete().eq("id", reportId).select("id");
+    if (error) throw error;
+    if (!gone || !gone.length) {
+      throw new Error("That report wasn't deleted — deleting a report takes an Admin or Technician account.");
+    }
+    if (pdfKey) {
+      try { await sbClient.storage.from("reports").remove([pdfKey]); }
+      catch (e) { console.warn("Report deleted, but its PDF wasn't removed:", e.message); }
+    }
+  },
 
   async sendReportEmail({ reportId, to, cc, message }) {
     const { data, error } = await sbClient.functions.invoke("send-report", {
@@ -2164,6 +2189,7 @@ const SAVE_MESSAGES = {
   // Reports and files
   uploadReport: "Report uploaded",
   sendReportEmail: "Report sent",
+  deleteReport: "Report deleted",
   deleteSharedFile: "File deleted",
   deleteFolder: "Folder deleted",
 

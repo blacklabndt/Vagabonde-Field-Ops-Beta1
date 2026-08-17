@@ -14,10 +14,12 @@ export function JobDetailScreen({ job, currentUser, onStartJha, onOpenTicket, jo
   const [statusBusy, setStatusBusy] = useState(false);
   const [statusError, setStatusError] = useState("");
   const [closingJha, setClosingJha] = useState(null);
-  // The assessment being emailed — holds the row so the dialog can name the
-  // file it's about to send.
+  // The assessment or report being emailed — each holds its row so the
+  // dialog can name the file it's about to send.
   const [sendingJha, setSendingJha] = useState(null);
+  const [sendingReport, setSendingReport] = useState(null);
   const [deletingJhaId, setDeletingJhaId] = useState(null);
+  const [deletingReportId, setDeletingReportId] = useState(null);
   const [deleting, setDeleting] = useState(false);
   // A ticket opened to be read rather than edited. Holds the ticket id; the
   // dialog fetches its lines and crew itself.
@@ -26,20 +28,20 @@ export function JobDetailScreen({ job, currentUser, onStartJha, onOpenTicket, jo
   // be invisible — the link simply wouldn't open. This puts the function's
   // own error on screen and lets it be retried.
   const [rendering, setRendering] = useState(null);
-  // Keyed by JHA id, not a single string: one message in screen state was
-  // drawn beside every row on the table, so a failure on one assessment read
-  // as a failure on all of them.
-  const [jhaRenderError, setJhaRenderError] = useState({});
+  // Keyed by row id (a JHA's or a report's), not a single string: one message
+  // in screen state was drawn beside every row on the table, so a failure on
+  // one assessment read as a failure on all of them.
+  const [rowError, setRowError] = useState({});
 
   // A completed job is a closed book: nothing can be added to it until an admin
   // reopens it. Only admins see the switch — closing a job decides what a
   // client gets invoiced for, so it isn't a field decision.
   const complete = job && job.status === "Complete";
   const isAdmin = currentUser.role === "Admin";
-  // Admins and technicians — the techs who file assessments clean up their
-  // own. Matches the jhas delete policy; a helper doesn't get the button
-  // because the database would refuse them anyway.
-  const canDeleteJha = isAdmin || currentUser.role === "Technician";
+  // Admins and technicians — the techs who file assessments and reports
+  // clean up their own. Matches the jhas/reports delete policies; a helper
+  // doesn't get the buttons because the database would refuse them anyway.
+  const canDeleteFiled = isAdmin || currentUser.role === "Technician";
 
   const toggleComplete = async () => {
     if (!complete && !confirm(`Mark ${job.id} complete? No more JHAs, reports or tickets can be added to it until it's reopened.`)) return;
@@ -70,12 +72,23 @@ export function JobDetailScreen({ job, currentUser, onStartJha, onOpenTicket, jo
   const deleteJha = async j => {
     if (!confirm(`Delete ${j.file}? The assessment and its PDF are removed for good.`)) return;
     setDeletingJhaId(j.id);
-    setJhaRenderError(p => ({ ...p, [j.id]: "" }));
+    setRowError(p => ({ ...p, [j.id]: "" }));
     try { await Db.deleteJha(j.id); await refreshJhas(); }
-    catch (e) { setJhaRenderError(p => ({ ...p, [j.id]: e.message || "Couldn't delete the assessment." })); }
+    catch (e) { setRowError(p => ({ ...p, [j.id]: e.message || "Couldn't delete the assessment." })); }
     setDeletingJhaId(null);
   };
   const refreshReports = () => Db.listReportsForJob(job.dbId).then(setReports).catch(e => console.error("Failed to load reports:", e.message));
+
+  // Same shape as deleteJha: one row, named by its file, re-checked by the
+  // database.
+  const deleteReport = async r => {
+    if (!confirm(`Delete ${r.file}? The report and its PDF are removed for good.`)) return;
+    setDeletingReportId(r.id);
+    setRowError(p => ({ ...p, [r.id]: "" }));
+    try { await Db.deleteReport(r.id); await refreshReports(); }
+    catch (e) { setRowError(p => ({ ...p, [r.id]: e.message || "Couldn't delete the report." })); }
+    setDeletingReportId(null);
+  };
   const refreshTickets = () => Db.listTicketsForJob(job.dbId).then(setTickets).catch(e => console.error("Failed to load tickets:", e.message));
   const refresh = async () => {
     setLoading(true);
@@ -239,12 +252,12 @@ export function JobDetailScreen({ job, currentUser, onStartJha, onOpenTicket, jo
                       : <TagX variant="neutral">Closed {j.closedAt}</TagX>}</td>
                     <td style={{ textAlign: "right" }}>
                       <div style={{ display: "flex", gap: 8, justifyContent: "flex-end", alignItems: "center" }}>
-                        {jhaRenderError[j.id] && <span style={{ fontSize: 11, color: "var(--color-accent-700)", maxWidth: 320, textAlign: "left" }}>{jhaRenderError[j.id]}</span>}
+                        {rowError[j.id] && <span style={{ fontSize: 11, color: "var(--color-accent-700)", maxWidth: 320, textAlign: "left" }}>{rowError[j.id]}</span>}
                         <Btn variant="ghost" disabled={rendering === j.id} onClick={async () => {
                           setRendering(j.id);
-                          setJhaRenderError(p => ({ ...p, [j.id]: "" }));
+                          setRowError(p => ({ ...p, [j.id]: "" }));
                           try { await Db.renderJhaPdf(j.id); await refreshJhas(); }
-                          catch (e) { setJhaRenderError(p => ({ ...p, [j.id]: e.message || "The PDF didn't render." })); }
+                          catch (e) { setRowError(p => ({ ...p, [j.id]: e.message || "The PDF didn't render." })); }
                           setRendering(null);
                         }}>{rendering === j.id ? "Rendering…" : "Re-render PDF"}</Btn>
                         {j.status === "Open" && !complete && (
@@ -253,7 +266,7 @@ export function JobDetailScreen({ job, currentUser, onStartJha, onOpenTicket, jo
                         <Btn variant="secondary" disabled={!j.pdfKey}
                           title={j.pdfKey ? undefined : "Render the PDF first"}
                           onClick={() => setSendingJha(j)}>Send to…</Btn>
-                        {canDeleteJha && (
+                        {canDeleteFiled && (
                           <Btn variant="ghost" disabled={complete || deletingJhaId === j.id}
                             title={complete ? "Reopen the job first" : undefined}
                             onClick={() => deleteJha(j)}>{deletingJhaId === j.id ? "Deleting…" : "Delete"}</Btn>
@@ -274,12 +287,39 @@ export function JobDetailScreen({ job, currentUser, onStartJha, onOpenTicket, jo
               <Btn variant="primary" style={{ marginLeft: "auto" }} disabled={complete} onClick={() => setShowUpload(true)}>+ Upload report</Btn>
             </div>
             <TableScroll><table className="table">
-              <thead><tr><th>File</th><th>Last numbers</th><th>Uploaded</th><th>Sent</th></tr></thead>
+              <thead><tr><th>File</th><th>Last numbers</th><th>Uploaded</th><th>Sent</th><th></th></tr></thead>
               <tbody>
-                {loading && <LoadingRow cols={4} />}
-                {!loading && reports.length === 0 && <tr><td colSpan={4} style={{ color: "color-mix(in srgb, var(--color-text) 55%, transparent)" }}>None on file yet.</td></tr>}
+                {loading && <LoadingRow cols={5} />}
+                {!loading && reports.length === 0 && <tr><td colSpan={5} style={{ color: "color-mix(in srgb, var(--color-text) 55%, transparent)" }}>None on file yet.</td></tr>}
                 {reports.map((r, i) => (
-                  <tr key={i}><td><PdfLink file={r.file} pdfKey={r.pdfKey} bucket="reports" /></td><td>{r.welds}</td><td>{r.at}</td><td>{r.sent}</td></tr>
+                  <tr key={r.id || i}>
+                    <td><PdfLink file={r.file} pdfKey={r.pdfKey} bucket="reports" /></td>
+                    <td>{r.welds}</td>
+                    <td>{r.at}</td>
+                    <td>{r.sent === "Yes" ? (
+                      <>
+                        <div>{r.sentAt || "Yes"}</div>
+                        {r.sentTo && (
+                          <div style={{ fontSize: 11, color: "color-mix(in srgb, var(--color-text) 55%, transparent)" }}>
+                            {r.sentTo.split(",").join(", ")}
+                          </div>
+                        )}
+                      </>
+                    ) : "Pending"}</td>
+                    <td style={{ textAlign: "right" }}>
+                      <div style={{ display: "flex", gap: 8, justifyContent: "flex-end", alignItems: "center" }}>
+                        {rowError[r.id] && <span style={{ fontSize: 11, color: "var(--color-accent-700)", maxWidth: 320, textAlign: "left" }}>{rowError[r.id]}</span>}
+                        <Btn variant="secondary" disabled={!r.pdfKey}
+                          title={r.pdfKey ? undefined : "The PDF didn't reach storage"}
+                          onClick={() => setSendingReport(r)}>Send to…</Btn>
+                        {canDeleteFiled && (
+                          <Btn variant="ghost" disabled={complete || deletingReportId === r.id}
+                            title={complete ? "Reopen the job first" : undefined}
+                            onClick={() => deleteReport(r)}>{deletingReportId === r.id ? "Deleting…" : "Delete"}</Btn>
+                        )}
+                      </div>
+                    </td>
+                  </tr>
                 ))}
               </tbody>
             </table></TableScroll>
@@ -466,11 +506,23 @@ export function JobDetailScreen({ job, currentUser, onStartJha, onOpenTicket, jo
       )}
 
       {sendingJha && (
-        <SendJhaDialog job={job} jha={sendingJha}
+        <SendPdfDialog title="Send assessment" file={sendingJha.file} job={job}
           clientContacts={forOrg("client", job.clientId)}
           contractorContacts={forOrg("contractor", job.contractorId)}
+          defaultMessage="Attached: the signed hazard assessment for the work noted below. Let us know if you have questions."
+          send={(to, message) => Db.sendJhaEmail({ jhaId: sendingJha.id, to, cc: "", message })}
           onClose={() => setSendingJha(null)}
           onSent={async () => { setSendingJha(null); await refreshJhas(); }} />
+      )}
+
+      {sendingReport && (
+        <SendPdfDialog title="Send report" file={sendingReport.file} job={job}
+          clientContacts={forOrg("client", job.clientId)}
+          contractorContacts={forOrg("contractor", job.contractorId)}
+          defaultMessage="Attached: interpreted RT report for the welds noted below. Let us know if you have questions."
+          send={(to, message) => Db.sendReportEmail({ reportId: sendingReport.id, to, cc: "", message })}
+          onClose={() => setSendingReport(null)}
+          onSent={async () => { setSendingReport(null); await refreshReports(); }} />
       )}
 
       {viewingTicket && (
@@ -920,15 +972,16 @@ function JhaCloseOutDialog({ jha, currentUser, onClose, onDone }) {
   );
 }
 
-// Emails an assessment to whoever needs it on file. Recipients are picked
-// off the job's own client and contractor people — searchable, since a big
-// outfit keeps a long directory — plus a typed address for anyone not on
-// file. The send itself happens in the send-jha function, which re-checks
-// the caller's session and stamps sent_at/sent_to on the row.
-function SendJhaDialog({ job, jha, clientContacts, contractorContacts, onClose, onSent }) {
+// Emails a filed PDF — an assessment or a report — to whoever needs it.
+// Recipients are picked off the job's own client and contractor people —
+// searchable, since a big outfit keeps a long directory — plus a typed
+// address for anyone not on file. The send itself happens server-side (the
+// caller passes it in), where the session is re-checked and sent_at/sent_to
+// get stamped on the row only after the mail is accepted.
+function SendPdfDialog({ title, file, job, clientContacts, contractorContacts, defaultMessage, send, onClose, onSent }) {
   const [picked, setPicked] = useState([]);
   const [custom, setCustom] = useState("");
-  const [message, setMessage] = useState("Attached: the signed hazard assessment for the work noted below. Let us know if you have questions.");
+  const [message, setMessage] = useState(defaultMessage);
   const [error, setError] = useState("");
   const [sending, setSending] = useState(false);
   const muted = "color-mix(in srgb, var(--color-text) 55%, transparent)";
@@ -959,7 +1012,7 @@ function SendJhaDialog({ job, jha, clientContacts, contractorContacts, onClose, 
     </>
   );
 
-  const send = async () => {
+  const doSend = async () => {
     // The custom field takes "name@co.com" or a pasted "Joe <name@co.com>" —
     // whatever part looks like an address is what gets used.
     const extra = emailIn(custom);
@@ -969,23 +1022,23 @@ function SendJhaDialog({ job, jha, clientContacts, contractorContacts, onClose, 
     setSending(true);
     setError("");
     try {
-      await Db.sendJhaEmail({ jhaId: jha.id, to: to.join(", "), cc: "", message: message.trim() });
+      await send(to.join(", "), message.trim());
       onSent();
     } catch (e) {
       setSending(false);
-      setError(e.message || "Couldn't send the assessment.");
+      setError(e.message || "Couldn't send it.");
     }
   };
 
   return (
-    <Dialog title="Send assessment" maxWidth={540} onClose={onClose}
+    <Dialog title={title} maxWidth={540} onClose={onClose}
       actions={<>
         <Btn variant="secondary" onClick={onClose} disabled={sending}>Cancel</Btn>
-        <Btn variant="primary" onClick={send} disabled={sending}>{sending ? "Sending…" : "Send"}</Btn>
+        <Btn variant="primary" onClick={doSend} disabled={sending}>{sending ? "Sending…" : "Send"}</Btn>
       </>}>
       <ErrorBox>{error}</ErrorBox>
       <div style={{ fontSize: 13 }}>
-        <PdfGlyph /> {jha.file}
+        <PdfGlyph /> {file}
         <span style={{ color: muted }}> — {job.id} · {job.project}</span>
       </div>
 
@@ -1006,7 +1059,7 @@ function SendJhaDialog({ job, jha, clientContacts, contractorContacts, onClose, 
 
       <Field label={`Client contacts${job.client ? " — " + job.client : ""}`}>
         {clientContacts.length ? (
-          <SearchSelect style={{ maxWidth: "none" }} listId="send-jha-client-list"
+          <SearchSelect style={{ maxWidth: "none" }} listId="send-doc-client-list"
             ariaLabel="Search client contacts" placeholder="Search by name, title or email…"
             search={searchIn(clientContacts)} optionKey={c => c.id}
             onPick={addPick} renderOption={renderContact} />
@@ -1016,7 +1069,7 @@ function SendJhaDialog({ job, jha, clientContacts, contractorContacts, onClose, 
       </Field>
       <Field label={`Contractor contacts${job.contractor ? " — " + job.contractor : ""}`}>
         {contractorContacts.length ? (
-          <SearchSelect style={{ maxWidth: "none" }} listId="send-jha-contractor-list"
+          <SearchSelect style={{ maxWidth: "none" }} listId="send-doc-contractor-list"
             ariaLabel="Search contractor contacts" placeholder="Search by name, title or email…"
             search={searchIn(contractorContacts)} optionKey={c => c.id}
             onPick={addPick} renderOption={renderContact} />
