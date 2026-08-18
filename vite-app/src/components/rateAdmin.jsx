@@ -222,7 +222,7 @@ export function RateAdminScreen() {
     persistRate(id, rate);
   };
 
-  const addCustom = async (kind, label) => {
+  const addCustom = async (kind, label, unit) => {
     if (!label || !schedule) return;
     // New lines land at the end of their group's dragged order.
     const groupKinds = {
@@ -234,7 +234,7 @@ export function RateAdminScreen() {
     try {
       const created = await Db.addRateLine({
         scheduleId: schedule.id, kind, label,
-        unit: kind === "custom_expense" ? "per unit" : "per weld", rate: 0,
+        unit: unit || (kind === "custom_expense" ? "ea" : "per weld"), rate: 0,
         position: ps.length ? Math.max(...ps) + 1 : null
       });
       setLines(p => [...p, created]);
@@ -532,7 +532,7 @@ export function RateAdminScreen() {
                 </tbody>
               </table></TableScroll>
               <div style={{ display: "flex", gap: 8, alignItems: "flex-start" }}>
-                <div style={{ flex: 1 }}><AddLineBox onAdd={label => addCustom("custom_expense", label)} placeholder="e.g. Drone survey" /></div>
+                <div style={{ flex: 1 }}><AddLineBox onAdd={(label, unit) => addCustom("custom_expense", label, unit)} units={["h", "ea", "days", "km"]} placeholder="e.g. Blended rate" /></div>
                 <ReorderToggle group="expense" />
               </div>
               </div>
@@ -774,15 +774,26 @@ function NewClientDialog({ onClose, onCreated }) {
   );
 }
 
-function AddLineBox({ onAdd, placeholder }) {
+// `units`, when given, adds a unit picker beside the label — a custom
+// expense can be hourly (a blended rate standing in for straight + OT),
+// per each, per day or per km, and the unit decides how the ticket screen
+// steps it. Groups whose unit is fixed (per-weld lines) just omit it.
+function AddLineBox({ onAdd, placeholder, units }) {
   const [v, setV] = useState("");
-  const add = () => { const t = v.trim(); if (!t) return; onAdd(t); setV(""); };
+  const [unit, setUnit] = useState(units ? units[0] : "");
+  const add = () => { const t = v.trim(); if (!t) return; onAdd(t, unit || undefined); setV(""); };
   return (
     <div style={{ display: "flex", gap: 6, marginTop: 6 }}>
-      <input className="input" style={{ flex: 1 }} placeholder={placeholder} value={v}
+      <input className="input" style={{ flex: 1, minWidth: 0 }} placeholder={placeholder} value={v}
         aria-label={placeholder}
         onChange={e => setV(e.target.value)}
         onKeyDown={e => { if (e.key === "Enter") { e.preventDefault(); add(); } }} />
+      {units && (
+        <select className="input" value={unit} aria-label="Unit" style={{ width: 76, flex: "none" }}
+          onChange={e => setUnit(e.target.value)}>
+          {units.map(u => <option key={u} value={u}>{u}</option>)}
+        </select>
+      )}
       <Btn variant="secondary" onClick={add} disabled={!v.trim()}>Add</Btn>
     </div>
   );
