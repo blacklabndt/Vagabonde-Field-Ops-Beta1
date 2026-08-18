@@ -533,7 +533,7 @@ export function TeamChatScreen({ currentUser }) {
 
   return (
     <div className="page" style={{ maxWidth: 760 }}>
-      <Blueprint style={{ display: "flex", flexDirection: "column", height: "min(72vh, 640px)", minHeight: 320 }}>
+      <Blueprint className="chat-card">
         {pins.length > 0 && (
           <div style={{
             borderBottom: "1px solid var(--color-divider)", padding: "10px 16px",
@@ -682,10 +682,13 @@ export function TeamChatScreen({ currentUser }) {
           {/* Said here because history quietly ending mid-scroll would
               otherwise read as a bug, not a policy — and likewise a live
               feed that is down reconnecting should say so, not just go
-              quiet. */}
-          <div style={{ fontSize: 11, color: "color-mix(in srgb, var(--color-text) 45%, transparent)", marginTop: 6 }}>
-            Messages clear after 30 days — pinned messages stay.
-            {!loading && !feedLive && " · Reconnecting live updates — checking for new messages every 30 seconds meanwhile."}
+              quiet. One line, never wrapping: the text swapping was
+              re-wrapping this line on phones, and the whole message pane
+              pumped up and down with it. Truncation beats jitter. */}
+          <div style={{ fontSize: 11, color: "color-mix(in srgb, var(--color-text) 45%, transparent)", marginTop: 6, whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>
+            {loading || feedLive
+              ? "Messages clear after 30 days — pinned messages stay."
+              : "Live updates connecting — the room refreshes every 30 seconds meanwhile."}
           </div>
         </div>
       </Blueprint>

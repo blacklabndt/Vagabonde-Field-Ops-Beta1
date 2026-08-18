@@ -485,6 +485,16 @@ label.field-label-missing {
 }
 
 /* — team chat — */
+/* The chat card's height is the one thing on this screen that must not
+   move on its own. Plain vh recalculates on phones as the browser bar
+   hides and the keyboard rises, and the card visibly pumped up and down
+   with it. Small-viewport units hold still through both; the vh line
+   above is the fallback for anything old enough not to know svh. */
+.chat-card {
+  display: flex; flex-direction: column; min-height: 320px;
+  height: min(72vh, 640px);
+  height: min(72svh, 640px);
+}
 /* A new message rises into place, with a slight overshoot so the
    motion registers. The class is only ever put on rows that arrive
    while you watch: history mounts still, because eighty bubbles
