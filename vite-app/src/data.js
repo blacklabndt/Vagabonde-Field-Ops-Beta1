@@ -333,27 +333,31 @@ export const WELD_ITEMS = RT_MODES.flatMap(m =>
 // The lines every rate schedule starts with, at zero. One list, used both
 // when a schedule is first opened and by Restore standard lines, so the two
 // can never disagree about what "standard" means.
+// `position` is where a line starts on a fresh schedule — the same numbers
+// migration 20260818030718 stamped on the live rows. The Rate admin screen
+// orders by it and rewrites it when rows are dragged; the three RT kinds of
+// one size share a position because the editor shows them as one row.
 export const STANDARD_RATE_LINES = [
-  ...SIZE_LABELS.flatMap(sz => [
-    { kind: "rt_film", label: sz, unit: "weld" },
-    { kind: "rt_cr", label: sz, unit: "weld" },
-    { kind: "rt_dr", label: sz, unit: "weld" }
+  ...SIZE_LABELS.flatMap((sz, i) => [
+    { kind: "rt_film", label: sz, unit: "weld", position: i },
+    { kind: "rt_cr", label: sz, unit: "weld", position: i },
+    { kind: "rt_dr", label: sz, unit: "weld", position: i }
   ]),
-  ...METHODS.map(m => ({ kind: "method", label: m.label, unit: "weld" })),
+  ...METHODS.map((m, i) => ({ kind: "method", label: m.label, unit: "weld", position: 10 + i })),
   // The crew rate is per truck, not per person: a second technician in the
   // same truck does not double it, and a second truck is a second ticket —
   // which is why these no longer say "Technician". Renamed live in migration
   // 20260818025620; the DB labels and these must stay identical, since
   // rates.exp is matched by label text.
-  { kind: "expense", label: "Straight time", unit: "h" },
-  { kind: "expense", label: "Overtime", unit: "h" },
+  { kind: "expense", label: "Straight time", unit: "h", position: 20 },
+  { kind: "expense", label: "Overtime", unit: "h", position: 21 },
   // Travel is billed apart from hours worked, at its own rate — that is how
   // the paper field ticket has always split it.
-  { kind: "expense", label: "Travel — straight", unit: "h" },
-  { kind: "expense", label: "Travel — overtime", unit: "h" },
-  { kind: "expense", label: "Mileage", unit: "km" },
-  { kind: "expense", label: "Film & consumables", unit: "ea" },
-  { kind: "expense", label: "Subsistence / LOA", unit: "days" }
+  { kind: "expense", label: "Travel — straight", unit: "h", position: 22 },
+  { kind: "expense", label: "Travel — overtime", unit: "h", position: 23 },
+  { kind: "expense", label: "Mileage", unit: "km", position: 24 },
+  { kind: "expense", label: "Film & consumables", unit: "ea", position: 25 },
+  { kind: "expense", label: "Subsistence / LOA", unit: "days", position: 26 }
 ];
 
 // The expense labels, in the order a client's rates are returned as

@@ -1930,7 +1930,11 @@ export const Db = {
       if (cErr) throw cErr;
       schedule = created;
     }
-    let { data: lines, error: lErr } = await sbClient.from("rate_lines").select("*").eq("schedule_id", schedule.id).order("label");
+    let { data: lines, error: lErr } = await sbClient.from("rate_lines").select("*")
+      .eq("schedule_id", schedule.id)
+      // The dragged order first; label keeps rows stable for anything from
+      // before the position column, which sorts to the end as null.
+      .order("position", { ascending: true, nullsFirst: false }).order("label");
     if (lErr) throw lErr;
 
     // Every row in the editor draws from a line, so a standard line that is
@@ -1958,11 +1962,25 @@ export const Db = {
     if (error) throw error;
   },
 
-  async addRateLine({ scheduleId, kind, label, unit, rate }) {
+  async addRateLine({ scheduleId, kind, label, unit, rate, position = null }) {
     const { data, error } = await sbClient.from("rate_lines")
-      .insert({ schedule_id: scheduleId, kind, label, unit, rate: nonNegative(rate) }).select().single();
+      .insert({ schedule_id: scheduleId, kind, label, unit, rate: nonNegative(rate), position }).select().single();
     if (error) throw error;
     return data;
+  },
+
+  // The dragged order, written back one position per line. Parallel
+  // single-row updates rather than an upsert: an upsert would need every
+  // column of every row, and a miss here should refuse loudly — an update
+  // no policy allows reports success having moved nothing.
+  async reorderRateLines(updates) {
+    const results = await Promise.all(updates.map(u =>
+      sbClient.from("rate_lines").update({ position: u.position }).eq("id", u.id).select("id")
+    ));
+    for (const { error } of results) if (error) throw error;
+    if (results.some(r => !r.data || !r.data.length)) {
+      throw new Error("The new order didn't fully save — reload the schedule and try again.");
+    }
   },
 
   async deleteRateLine(id) {
@@ -2245,6 +2263,7 @@ const SAVE_MESSAGES = {
   setRateLine: "Rate saved",
   addRateLine: "Rate line added",
   deleteRateLine: "Rate line removed",
+  reorderRateLines: "Line order saved",
   publishSchedule: "Schedule published",
   copyDefaultInto: "Default rates copied in",
   createOverride: "Override added",

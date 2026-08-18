@@ -1,5 +1,5 @@
 import React, { useState, useEffect, useRef } from "react";
-import { SIZE_LABELS, METHODS, STANDARD_RATE_LINES } from "../data.js";
+import { STANDARD_RATE_LINES } from "../data.js";
 import { Db, DEFAULT_SCHEDULE } from "../db.js";
 import { Blueprint, Btn, useDebounced, TagX, Field, Dialog, ErrorBox, Switch, NumField, useMissingFields, SearchSelect, TableScroll, Loading } from "./common.jsx";
 
@@ -70,6 +70,114 @@ export function RateAdminScreen() {
   const line = (kind, label) => lines.find(l => l.kind === kind && l.label === label);
   const customLines = kind => lines.filter(l => l.kind === kind);
 
+  // ── Row order ──────────────────────────────────────────────────────────
+  // Each group's rows follow rate_lines.position, dragged into place below.
+  // Lines from before the position column existed have none and fall back to
+  // the standard order, so nothing ever jumps around unprompted.
+  const posOf = l => (l && l.position != null ? l.position : Infinity);
+  const stdIdx = (kind, label) => {
+    const i = STANDARD_RATE_LINES.findIndex(s => s.kind === kind && s.label === label);
+    return i < 0 ? 900 : i;
+  };
+  const byPos = (a, b) => a.pos - b.pos || a.fallback - b.fallback || (a.label || "").localeCompare(b.label || "");
+
+  const SIZE_KINDS = ["rt_film", "rt_cr", "rt_dr"];
+  // One row per size — its three kind-lines move as one — with custom weld
+  // lines interleaved wherever they were dragged.
+  const sizeRows = (() => {
+    const bySize = new Map();
+    lines.filter(l => SIZE_KINDS.includes(l.kind)).forEach(l => {
+      const seen = bySize.has(l.label) ? bySize.get(l.label) : Infinity;
+      bySize.set(l.label, Math.min(seen, posOf(l)));
+    });
+    return [
+      ...[...bySize.entries()].map(([label, pos]) => ({
+        key: "size:" + label, label, pos, fallback: stdIdx("rt_film", label),
+        ids: SIZE_KINDS.map(k => line(k, label)).filter(Boolean).map(l => l.id)
+      })),
+      ...customLines("custom_weld").map(c => ({
+        key: "cw:" + c.id, label: c.label, pos: posOf(c), fallback: 950, line: c, ids: [c.id]
+      }))
+    ].sort(byPos);
+  })();
+
+  const rowsOf = (standardKind, customKind) => lines
+    .filter(l => l.kind === standardKind || l.kind === customKind)
+    .map(l => ({
+      key: l.kind + ":" + l.id, label: l.label, pos: posOf(l),
+      fallback: l.kind === standardKind ? stdIdx(standardKind, l.label) : 950,
+      line: l, ids: [l.id]
+    }))
+    .sort(byPos);
+  const methodRows = rowsOf("method", "custom_method");
+  // Data-driven where it used to be a fixed five-label list — which is also
+  // what finally puts the two Travel lines on screen: they have been on
+  // every schedule since the travel migration, priced tickets through
+  // rates.exp, and had no row here to edit them by.
+  const expenseRows = rowsOf("expense", "custom_expense");
+
+  // ── Reordering ─────────────────────────────────────────────────────────
+  // One group at a time. The button under a group flips its rows draggable;
+  // every drop writes the whole group's positions through the same
+  // saving/saved status the rates use. Rate boxes become plain figures while
+  // dragging, so a drag can start anywhere on the row.
+  const [reorderGroup, setReorderGroup] = useState("");
+  const [dragOver, setDragOver] = useState(-1);
+  const dragFrom = useRef(null);
+
+  const persistOrder = async rows => {
+    const updates = rows.flatMap((r, i) => r.ids.map(id => ({ id, position: i })));
+    setLines(p => p.map(l => {
+      const u = updates.find(x => x.id === l.id);
+      return u ? { ...l, position: u.position } : l;
+    }));
+    setJustPublished(false);
+    inFlight.current++;
+    setSaveState("saving");
+    try {
+      await Db.reorderRateLines(updates);
+      if (--inFlight.current === 0) setSaveState("saved");
+    } catch (e) {
+      inFlight.current--;
+      setSaveState("failed");
+      setError(e.message || "Couldn't save the new order.");
+      await loadSchedule();
+    }
+  };
+
+  const dragProps = (group, rows, i) => reorderGroup !== group ? {} : {
+    draggable: true,
+    onDragStart: e => { dragFrom.current = i; e.dataTransfer.effectAllowed = "move"; },
+    onDragOver: e => { e.preventDefault(); e.dataTransfer.dropEffect = "move"; setDragOver(i); },
+    onDragLeave: () => setDragOver(d => (d === i ? -1 : d)),
+    onDrop: e => {
+      e.preventDefault();
+      setDragOver(-1);
+      const from = dragFrom.current;
+      dragFrom.current = null;
+      if (from == null || from === i) return;
+      const next = [...rows];
+      const [moved] = next.splice(from, 1);
+      next.splice(i, 0, moved);
+      persistOrder(next);
+    },
+    onDragEnd: () => { setDragOver(-1); dragFrom.current = null; },
+    style: {
+      cursor: "grab",
+      ...(dragOver === i ? { outline: "2px solid var(--color-accent)", outlineOffset: -2 } : null)
+    }
+  };
+
+  const grip = group => reorderGroup === group && (
+    <span aria-hidden style={{ marginRight: 8, color: "var(--color-accent)", fontWeight: 600 }}>≡</span>
+  );
+  const ReorderToggle = ({ group }) => (
+    <Btn variant={reorderGroup === group ? "primary" : "secondary"} style={{ whiteSpace: "nowrap", marginTop: 6 }}
+      onClick={() => { setReorderGroup(g => (g === group ? "" : group)); setDragOver(-1); dragFrom.current = null; }}>
+      {reorderGroup === group ? "Done" : "Reorder"}
+    </Btn>
+  );
+
   const [copying, setCopying] = useState(false);
   const copyDefault = async () => {
     if (!schedule) return;
@@ -121,8 +229,19 @@ export function RateAdminScreen() {
 
   const addCustom = async (kind, label) => {
     if (!label || !schedule) return;
+    // New lines land at the end of their group's dragged order.
+    const groupKinds = {
+      custom_weld: [...SIZE_KINDS, "custom_weld"],
+      custom_method: ["method", "custom_method"],
+      custom_expense: ["expense", "custom_expense"]
+    }[kind] || [kind];
+    const ps = lines.filter(l => groupKinds.includes(l.kind) && l.position != null).map(l => l.position);
     try {
-      const created = await Db.addRateLine({ scheduleId: schedule.id, kind, label, unit: kind === "custom_expense" ? "per unit" : "per weld", rate: 0 });
+      const created = await Db.addRateLine({
+        scheduleId: schedule.id, kind, label,
+        unit: kind === "custom_expense" ? "per unit" : "per weld", rate: 0,
+        position: ps.length ? Math.max(...ps) + 1 : null
+      });
       setLines(p => [...p, created]);
       setJustPublished(false);
     } catch (e) { setError(e.message || "Couldn't add that line."); }
@@ -311,96 +430,88 @@ export function RateAdminScreen() {
               <TableScroll><table className="table">
                 <thead><tr><th>Size</th><th style={{ width: 92 }}>Film</th><th style={{ width: 92 }}>CR</th><th style={{ width: 92 }}>DR</th><th style={{ width: 44 }}></th></tr></thead>
                 <tbody>
-                  {SIZE_LABELS.map(sz => (
-                    <tr key={sz}>
-                      <td>{sz}</td>
-                      {["rt_film", "rt_cr", "rt_dr"].map(kind => {
-                        const l = line(kind, sz);
-                        return <td key={kind}>{l && <RateInput value={l.rate} onChange={v => setRate(l.id, v)} />}</td>;
-                      })}
+                  {sizeRows.map((r, i) => (
+                    <tr key={r.key} {...dragProps("sizes", sizeRows, i)}>
+                      <td>{grip("sizes")}{r.label}</td>
+                      {r.line ? (
+                        <>
+                          <td>{reorderGroup === "sizes"
+                            ? <span className="tabular">{r.line.rate}</span>
+                            : <RateInput value={r.line.rate} onChange={v => setRate(r.line.id, v)} />}</td>
+                          <td></td>
+                          <td></td>
+                        </>
+                      ) : (
+                        SIZE_KINDS.map(kind => {
+                          const l = line(kind, r.label);
+                          return <td key={kind}>{l && (reorderGroup === "sizes"
+                            ? <span className="tabular">{l.rate}</span>
+                            : <RateInput value={l.rate} onChange={v => setRate(l.id, v)} />)}</td>;
+                        })
+                      )}
                       <td style={{ textAlign: "right" }}>
-                        {["rt_film", "rt_cr", "rt_dr"].some(k => line(k, sz)) && (
-                          <button className="row-x" aria-label={`Remove ${sz}`}
-                            onClick={() => removeSizeRow(sz)}>×</button>
+                        {reorderGroup !== "sizes" && r.ids.length > 0 && (
+                          <button className="row-x" aria-label={`Remove ${r.label}`}
+                            onClick={() => r.line ? removeCustom(r.line.id) : removeSizeRow(r.label)}>×</button>
                         )}
-                      </td>
-                    </tr>
-                  ))}
-                  {customLines("custom_weld").map(c => (
-                    <tr key={c.id}>
-                      <td>{c.label}</td>
-                      <td><RateInput value={c.rate} onChange={v => setRate(c.id, v)} /></td>
-                      <td></td>
-                      <td></td>
-                      <td style={{ textAlign: "right" }}>
-                        <button className="row-x" onClick={() => removeCustom(c.id)} aria-label={`Remove ${c.label}`}>×</button>
                       </td>
                     </tr>
                   ))}
                   {!isDefault && <tr><td colSpan={5} style={{ color: "color-mix(in srgb, var(--color-text) 55%, transparent)" }}>Minimum call-out — {client.minimum_callout || "not set"}</td></tr>}
                 </tbody>
               </table></TableScroll>
-              <AddLineBox onAdd={label => addCustom("custom_weld", label)} placeholder='e.g. 16" NPS' />
+              <div style={{ display: "flex", gap: 8, alignItems: "flex-start" }}>
+                <div style={{ flex: 1 }}><AddLineBox onAdd={label => addCustom("custom_weld", label)} placeholder='e.g. 16" NPS' /></div>
+                <ReorderToggle group="sizes" />
+              </div>
 
               <div style={{ fontSize: 11, textTransform: "uppercase", letterSpacing: ".08em", color: "var(--color-accent)", margin: "16px 0 6px" }}>Other methods — rate per weld</div>
               <TableScroll><table className="table">
                 <thead><tr><th>Method</th><th style={{ width: 92 }}>Rate</th><th style={{ width: 44 }}></th></tr></thead>
                 <tbody>
-                  {METHODS.map(m => {
-                    const l = line("method", m.label);
-                    if (!l) return null;
-                    return (
-                      <tr key={m.key}>
-                        <td>{m.label}</td>
-                        <td><RateInput value={l.rate} onChange={v => setRate(l.id, v)} /></td>
-                        <td style={{ textAlign: "right" }}>
-                          <button className="row-x" onClick={() => removeCustom(l.id)} aria-label={`Remove ${m.label}`}>×</button>
-                        </td>
-                      </tr>
-                    );
-                  })}
-                  {customLines("custom_method").map(c => (
-                    <tr key={c.id}>
-                      <td>{c.label}</td>
-                      <td><RateInput value={c.rate} onChange={v => setRate(c.id, v)} /></td>
+                  {methodRows.map((r, i) => (
+                    <tr key={r.key} {...dragProps("methods", methodRows, i)}>
+                      <td>{grip("methods")}{r.label}</td>
+                      <td>{reorderGroup === "methods"
+                        ? <span className="tabular">{r.line.rate}</span>
+                        : <RateInput value={r.line.rate} onChange={v => setRate(r.line.id, v)} />}</td>
                       <td style={{ textAlign: "right" }}>
-                        <button className="row-x" onClick={() => removeCustom(c.id)} aria-label={`Remove ${c.label}`}>×</button>
+                        {reorderGroup !== "methods" && (
+                          <button className="row-x" onClick={() => removeCustom(r.line.id)} aria-label={`Remove ${r.label}`}>×</button>
+                        )}
                       </td>
                     </tr>
                   ))}
                 </tbody>
               </table></TableScroll>
-              <AddLineBox onAdd={label => addCustom("custom_method", label)} placeholder="e.g. PAUT" />
+              <div style={{ display: "flex", gap: 8, alignItems: "flex-start" }}>
+                <div style={{ flex: 1 }}><AddLineBox onAdd={label => addCustom("custom_method", label)} placeholder="e.g. PAUT" /></div>
+                <ReorderToggle group="methods" />
+              </div>
 
               <div style={{ fontSize: 11, textTransform: "uppercase", letterSpacing: ".08em", color: "var(--color-accent)", margin: "16px 0 6px" }}>Time &amp; expense</div>
               <TableScroll><table className="table">
                 <thead><tr><th>Item</th><th style={{ width: 92 }}>Rate</th><th style={{ width: 44 }}></th></tr></thead>
                 <tbody>
-                  {["Straight time", "Overtime", "Mileage", "Film & consumables", "Subsistence / LOA"].map(label => {
-                    const l = line("expense", label);
-                    if (!l) return null;
-                    return (
-                      <tr key={label}>
-                        <td>{label}<div style={{ fontSize: 11, color: "color-mix(in srgb, var(--color-text) 55%, transparent)" }}>{l.unit}</div></td>
-                        <td><RateInput value={l.rate} onChange={v => setRate(l.id, v)} /></td>
-                        <td style={{ textAlign: "right" }}>
-                          <button className="row-x" onClick={() => removeCustom(l.id)} aria-label={`Remove ${label}`}>×</button>
-                        </td>
-                      </tr>
-                    );
-                  })}
-                  {customLines("custom_expense").map(c => (
-                    <tr key={c.id}>
-                      <td>{c.label}</td>
-                      <td><RateInput value={c.rate} onChange={v => setRate(c.id, v)} /></td>
+                  {expenseRows.map((r, i) => (
+                    <tr key={r.key} {...dragProps("expense", expenseRows, i)}>
+                      <td>{grip("expense")}{r.label}<div style={{ fontSize: 11, color: "color-mix(in srgb, var(--color-text) 55%, transparent)" }}>{r.line.unit}</div></td>
+                      <td>{reorderGroup === "expense"
+                        ? <span className="tabular">{r.line.rate}</span>
+                        : <RateInput value={r.line.rate} onChange={v => setRate(r.line.id, v)} />}</td>
                       <td style={{ textAlign: "right" }}>
-                        <button className="row-x" onClick={() => removeCustom(c.id)} aria-label={`Remove ${c.label}`}>×</button>
+                        {reorderGroup !== "expense" && (
+                          <button className="row-x" onClick={() => removeCustom(r.line.id)} aria-label={`Remove ${r.label}`}>×</button>
+                        )}
                       </td>
                     </tr>
                   ))}
                 </tbody>
               </table></TableScroll>
-              <AddLineBox onAdd={label => addCustom("custom_expense", label)} placeholder="e.g. Drone survey" />
+              <div style={{ display: "flex", gap: 8, alignItems: "flex-start" }}>
+                <div style={{ flex: 1 }}><AddLineBox onAdd={label => addCustom("custom_expense", label)} placeholder="e.g. Drone survey" /></div>
+                <ReorderToggle group="expense" />
+              </div>
               </div>
 
 
