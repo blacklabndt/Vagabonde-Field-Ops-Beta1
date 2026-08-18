@@ -2342,14 +2342,60 @@ export const Db = {
     return data ? shapeChatMessage(data) : null;
   },
 
-  // The GIF picker's search, proxied through an Edge Function so the
-  // Tenor key stays a server-side secret. Returns { gifs: [...] }; an
-  // empty search term asks for what's trending.
-  async searchGifs(q) {
-    const { data, error } = await sbClient.functions.invoke("gif-search", { body: { q } });
+  // The GIF picker's search. KLIPY's integration terms require the
+  // search itself to come from the user's own browser (no proxying), so
+  // the Edge Function's only job is handing the app key to signed-in
+  // accounts — fetched once per session, then every search goes straight
+  // to api.klipy.com. An empty term asks for what's trending.
+  async _klipyKey() {
+    if (this._klipyKeyCache) return this._klipyKeyCache;
+    const { data, error } = await sbClient.functions.invoke("gif-search", { body: {} });
     if (error) throw new Error(await readFnError(error));
     if (data && data.error) throw new Error(data.error);
-    return (data && data.gifs) || [];
+    this._klipyKeyCache = data && data.appKey;
+    if (!this._klipyKeyCache) throw new Error("GIF search isn't set up yet.");
+    return this._klipyKeyCache;
+  },
+
+  async searchGifs(q) {
+    const key = await this._klipyKey();
+    const term = String(q || "").trim();
+    const params = new URLSearchParams({ per_page: "24", content_filter: "medium" });
+    if (term) params.set("q", term);
+    const res = await fetch(
+      `https://api.klipy.com/api/v1/${key}/gifs/${term ? "search" : "trending"}?${params}`
+    );
+    if (!res.ok) throw new Error(`The GIF service answered ${res.status} — try again in a moment.`);
+    const payload = await res.json();
+    const items = payload && payload.data && Array.isArray(payload.data.data) ? payload.data.data : [];
+    // Two URLs per result: a small copy for the picker grid, a mid-size
+    // copy for the message itself. Animated WebP where it exists — the
+    // same animation at a fraction of a real .gif's bytes, which matters
+    // on a field connection — with .gif as the fallback.
+    const pick = (file, sizes, formats) => {
+      for (const s of sizes) {
+        const bucket = file && file[s];
+        if (!bucket) continue;
+        for (const f of formats) {
+          if (bucket[f] && bucket[f].url) return bucket[f];
+        }
+      }
+      return null;
+    };
+    return items
+      .map(it => {
+        const full = pick(it.file, ["md", "hd", "sm"], ["webp", "gif"]);
+        const preview = pick(it.file, ["sm", "xs", "md"], ["webp", "gif", "jpg"]) || full;
+        if (!full) return null;
+        return {
+          id: String(it.id || it.slug || full.url),
+          full: full.url,
+          preview: preview.url,
+          width: preview.width || 0,
+          height: preview.height || 0
+        };
+      })
+      .filter(Boolean);
   },
 
   // Text, a picture, a GIF, or text with one of the two. The picture goes

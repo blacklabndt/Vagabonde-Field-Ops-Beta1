@@ -82,9 +82,10 @@ function mergeIn(prev, incoming) {
 }
 
 // The GIF search. Opens on what's trending, then searches as you type —
-// through our own Edge Function, so the Tenor key never reaches a phone.
-// Tapping a GIF sends it on its own; whatever is typed in the composer
-// stays there.
+// straight against KLIPY from this browser, as their terms require; the
+// Edge Function only hands over the app key (see Db.searchGifs). Tapping
+// a GIF sends it on its own; whatever is typed in the composer stays
+// there.
 function GifPicker({ onPick, onClose, busy }) {
   const [term, setTerm] = useState("");
   const [gifs, setGifs] = useState([]);
@@ -143,7 +144,7 @@ function GifPicker({ onPick, onClose, busy }) {
         </div>
       )}
       <div style={{ fontSize: 11, color: "color-mix(in srgb, var(--color-text) 45%, transparent)", marginTop: 8 }}>
-        Search powered by Tenor
+        Powered by KLIPY
       </div>
     </Dialog>
   );
@@ -498,7 +499,7 @@ export function TeamChatScreen({ currentUser }) {
                           : "var(--color-divider)")
                       }}>
                         {m.gifUrl && (
-                          // Straight off Tenor's CDN — the constraint on the
+                          // Straight off KLIPY's CDN — the constraint on the
                           // column is what keeps this an image host, not a
                           // tracking pixel.
                           <img src={m.gifUrl} alt="GIF" loading="lazy" onLoad={restick}
