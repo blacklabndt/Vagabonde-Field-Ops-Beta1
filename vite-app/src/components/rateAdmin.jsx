@@ -182,7 +182,7 @@ export function RateAdminScreen() {
     try {
       const n = await Db.copyDefaultInto(schedule.id);
       await loadSchedule();
-      if (n === 0) setError("Nothing to fill — every line here already has a rate on it, or the default has none set. Rates already entered are never overwritten.");
+      if (n === 0) setError("Nothing to fill — this card already carries every line the default has, and no unset rate here has a default figure to copy in. Rates already entered are never overwritten.");
     } catch (e) { setError(e.message || "Couldn't copy the default rates."); }
     setCopying(false);
   };
@@ -439,7 +439,7 @@ export function RateAdminScreen() {
               <div style={{ fontSize: 12, color: "color-mix(in srgb, var(--color-text) 60%, transparent)", marginBottom: 4 }}>
                 {isDefault
                   ? "What a new client starts on, and what Fill from default copies in. Nothing bills against this directly — every ticket prices off its own client schedule."
-                  : "Fill from default sets any rate still at zero from the house card. Rates already entered here are never overwritten."}
+                  : "Fill from default copies in any line this card is missing and sets any rate still at zero from the house card. Rates already entered here are never overwritten, and nothing is removed."}
               </div>
 
 

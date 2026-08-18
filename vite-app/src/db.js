@@ -2013,15 +2013,16 @@ export const Db = {
     if (error) throw error;
   },
 
-  // Copies the house default into a schedule. Two cases, because a client
-  // schedule is created with every standard line already on it at zero:
+  // Copies the house default into a schedule — the card itself, not just
+  // its figures:
   //
-  //   - a line the schedule does not carry  -> inserted
+  //   - a line the schedule does not carry  -> inserted, priced or not
   //   - a line it carries at zero           -> filled in from the default
   //
   // A line with a rate already on it is never touched: a negotiated 6in rate
   // must not silently revert to the house figure. Zero is not a negotiated
-  // rate, it is an unset one.
+  // rate, it is an unset one. Nothing is ever removed, either — lines this
+  // schedule has that the default lacks are its own business.
   async copyDefaultInto(scheduleId) {
     const { data: def } = await sbClient
       .from("rate_schedules").select("id").is("client_id", null)
@@ -2033,7 +2034,7 @@ export const Db = {
       sbClient.from("rate_lines").select("*").eq("schedule_id", def.id),
       sbClient.from("rate_lines").select("id, kind, label, rate").eq("schedule_id", scheduleId)
     ]);
-    if (!source || !source.length) throw new Error("The default schedule has no rates on it yet.");
+    if (!source || !source.length) throw new Error("The default schedule has nothing on it yet — set it up first.");
 
     const key = l => l.kind + "\u0000" + l.label;
     const mine = new Map((existing || []).map(l => [key(l), l]));
@@ -2041,10 +2042,17 @@ export const Db = {
     const toAdd = [];
     const toFill = [];
     for (const l of source) {
-      if (!Number(l.rate)) continue;              // nothing to copy from
       const match = mine.get(key(l));
-      if (!match) toAdd.push({ schedule_id: scheduleId, kind: l.kind, label: l.label, unit: l.unit, rate: l.rate });
-      else if (!Number(match.rate)) toFill.push({ id: match.id, rate: l.rate });
+      // Structure copies whether or not the line is priced yet: the house
+      // card's rows — its size bands, its methods — are themselves the
+      // template, and they used to be skipped at $0, which made "Fill from
+      // default" a no-op on a card whose rates hadn't been typed in yet.
+      // The default's dragged order comes along with each line.
+      if (!match) {
+        toAdd.push({ schedule_id: scheduleId, kind: l.kind, label: l.label, unit: l.unit, rate: l.rate, position: l.position });
+      } else if (Number(l.rate) && !Number(match.rate)) {
+        toFill.push({ id: match.id, rate: l.rate });
+      }
     }
 
     if (toAdd.length) {
