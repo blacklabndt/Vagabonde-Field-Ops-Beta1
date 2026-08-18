@@ -1,6 +1,6 @@
 import { createClient } from "@supabase/supabase-js";
 import { sbClient, SUPABASE_URL, SUPABASE_ANON_KEY } from "./config.js";
-import { todayLocal, localDate, dayMonth, ticketDateStamp, primaryContact, ageInDays, storageKeySafe, SIZE_LABELS, METHODS, STANDARD_RATE_LINES, EXPENSE_LABELS } from "./data.js";
+import { todayLocal, localDate, dayMonth, ticketDateStamp, primaryContact, ageInDays, storageKeySafe, STANDARD_RATE_LINES } from "./data.js";
 import { OfflineCache } from "./offlineCache.js";
 import { Toasts } from "./toastBus.js";
 import { OfflineQueue, isNetworkError } from "./offlineQueue.js";
@@ -1873,12 +1873,15 @@ export const Db = {
   },
 
   // Pulls the most recently published schedule for a client and shapes it
-  // to match what the billing-ticket screen expects (see ticketMobile.jsx).
-  // Wrapped for offline: without the client's rates the billing screen has
+  // into the billing catalog the ticket screen offers: every line on the
+  // card, in the card's dragged order, priced as the card says. Contents,
+  // not just prices — a custom line on the card is offered, a line removed
+  // from the card is gone from the menu rather than offered at $0.
+  // Wrapped for offline: without the client's catalog the billing screen has
   // nothing to price against and refuses to open, which is what made building
   // a ticket in the field impossible even though saving one was handled.
   async getPublishedRatesForClient(clientId) {
-    return OfflineCache.readThrough("rates." + clientId, () => this._fetchPublishedRates(clientId));
+    return OfflineCache.readThrough("catalog." + clientId, () => this._fetchPublishedRates(clientId));
   },
 
   async _fetchPublishedRates(clientId) {
@@ -1889,28 +1892,45 @@ export const Db = {
     if (!schedule) return null;
 
     const { data: lines, error: lErr } = await sbClient
-      .from("rate_lines").select("*").eq("schedule_id", schedule.id);
+      .from("rate_lines").select("*").eq("schedule_id", schedule.id)
+      .order("position", { ascending: true, nullsFirst: false }).order("label");
     if (lErr) throw lErr;
 
-    const bySize = kind => SIZE_LABELS.map(sz => {
-      const row = lines.find(l => l.kind === kind && l.label === sz);
-      return row ? Number(row.rate) : 0;
-    });
-    // EXPENSE_LABELS rather than a copy of the list: this used to be written
-    // out again here, so a line added to the rate card in data.js silently
-    // failed to reach the ticket screen's prices.
-    const expLabels = EXPENSE_LABELS;
-    return {
-      film: bySize("rt_film"), cr: bySize("rt_cr"), dr: bySize("rt_dr"),
-      methods: METHODS.map(m => {
-        const row = lines.find(l => l.kind === "method" && l.label === m.label);
-        return row ? Number(row.rate) : m.base;
-      }),
-      exp: expLabels.map(label => {
-        const row = lines.find(l => l.kind === "expense" && l.label === label);
-        return row ? Number(row.rate) : 0;
-      })
-    };
+    // The card's rows, expanded the way a ticket bills them: a size row is
+    // three per-weld items (film, CR, DR), a method is one, and the expense
+    // group is the other-charges list. Item labels are built exactly the way
+    // tickets have always stored them, so old drafts reopen unchanged. Keys
+    // are kind:label — unique per the schedule's line index.
+    const RT = { rt_film: "RT film", rt_cr: "RT CR", rt_dr: "RT DR" };
+    const welds = [];
+    const seenSizes = new Set();
+    for (const l of lines) {
+      if (RT[l.kind]) {
+        if (seenSizes.has(l.label)) continue;
+        seenSizes.add(l.label);
+        for (const kind of Object.keys(RT)) {
+          const row = lines.find(x => x.kind === kind && x.label === l.label);
+          if (row) welds.push({ key: kind + ":" + row.label, label: row.label + " · " + RT[kind], rate: Number(row.rate), isWeld: true });
+        }
+      } else if (l.kind === "custom_weld") {
+        // One-cell lines from before custom sizes grew all three kinds.
+        welds.push({ key: "custom_weld:" + l.label, label: l.label, rate: Number(l.rate), isWeld: true });
+      }
+    }
+    for (const l of lines) {
+      if (l.kind === "method" || l.kind === "custom_method") {
+        // Not isWeld: the weld count on the ticket header counts RT welds
+        // shot, the way it always has.
+        welds.push({ key: l.kind + ":" + l.label, label: l.label + " — per weld", rate: Number(l.rate), isWeld: false });
+      }
+    }
+    const others = lines
+      .filter(l => l.kind === "expense" || l.kind === "custom_expense")
+      .map(l => ({
+        key: l.kind + ":" + l.label, label: l.label, rate: Number(l.rate),
+        unit: l.unit || "ea", step: l.unit === "h" ? 0.5 : 1
+      }));
+    return { welds, others };
   },
 
   // ── Rate admin (full editable schedule, not just the read-only lookup

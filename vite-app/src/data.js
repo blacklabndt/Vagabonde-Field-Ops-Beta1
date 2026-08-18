@@ -319,16 +319,14 @@ export const SEED_HAZARDS = [
   { name: "Weather related", control: "Dress to conditions; watch for extreme heat/cold, slippery or wet ground", level: "Med", on: true }
 ];
 
-// Per-weld charges: every RT capture mode × size band, plus other test methods.
-const RT_MODES = [{ key: "film", label: "RT — film" }, { key: "cr", label: "RT — CR" }, { key: "dr", label: "RT — DR" }];
+// The methods every schedule starts with. What a ticket can bill comes from
+// the client's card itself now (Db catalog), not from this list — it exists
+// to seed new schedules and order old, position-less lines.
 export const METHODS = [
-  { key: "mt", label: "MT / MPI", base: 34 }, { key: "pt", label: "PT", base: 29 },
-  { key: "vt", label: "VT", base: 18 }, { key: "ht", label: "Hardness test", base: 46 },
-  { key: "ut", label: "UT", base: 52 }
+  { key: "mt", label: "MT / MPI" }, { key: "pt", label: "PT" },
+  { key: "vt", label: "VT" }, { key: "ht", label: "Hardness test" },
+  { key: "ut", label: "UT" }
 ];
-export const WELD_ITEMS = RT_MODES.flatMap(m =>
-  SIZE_LABELS.map((sz, i) => ({ key: m.key + i, label: sz + " · " + m.label.replace("RT — ", "RT "), mode: m.key, weldIdx: i, isWeld: true }))
-).concat(METHODS.map(m => ({ key: m.key, label: m.label + " — per weld", methodKey: m.key })));
 
 // The lines every rate schedule starts with, at zero. One list, used both
 // when a schedule is first opened and by Restore standard lines, so the two
@@ -347,8 +345,8 @@ export const STANDARD_RATE_LINES = [
   // The crew rate is per truck, not per person: a second technician in the
   // same truck does not double it, and a second truck is a second ticket —
   // which is why these no longer say "Technician". Renamed live in migration
-  // 20260818025620; the DB labels and these must stay identical, since
-  // rates.exp is matched by label text.
+  // 20260818025620; the DB labels and these must stay identical, since old
+  // tickets and legacy aliases are matched by label text.
   { kind: "expense", label: "Straight time", unit: "h", position: 20 },
   { kind: "expense", label: "Overtime", unit: "h", position: 21 },
   // Travel is billed apart from hours worked, at its own rate — that is how
@@ -357,39 +355,18 @@ export const STANDARD_RATE_LINES = [
   { kind: "expense", label: "Travel — overtime", unit: "h", position: 23 },
   { kind: "expense", label: "Mileage", unit: "km", position: 24 },
   { kind: "expense", label: "Film & consumables", unit: "ea", position: 25 },
-  { kind: "expense", label: "Subsistence / LOA", unit: "days", position: 26 }
-];
-
-// The expense labels, in the order a client's rates are returned as
-// `rates.exp`. Derived rather than written out a second time: db.js used to
-// keep its own copy of this list and SERVICES indexed into it with hardcoded
-// numbers, so adding one line meant editing three places that had no way of
-// telling each other they disagreed. Everything now follows the list above.
-export const EXPENSE_LABELS =
-  STANDARD_RATE_LINES.filter(l => l.kind === "expense").map(l => l.label);
-
-const expIdx = label => {
-  const i = EXPENSE_LABELS.indexOf(label);
-  if (i < 0) throw new Error(`No expense rate line called "${label}" — SERVICES and STANDARD_RATE_LINES disagree.`);
-  return i;
-};
-
-export const SERVICES = [
-  { key: "straight", label: "Straight time", unit: "h", rateIdx: expIdx("Straight time"), step: 0.5 },
-  { key: "ot", label: "Overtime", unit: "h", rateIdx: expIdx("Overtime"), step: 0.5 },
-  { key: "travel", label: "Travel — straight", unit: "h", rateIdx: expIdx("Travel — straight"), step: 0.5 },
-  { key: "travelOt", label: "Travel — overtime", unit: "h", rateIdx: expIdx("Travel — overtime"), step: 0.5 },
-  { key: "km", label: "Mileage", unit: "km", rateIdx: expIdx("Mileage") },
-  { key: "exposures", label: "Film & consumables", unit: "ea", rateIdx: expIdx("Film & consumables") },
-  { key: "loaDays", label: "Subsistence / LOA", unit: "days", rateIdx: expIdx("Subsistence / LOA") },
-  { key: "standby", label: "Standby time", unit: "h", rate: 96 },
-  { key: "callout", label: "Callout premium", unit: "ea", rate: 320 },
-  { key: "source", label: "Source / isotope charge", unit: "days", rate: 210 },
-  { key: "unit", label: "Truck / unit day rate", unit: "days", rate: 475 },
-  { key: "darkroom", label: "Darkroom / processing", unit: "h", rate: 88 },
-  { key: "crawler", label: "Crawler unit", unit: "days", rate: 650 },
-  { key: "mobe", label: "Mobilization / demob", unit: "ea", rate: 540 },
-  { key: "safety", label: "Safety watch / attendant", unit: "h", rate: 74 }
+  { kind: "expense", label: "Subsistence / LOA", unit: "days", position: 26 },
+  // The eight that used to be priced by constants in the ticket screen's
+  // SERVICES list, moved onto the card by migration 20260818035752 so every
+  // dollar a ticket bills comes from one editable place.
+  { kind: "expense", label: "Standby time", unit: "h", position: 27 },
+  { kind: "expense", label: "Callout premium", unit: "ea", position: 28 },
+  { kind: "expense", label: "Source / isotope charge", unit: "days", position: 29 },
+  { kind: "expense", label: "Truck / unit day rate", unit: "days", position: 30 },
+  { kind: "expense", label: "Darkroom / processing", unit: "h", position: 31 },
+  { kind: "expense", label: "Crawler unit", unit: "days", position: 32 },
+  { kind: "expense", label: "Mobilization / demob", unit: "ea", position: 33 },
+  { kind: "expense", label: "Safety watch / attendant", unit: "h", position: 34 }
 ];
 
 // ─── tiny persistence layer ────────────────────────────────────────────

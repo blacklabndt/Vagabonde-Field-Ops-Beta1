@@ -1,34 +1,25 @@
 import React, { useState, useEffect, useMemo, useRef } from "react";
-import { money, todayLocal, localDate, dayMonth, initialsOf, crewRoleFor, hours, METHODS, WELD_ITEMS, SERVICES } from "../data.js";
+import { money, todayLocal, localDate, dayMonth, initialsOf, crewRoleFor, hours } from "../data.js";
 import { Db } from "../db.js";
 import { Blueprint, Btn, TagX, Field, ErrorBox, round1, emailIn, NoJobSelected, QueuedPanel, NumField , Loading } from "./common.jsx";
 import { OfflineQueue } from "../offlineQueue.js";
 import { OfflineCache } from "../offlineCache.js";
 
-function rateForWeldItem(item, rates) {
-  if (item.isWeld) return rates[item.mode][item.weldIdx];
-  const idx = METHODS.findIndex(m => m.key === item.methodKey);
-  return rates.methods[idx];
-}
-function rateForService(svc, rates) {
-  if (svc.rateIdx != null) return rates.exp[svc.rateIdx];
-  return svc.rate;
-}
-
-// Stored ticket lines back into the two on-screen lists. Matched by label,
-// which is what a ticket stores — a line whose label is no longer in the rate
-// card is left off rather than guessed at.
+// Stored ticket lines back into the two on-screen lists, matched by label
+// against the client's catalog — what's offered, in what order, at what
+// price all come from the rate card now, so a line whose label is no longer
+// on the card is left off rather than guessed at.
 //
 // `keepQuantities` is the difference between reopening a draft (which must
 // come back exactly as it was left) and copying yesterday's ticket forward
 // (which must not).
-function linesToForm(lines, keepQuantities) {
-  const weldKeyByLabel = Object.fromEntries(WELD_ITEMS.map(w => [w.label, w.key]));
-  const serviceKeyByLabel = Object.fromEntries(SERVICES.map(s => [s.label, s.key]));
+function linesToForm(lines, keepQuantities, catalog) {
+  const weldKeyByLabel = Object.fromEntries(catalog.welds.map(w => [w.label, w.key]));
+  const serviceKeyByLabel = Object.fromEntries(catalog.others.map(s => [s.label, s.key]));
   // Tickets billed before the 20260818025620 rename stored the old names.
   // They still reopen and copy forward as the lines they are.
-  serviceKeyByLabel["Technician — straight"] = "straight";
-  serviceKeyByLabel["Technician — overtime"] = "ot";
+  if (serviceKeyByLabel["Straight time"]) serviceKeyByLabel["Technician — straight"] = serviceKeyByLabel["Straight time"];
+  if (serviceKeyByLabel["Overtime"]) serviceKeyByLabel["Technician — overtime"] = serviceKeyByLabel["Overtime"];
   const welds = [], others = [];
   (lines || []).forEach(l => {
     const qty = keepQuantities ? Number(l.quantity) : 0;
@@ -73,9 +64,11 @@ export function TicketMobileScreen({ job, jobRecord, currentUser, onSaved, ticke
   // dropdown on purpose. (Reopened drafts and "start from last ticket" still
   // bring their own lines; this is only what a blank ticket opens with.)
   const [weldLines, setWeldLines] = useState([]);
-  const [weldPick, setWeldPick] = useState(WELD_ITEMS[0].key);
+  // The dropdown picks start empty because the menus themselves arrive with
+  // the catalog; the render falls back to the first available item.
+  const [weldPick, setWeldPick] = useState("");
   const [otherLines, setOtherLines] = useState([]);
-  const [servicePick, setServicePick] = useState(SERVICES[0].key);
+  const [servicePick, setServicePick] = useState("");
   const [saving, setSaving] = useState(false);
   const [saveError, setSaveError] = useState("");
   const [queued, setQueued] = useState(false);
@@ -171,12 +164,17 @@ export function TicketMobileScreen({ job, jobRecord, currentUser, onSaved, ticke
   // Reopening a draft: pull its lines and crew back into the form. Lines
   // are matched by label, which is what the ticket stores — a line whose label
   // no longer exists in the rate card is left off rather than guessed at.
+  // Waits for the catalog, since the labels are matched against it — and runs
+  // once: the rates object is refetched when the work date changes, and
+  // re-running this then would wipe edits back to the stored draft.
+  const draftLoaded = useRef(false);
   useEffect(() => {
-    if (!ticket) return;
+    if (!ticket || !rates || draftLoaded.current) return;
+    draftLoaded.current = true;
     (async () => {
       try {
         const [row, savedCrew] = await Promise.all([Db.getTicket(ticket), Db.listCrewForTicket(ticket)]);
-        const { welds, others } = linesToForm(row.ticket_lines, true);
+        const { welds, others } = linesToForm(row.ticket_lines, true, rates);
         if (welds.length) setWeldLines(welds);
         if (others.length) setOtherLines(others);
         if (row.work_date) setWorkDate(row.work_date);
@@ -188,7 +186,7 @@ export function TicketMobileScreen({ job, jobRecord, currentUser, onSaved, ticke
       }
       setLoadingTicket(false);
     })();
-  }, [ticket]);
+  }, [ticket, rates]);
 
   // ── Start from the last ticket ─────────────────────────────────────────
   // Offered, never applied on its own: a ticket must never arrive carrying
@@ -207,8 +205,8 @@ export function TicketMobileScreen({ job, jobRecord, currentUser, onSaved, ticke
   }, [job ? job.dbId : null, ticket]);
 
   const startFromLast = () => {
-    if (!lastTicket) return;
-    const { welds, others } = linesToForm(lastTicket.lines, false);
+    if (!lastTicket || !rates) return;
+    const { welds, others } = linesToForm(lastTicket.lines, false, rates);
     if (welds.length) setWeldLines(welds);
     if (others.length) setOtherLines(others);
     if (lastTicket.crew.length) {
@@ -276,9 +274,9 @@ export function TicketMobileScreen({ job, jobRecord, currentUser, onSaved, ticke
     setCrew(p => p.map(c => ({ ...c, ...Object.fromEntries(CREW_FIGURES.map(k => [k, 0])) })));
   };
 
-  // Constant maps — rebuilt on every keystroke before, for no reason.
-  const weldItemsByKey = useMemo(() => Object.fromEntries(WELD_ITEMS.map(w => [w.key, w])), []);
-  const serviceByKey = useMemo(() => Object.fromEntries(SERVICES.map(s => [s.key, s])), []);
+  // Catalog maps — rebuilt only when the catalog itself arrives or changes.
+  const weldItemsByKey = useMemo(() => rates ? Object.fromEntries(rates.welds.map(w => [w.key, w])) : {}, [rates]);
+  const serviceByKey = useMemo(() => rates ? Object.fromEntries(rates.others.map(s => [s.key, s])) : {}, [rates]);
 
   if (!job) return <NoJobSelected what="a billing ticket" />;
   if (queued) return <QueuedPanel what="this ticket" onDone={onSaved} />;
@@ -289,21 +287,38 @@ export function TicketMobileScreen({ job, jobRecord, currentUser, onSaved, ticke
     return <div className="page"><Loading label={loadingTicket ? "Opening ticket…" : "Loading rates…"} /></div>;
   }
 
-  const weldCount = weldLines.filter(l => weldItemsByKey[l.key].isWeld).reduce((s, l) => s + l.qty, 0);
-  const weldDollars = weldLines.reduce((s, l) => s + l.qty * rateForWeldItem(weldItemsByKey[l.key], rates), 0);
-  const otherDollars = otherLines.reduce((s, l) => s + l.qty * rateForService(serviceByKey[l.key], rates), 0);
+  // Lines joined to their catalog items, dropping anything the card no
+  // longer offers — a key can go stale between a device's recovered
+  // work-in-progress and a card edited in the meantime, and an unknown key
+  // must degrade to "not on this ticket", never to a crash or a $0 line.
+  const weldRows = weldLines.map(l => ({ ...l, item: weldItemsByKey[l.key] })).filter(r => r.item);
+  const otherRows = otherLines.map(l => ({ ...l, item: serviceByKey[l.key] })).filter(r => r.item);
+
+  const weldCount = weldRows.filter(r => r.item.isWeld).reduce((s, r) => s + r.qty, 0);
+  const weldDollars = weldRows.reduce((s, r) => s + r.qty * r.item.rate, 0);
+  const otherDollars = otherRows.reduce((s, r) => s + r.qty * r.item.rate, 0);
   const total = weldDollars + otherDollars;
 
-  const availableWeld = WELD_ITEMS.filter(w => !weldLines.some(l => l.key === w.key));
-  const availableService = SERVICES.filter(s => !otherLines.some(l => l.key === s.key));
+  const availableWeld = rates.welds.filter(w => !weldLines.some(l => l.key === w.key));
+  const availableService = rates.others.filter(s => !otherLines.some(l => l.key === s.key));
+  // The dropdown picks fall back to the first item still available, so the
+  // selects are never pointing at something already added or off the card.
+  const effWeldPick = availableWeld.some(w => w.key === weldPick) ? weldPick : (availableWeld[0] || {}).key || "";
+  const effServicePick = availableService.some(s => s.key === servicePick) ? servicePick : (availableService[0] || {}).key || "";
 
   // What the client is billed for hours — the figure the crew split is
   // measured against. A crew line can legitimately differ from it (crew-hours
   // billed once, worked by two people), so this informs rather than enforces.
   // Solo hours are a rate distinction inside those hours, not extra time, so
-  // they're excluded from the comparison.
-  const billedStraight = (otherLines.find(l => l.key === "straight") || {}).qty || 0;
-  const billedOt = (otherLines.find(l => l.key === "ot") || {}).qty || 0;
+  // they're excluded from the comparison. Looked up by label — the card
+  // decides the keys now.
+  const billedQty = label => {
+    const it = rates.others.find(o => o.label === label);
+    const row = it && otherLines.find(l => l.key === it.key);
+    return row ? row.qty : 0;
+  };
+  const billedStraight = billedQty("Straight time");
+  const billedOt = billedQty("Overtime");
   const assignedStraight = crew.reduce((s, c) => s + (c.straight || 0), 0);
   const assignedOt = crew.reduce((s, c) => s + (c.ot || 0), 0);
   const availablePeople = people.filter(p => !crew.some(c => c.profileId === p.id));
@@ -328,8 +343,8 @@ export function TicketMobileScreen({ job, jobRecord, currentUser, onSaved, ticke
   const removeOther = key => setOtherLines(p => p.filter(l => l.key !== key));
 
   const buildLines = () => [
-    ...weldLines.map(l => { const it = weldItemsByKey[l.key]; return { kind: "weld", label: it.label, unit: "weld", quantity: l.qty, unit_rate: rateForWeldItem(it, rates) }; }),
-    ...otherLines.map(l => { const svc = serviceByKey[l.key]; return { kind: "charge", label: svc.label, unit: svc.unit, quantity: l.qty, unit_rate: rateForService(svc, rates) }; })
+    ...weldRows.map(r => ({ kind: "weld", label: r.item.label, unit: "weld", quantity: r.qty, unit_rate: r.item.rate })),
+    ...otherRows.map(r => ({ kind: "charge", label: r.item.label, unit: r.item.unit, quantity: r.qty, unit_rate: r.item.rate }))
   ];
 
   const save = async sendForApproval => {
@@ -503,38 +518,37 @@ export function TicketMobileScreen({ job, jobRecord, currentUser, onSaved, ticke
             <span style={{ fontSize: 13, fontFamily: "var(--font-heading)", fontWeight: 600 }}>Per-weld charges</span>
             <span className="tabular" style={{ marginLeft: "auto", fontSize: 12, color: "var(--color-accent)" }}>{weldCount} welds · {money(weldDollars)}</span>
           </div>
-          {weldLines.length === 0 && (
+          {weldRows.length === 0 && (
             <div style={{ fontSize: 12, color: "color-mix(in srgb, var(--color-text) 55%, transparent)" }}>
               Nothing billed yet — pick a line below and tap Add.
             </div>
           )}
           <div style={{ display: "flex", flexDirection: "column", gap: 6 }}>
-            {weldLines.map(l => {
-              const item = weldItemsByKey[l.key];
-              const rate = rateForWeldItem(item, rates);
+            {weldRows.map(r => {
+              const rate = r.item.rate;
               return (
-                <div key={l.key} style={{ display: "flex", alignItems: "center", gap: 8, borderBottom: "1px solid color-mix(in srgb, var(--color-text) 8%, transparent)", paddingBottom: 6 }}>
+                <div key={r.key} style={{ display: "flex", alignItems: "center", gap: 8, borderBottom: "1px solid color-mix(in srgb, var(--color-text) 8%, transparent)", paddingBottom: 6 }}>
                   <div style={{ flex: 1, minWidth: 0 }}>
-                    <div style={{ fontSize: 15 }}>{item.label}</div>
+                    <div style={{ fontSize: 15 }}>{r.item.label}</div>
                     <div className="tabular" style={{ fontSize: 10, color: "color-mix(in srgb, var(--color-text) 55%, transparent)" }}>{money(rate)} / weld</div>
                   </div>
                   {/* Typed, like Other charges below. These were − / + only,
                       so a day of 40 welds was 40 taps. */}
-                  <NumField style={{ width: 66, textAlign: "right" }} value={l.qty}
-                    aria-label={item.label} onChange={v => setWeldQty(l.key, v)} />
+                  <NumField style={{ width: 66, textAlign: "right" }} value={r.qty}
+                    aria-label={r.item.label} onChange={v => setWeldQty(r.key, v)} />
                   <span style={{ fontSize: 11, width: 22 }}>welds</span>
-                  <span className="tabular" style={{ width: 62, textAlign: "right", fontSize: 14 }}>{money(l.qty * rate)}</span>
-                  <button onClick={() => removeWeld(l.key)} style={{ background: "none", border: "none", cursor: "pointer", color: "color-mix(in srgb, var(--color-text) 50%, transparent)", fontSize: 16 }}>×</button>
+                  <span className="tabular" style={{ width: 62, textAlign: "right", fontSize: 14 }}>{money(r.qty * rate)}</span>
+                  <button onClick={() => removeWeld(r.key)} style={{ background: "none", border: "none", cursor: "pointer", color: "color-mix(in srgb, var(--color-text) 50%, transparent)", fontSize: 16 }}>×</button>
                 </div>
               );
             })}
           </div>
           {availableWeld.length > 0 && (
             <div style={{ display: "flex", gap: 6 }}>
-              <select className="input" value={weldPick} onChange={e => setWeldPick(e.target.value)} style={{ flex: 1 }}>
+              <select className="input" value={effWeldPick} onChange={e => setWeldPick(e.target.value)} style={{ flex: 1 }}>
                 {availableWeld.map(w => <option key={w.key} value={w.key}>{w.label}</option>)}
               </select>
-              <Btn variant="secondary" onClick={() => { setWeldLines(p => [...p, { key: weldPick, qty: 1 }]); const rest = availableWeld.filter(w => w.key !== weldPick); if (rest[0]) setWeldPick(rest[0].key); }}>Add</Btn>
+              <Btn variant="secondary" onClick={() => { const pick = effWeldPick; if (!pick) return; setWeldLines(p => [...p, { key: pick, qty: 1 }]); const rest = availableWeld.filter(w => w.key !== pick); if (rest[0]) setWeldPick(rest[0].key); }}>Add</Btn>
             </div>
           )}
 
@@ -542,36 +556,35 @@ export function TicketMobileScreen({ job, jobRecord, currentUser, onSaved, ticke
             <span style={{ fontSize: 13, fontFamily: "var(--font-heading)", fontWeight: 600 }}>Other charges</span>
             <span className="tabular" style={{ marginLeft: "auto", fontSize: 12, color: "var(--color-accent)" }}>{money(otherDollars)}</span>
           </div>
-          {otherLines.length === 0 && (
+          {otherRows.length === 0 && (
             <div style={{ fontSize: 12, color: "color-mix(in srgb, var(--color-text) 55%, transparent)" }}>
               Nothing billed yet — pick a line below and tap Add.
             </div>
           )}
           <div style={{ display: "flex", flexDirection: "column", gap: 6 }}>
-            {otherLines.map(l => {
-              const svc = serviceByKey[l.key];
-              const rate = rateForService(svc, rates);
+            {otherRows.map(r => {
+              const rate = r.item.rate;
               return (
-                <div key={l.key} style={{ display: "flex", alignItems: "center", gap: 8, borderBottom: "1px solid color-mix(in srgb, var(--color-text) 8%, transparent)", paddingBottom: 6 }}>
+                <div key={r.key} style={{ display: "flex", alignItems: "center", gap: 8, borderBottom: "1px solid color-mix(in srgb, var(--color-text) 8%, transparent)", paddingBottom: 6 }}>
                   <div style={{ flex: 1, minWidth: 0 }}>
-                    <div style={{ fontSize: 14 }}>{svc.label}</div>
-                    <div className="tabular" style={{ fontSize: 10, color: "color-mix(in srgb, var(--color-text) 55%, transparent)" }}>{money(rate)} / {svc.unit}</div>
+                    <div style={{ fontSize: 14 }}>{r.item.label}</div>
+                    <div className="tabular" style={{ fontSize: 10, color: "color-mix(in srgb, var(--color-text) 55%, transparent)" }}>{money(rate)} / {r.item.unit}</div>
                   </div>
-                  <NumField style={{ width: 66, textAlign: "right" }} step={svc.step || 1} value={l.qty}
-                    onChange={v => setOtherQty(l.key, v)} />
-                  <span style={{ fontSize: 11, width: 22 }}>{svc.unit}</span>
-                  <span className="tabular" style={{ width: 62, textAlign: "right", fontSize: 14 }}>{money(l.qty * rate)}</span>
-                  <button onClick={() => removeOther(l.key)} style={{ background: "none", border: "none", cursor: "pointer", color: "color-mix(in srgb, var(--color-text) 50%, transparent)", fontSize: 16 }}>×</button>
+                  <NumField style={{ width: 66, textAlign: "right" }} step={r.item.step || 1} value={r.qty}
+                    onChange={v => setOtherQty(r.key, v)} />
+                  <span style={{ fontSize: 11, width: 22 }}>{r.item.unit}</span>
+                  <span className="tabular" style={{ width: 62, textAlign: "right", fontSize: 14 }}>{money(r.qty * rate)}</span>
+                  <button onClick={() => removeOther(r.key)} style={{ background: "none", border: "none", cursor: "pointer", color: "color-mix(in srgb, var(--color-text) 50%, transparent)", fontSize: 16 }}>×</button>
                 </div>
               );
             })}
           </div>
           {availableService.length > 0 && (
             <div style={{ display: "flex", gap: 6 }}>
-              <select className="input" value={servicePick} onChange={e => setServicePick(e.target.value)} style={{ flex: 1 }}>
+              <select className="input" value={effServicePick} onChange={e => setServicePick(e.target.value)} style={{ flex: 1 }}>
                 {availableService.map(s => <option key={s.key} value={s.key}>{s.label}</option>)}
               </select>
-              <Btn variant="secondary" onClick={() => { setOtherLines(p => [...p, { key: servicePick, qty: 1 }]); const rest = availableService.filter(s => s.key !== servicePick); if (rest[0]) setServicePick(rest[0].key); }}>Add</Btn>
+              <Btn variant="secondary" onClick={() => { const pick = effServicePick; if (!pick) return; setOtherLines(p => [...p, { key: pick, qty: 1 }]); const rest = availableService.filter(s => s.key !== pick); if (rest[0]) setServicePick(rest[0].key); }}>Add</Btn>
             </div>
           )}
 
