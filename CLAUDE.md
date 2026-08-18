@@ -60,6 +60,9 @@ Cloudflare Worker `solitary-snowflake-ee22` (assets + `/approve` proxy in
   Spy-count before trusting a negative result.
 - The browser pane suspends rAF when hidden: game/animation testing needs
   the preview panel visibly open.
+- Verifying a deploy by fetching `/` can HIT Cloudflare's edge cache and
+  show the previous index.html (query-string cache-busters don't help).
+  Confirm instead that the newly hashed chunk files answer 200.
 
 ## Live data
 
