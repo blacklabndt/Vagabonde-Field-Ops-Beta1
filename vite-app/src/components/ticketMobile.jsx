@@ -1,7 +1,7 @@
 import React, { useState, useEffect, useMemo, useRef } from "react";
 import { money, todayLocal, localDate, dayMonth, initialsOf, crewRoleFor, hours } from "../data.js";
 import { Db } from "../db.js";
-import { Blueprint, Btn, TagX, Field, ErrorBox, round1, emailIn, NoJobSelected, QueuedPanel, NumField , Loading } from "./common.jsx";
+import { Blueprint, Btn, TagX, Field, ErrorBox, emailIn, NoJobSelected, QueuedPanel, NumField , Loading } from "./common.jsx";
 import { OfflineQueue } from "../offlineQueue.js";
 import { OfflineCache } from "../offlineCache.js";
 
@@ -347,15 +347,6 @@ export function TicketMobileScreen({ job, jobRecord, currentUser, onSaved, ticke
   const setCrewField = (profileId, key, value) =>
     setCrew(p => p.map(c => c.profileId === profileId ? { ...c, [key]: Math.max(0, value) } : c));
 
-  // Two conventions, one tap each: hours divided among the crew, or each
-  // person credited the full day (crew-rate billing).
-  const splitEvenly = () => setCrew(p => p.length ? p.map(c => ({
-    ...c,
-    straight: round1(billedStraight / p.length),
-    ot: round1(billedOt / p.length)
-  })) : p);
-  const fullHoursEach = () => setCrew(p => p.map(c => ({ ...c, straight: billedStraight, ot: billedOt })));
-
   const setWeldQty = (key, qty) => setWeldLines(p => p.map(l => l.key === key ? { ...l, qty: Math.max(0, qty) } : l));
   const setOtherQty = (key, qty) => setOtherLines(p => p.map(l => l.key === key ? { ...l, qty: Math.max(0, qty) } : l));
   const removeWeld = key => setWeldLines(p => p.filter(l => l.key !== key));
@@ -676,11 +667,6 @@ export function TicketMobileScreen({ job, jobRecord, currentUser, onSaved, ticke
                 </div>
               </div>
             ))}
-          </div>
-
-          <div style={{ display: "flex", gap: 6 }}>
-            <Btn variant="secondary" style={{ flex: 1, fontSize: 12 }} onClick={splitEvenly}>Split evenly</Btn>
-            <Btn variant="secondary" style={{ flex: 1, fontSize: 12 }} onClick={fullHoursEach}>Full hours each</Btn>
           </div>
 
           {(assignedStraight !== billedStraight || assignedOt !== billedOt) && (
