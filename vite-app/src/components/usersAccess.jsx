@@ -1,7 +1,7 @@
 import React, { useState, useEffect } from "react";
 import { TABS, CONTEXT_TABS, ROLE_PRESETS, TECH_LEVELS } from "../data.js";
 import { Db } from "../db.js";
-import { UNIVERSAL_TABS, tabList, Blueprint, Btn, CheckBox, PickerRow, TagX, Field, Dialog, ErrorBox, Switch, emailIn, useMissingFields , Loading } from "./common.jsx";
+import { UNIVERSAL_TABS, tabList, Blueprint, Btn, CheckBox, TagX, Field, Dialog, ErrorBox, Switch, emailIn, useMissingFields, SearchSelect, Loading } from "./common.jsx";
 
 export function UsersAccessScreen({ currentUser }) {
   const [users, setUsers] = useState([]);
@@ -78,20 +78,36 @@ export function UsersAccessScreen({ currentUser }) {
       {loading ? (
         <Loading />
       ) : (
-        <div style={{ display: "grid", gridTemplateColumns: "300px 1fr", gap: 20 }} className="grid-2col">
-          <div>
-            {users.map(u => (
-              <PickerRow key={u.id} selected={selected === u.id} onSelect={() => setSelected(u.id)}
-                style={{ padding: "10px 12px" }}>
-                <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
-                  <span style={{ fontSize: 16 }}>{u.displayName}</span>
+        <div style={{ display: "flex", flexDirection: "column", gap: 16 }}>
+          {/* One searchable picker instead of a rail of every account — the
+              crew outgrew a list you could eyeball, per Kyle. It opens on
+              your own account, same as the rail's default selection did. */}
+          <SearchSelect
+            style={{ maxWidth: 420 }}
+            listId="user-picker-list"
+            ariaLabel="Search people"
+            placeholder={account ? `${account.displayName} — search to change…` : "Search people…"}
+            search={text => {
+              const q = text.trim().toLowerCase();
+              const matched = q
+                ? users.filter(u => (u.displayName || "").toLowerCase().includes(q) || (u.role || "").toLowerCase().includes(q))
+                : users;
+              return { rows: matched.slice(0, 25), total: matched.length };
+            }}
+            optionKey={u => u.id}
+            onPick={u => setSelected(u.id)}
+            onError={setError}
+            renderOption={u => (
+              <>
+                <div style={{ display: "flex", alignItems: "center", gap: 8, fontSize: 15 }}>
+                  <span>{u.displayName}</span>
                   {u.id === currentUser.id && <TagX variant="outline">you</TagX>}
                   {u.is_subcontractor && <TagX variant="neutral">sub</TagX>}
                 </div>
                 <div style={{ fontSize: 11, color: "color-mix(in srgb, var(--color-text) 55%, transparent)" }}>{u.role} · {tabList(u.tab_access).length} of {TABS.length} sections</div>
-              </PickerRow>
-            ))}
-          </div>
+              </>
+            )}
+          />
 
           {account && (
             <Blueprint style={{ padding: "18px 20px" }}>
