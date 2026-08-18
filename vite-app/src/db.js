@@ -2475,7 +2475,15 @@ export const Db = {
   // cleanup. Updates are pin changes — bodies are immutable. Delete
   // events carry only the row's id — that is all the replicated key
   // holds — which is also all the screen needs to drop it.
-  subscribeChatMessages({ onInsert, onUpdate, onDelete }) {
+  //
+  // onStatus gets the channel's own state reports ("SUBSCRIBED",
+  // "CHANNEL_ERROR", …). They matter because a dropped feed is silent:
+  // the socket reconnects itself, but a channel that lands in an error
+  // state stays there, looking exactly like a quiet room. The screen
+  // watches the status and rebuilds the feed — found the hard way, when
+  // the realtime service restarted six times in an afternoon and every
+  // open phone just stopped hearing the room.
+  subscribeChatMessages({ onInsert, onUpdate, onDelete, onStatus }) {
     const channel = sbClient
       .channel("team-chat")
       .on("postgres_changes", { event: "INSERT", schema: "public", table: "chat_messages" },
@@ -2484,7 +2492,7 @@ export const Db = {
         p => onUpdate(shapeChatMessage(p.new)))
       .on("postgres_changes", { event: "DELETE", schema: "public", table: "chat_messages" },
         p => onDelete(p.old.id))
-      .subscribe();
+      .subscribe(status => { if (onStatus) onStatus(status); });
     return () => { sbClient.removeChannel(channel); };
   }
 };

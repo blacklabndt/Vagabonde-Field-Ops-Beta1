@@ -202,6 +202,10 @@ export function TeamChatScreen({ currentUser }) {
   const [gifOpen, setGifOpen] = useState(false);
   const [sending, setSending] = useState(false);
   const [sendError, setSendError] = useState("");
+  // Whether the realtime feed is actually delivering. False is not an
+  // error state — the 30-second refresh still carries the room — but it
+  // is said out loud below the composer instead of being invisible.
+  const [feedLive, setFeedLive] = useState(false);
 
   const listRef = useRef(null);
   const fileRef = useRef(null);
@@ -260,42 +264,79 @@ export function TeamChatScreen({ currentUser }) {
 
     loadLatest(true);
 
-    const unsubscribe = Db.subscribeChatMessages({
-      onInsert: m => {
-        if (!live) return;
-        const withName = named(m);
-        setMessages(prev => mergeIn(prev, [withName]));
-        // A sender the directory doesn't know yet — an account created
-        // since sign-in. Fetch the row with its join and patch the name.
-        if (!withName.name) {
-          Db.getChatMessage(m.id)
-            .then(full => { if (live && full && full.name) setMessages(prev => mergeIn(prev, [full])); })
-            .catch(() => {});
+    // The feed is rebuilt whenever its channel reports failure — the
+    // socket reconnects itself after a network drop or a realtime
+    // service restart, but a channel that errored stays errored, and a
+    // dead channel is indistinguishable from a quiet room. Each rebuild
+    // takes a sequence number so a late status report from a torn-down
+    // channel cannot trigger a rebuild loop.
+    let unsubscribe = null;
+    let resubTimer = null;
+    let feedSeq = 0;
+    const startFeed = () => {
+      const mine = ++feedSeq;
+      unsubscribe = Db.subscribeChatMessages({
+        onInsert: m => {
+          if (!live) return;
+          const withName = named(m);
+          setMessages(prev => mergeIn(prev, [withName]));
+          // A sender the directory doesn't know yet — an account created
+          // since sign-in. Fetch the row with its join and patch the name.
+          if (!withName.name) {
+            Db.getChatMessage(m.id)
+              .then(full => { if (live && full && full.name) setMessages(prev => mergeIn(prev, [full])); })
+              .catch(() => {});
+          }
+        },
+        onUpdate: m => {
+          if (!live) return;
+          setMessages(prev => mergeIn(prev, [named(m)]));
+          applyPinChange(m);
+        },
+        onDelete: id => {
+          if (!live) return;
+          setMessages(prev => prev.filter(m => m.id !== id));
+          setPins(prev => prev.some(p => p.id === id) ? prev.filter(p => p.id !== id) : prev);
+        },
+        onStatus: status => {
+          if (!live || mine !== feedSeq) return;
+          setFeedLive(status === "SUBSCRIBED");
+          if (status === "SUBSCRIBED") {
+            // Whatever was said while the feed was down arrived nowhere —
+            // pull it now rather than waiting out the poll interval.
+            loadLatest(false);
+            return;
+          }
+          if ((status === "CHANNEL_ERROR" || status === "TIMED_OUT" || status === "CLOSED") && !resubTimer) {
+            resubTimer = setTimeout(() => {
+              resubTimer = null;
+              if (!live) return;
+              if (unsubscribe) unsubscribe();
+              startFeed();
+            }, 5000);
+          }
         }
-      },
-      onUpdate: m => {
-        if (!live) return;
-        setMessages(prev => mergeIn(prev, [named(m)]));
-        applyPinChange(m);
-      },
-      onDelete: id => {
-        if (!live) return;
-        setMessages(prev => prev.filter(m => m.id !== id));
-        setPins(prev => prev.some(p => p.id === id) ? prev.filter(p => p.id !== id) : prev);
-      }
-    });
+      });
+    };
+    startFeed();
 
     const timer = setInterval(() => {
       if (document.visibilityState === "visible") loadLatest(false);
     }, REFRESH_MS);
     const onFocus = () => loadLatest(false);
+    // Phones coming back from sleep fire visibilitychange, not focus —
+    // and that return is exactly when the socket is most likely dead.
+    const onVisible = () => { if (document.visibilityState === "visible") loadLatest(false); };
     window.addEventListener("focus", onFocus);
+    document.addEventListener("visibilitychange", onVisible);
 
     return () => {
       live = false;
-      unsubscribe();
+      if (resubTimer) clearTimeout(resubTimer);
+      if (unsubscribe) unsubscribe();
       clearInterval(timer);
       window.removeEventListener("focus", onFocus);
+      document.removeEventListener("visibilitychange", onVisible);
     };
   }, []);
 
@@ -569,9 +610,12 @@ export function TeamChatScreen({ currentUser }) {
             </Btn>
           </div>
           {/* Said here because history quietly ending mid-scroll would
-              otherwise read as a bug, not a policy. */}
+              otherwise read as a bug, not a policy — and likewise a live
+              feed that is down reconnecting should say so, not just go
+              quiet. */}
           <div style={{ fontSize: 11, color: "color-mix(in srgb, var(--color-text) 45%, transparent)", marginTop: 6 }}>
             Messages clear after 30 days — pinned messages stay.
+            {!loading && !feedLive && " · Reconnecting live updates — checking for new messages every 30 seconds meanwhile."}
           </div>
         </div>
       </Blueprint>
