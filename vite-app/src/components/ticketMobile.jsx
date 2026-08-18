@@ -338,8 +338,20 @@ export function TicketMobileScreen({ job, jobRecord, currentUser, onSaved, ticke
   };
   const billedStraight = billedQty("Straight time");
   const billedOt = billedQty("Overtime");
+  // Blended hours are billable hours: one negotiated figure standing in for
+  // straight + OT together, per Kyle. Found by name, since it is a custom
+  // line each card carries (or doesn't) on its own terms.
+  const billedBlended = rates.others
+    .filter(o => o.unit === "h" && o.label.toLowerCase().includes("blended"))
+    .reduce((s, o) => { const row = otherLines.find(l => l.key === o.key); return s + (row ? row.qty : 0); }, 0);
   const assignedStraight = crew.reduce((s, c) => s + (c.straight || 0), 0);
   const assignedOt = crew.reduce((s, c) => s + (c.ot || 0), 0);
+  // With blended hours on the ticket, straight and OT can't be compared
+  // bucket by bucket — the blended figure covers both — so the comparison
+  // falls back to totals.
+  const hoursMismatch = billedBlended > 0
+    ? (assignedStraight + assignedOt) !== (billedStraight + billedOt + billedBlended)
+    : (assignedStraight !== billedStraight || assignedOt !== billedOt);
   const availablePeople = people.filter(p => !crew.some(c => c.profileId === p.id));
   const availableHelpers = availablePeople.filter(p => crewRoleFor(p) === "Helper");
   const availableTechs = availablePeople.filter(p => crewRoleFor(p) !== "Helper");
@@ -352,10 +364,20 @@ export function TicketMobileScreen({ job, jobRecord, currentUser, onSaved, ticke
   const removeWeld = key => setWeldLines(p => p.filter(l => l.key !== key));
   const removeOther = key => setOtherLines(p => p.filter(l => l.key !== key));
 
-  const buildLines = () => [
-    ...weldRows.map(r => ({ kind: "weld", label: r.item.label, unit: "weld", quantity: r.qty, unit_rate: r.item.rate })),
-    ...otherRows.map(r => ({ kind: "charge", label: r.item.label, unit: r.item.unit, quantity: r.qty, unit_rate: r.item.rate }))
-  ];
+  // Stored — and therefore printed on the field invoice — in the card's
+  // order, not the order lines were tapped in: the invoice reads like the
+  // rate card the client agreed to, with Blended Rate sitting where the
+  // hours sit rather than wherever it was added.
+  const buildLines = () => {
+    const weldOrder = new Map(rates.welds.map((w, i) => [w.key, i]));
+    const otherOrder = new Map(rates.others.map((s, i) => [s.key, i]));
+    return [
+      ...[...weldRows].sort((a, b) => weldOrder.get(a.key) - weldOrder.get(b.key))
+        .map(r => ({ kind: "weld", label: r.item.label, unit: "weld", quantity: r.qty, unit_rate: r.item.rate })),
+      ...[...otherRows].sort((a, b) => otherOrder.get(a.key) - otherOrder.get(b.key))
+        .map(r => ({ kind: "charge", label: r.item.label, unit: r.item.unit, quantity: r.qty, unit_rate: r.item.rate }))
+    ];
+  };
 
   const save = async sendForApproval => {
     if (total <= 0) {
@@ -617,7 +639,7 @@ export function TicketMobileScreen({ job, jobRecord, currentUser, onSaved, ticke
           <div style={{ display: "flex", alignItems: "center", marginTop: 6 }}>
             <span style={{ fontSize: 13, fontFamily: "var(--font-heading)", fontWeight: 600 }}>Crew &amp; dose</span>
             <span className="tabular" style={{ marginLeft: "auto", fontSize: 11, color: "color-mix(in srgb, var(--color-text) 55%, transparent)" }}>
-              billed {hours(billedStraight)} + {hours(billedOt)} OT
+              billed {hours(billedStraight)} + {hours(billedOt)} OT{billedBlended > 0 ? <> + {hours(billedBlended)} blended</> : null}
             </span>
           </div>
           <div style={{ fontSize: 11, color: "color-mix(in srgb, var(--color-text) 55%, transparent)", marginTop: -4 }}>
@@ -669,7 +691,7 @@ export function TicketMobileScreen({ job, jobRecord, currentUser, onSaved, ticke
             ))}
           </div>
 
-          {(assignedStraight !== billedStraight || assignedOt !== billedOt) && (
+          {hoursMismatch && (
             <div className="tabular" style={{ fontSize: 11, color: "var(--color-accent-700)" }}>
               Crew totals {hours(assignedStraight)} + {hours(assignedOt)} OT — differs from what's billed. Fine for crew-rate work; worth a second look otherwise.
             </div>
