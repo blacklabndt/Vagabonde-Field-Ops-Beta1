@@ -218,6 +218,10 @@ export function TeamChatScreen({ currentUser }) {
   const restoreHeight = useRef(null);
   // Sender names for realtime arrivals, whose rows come without the join.
   const nameOf = useRef(new Map());
+  // Rows that must mount without the entrance animation: everything the
+  // initial load and the "Show earlier" pages bring in. A message not in
+  // this set is one that arrived while you were watching — those rise in.
+  const quietIds = useRef(new Set());
 
   const named = m => m.name ? m : { ...m, name: nameOf.current.get(m.profileId) || "" };
 
@@ -251,6 +255,9 @@ export function TeamChatScreen({ currentUser }) {
     const loadLatest = initial => Promise.all([Db.listChatMessages(), Db.listPinnedChatMessages()])
       .then(([{ messages: page, hasMore: more }, pinned]) => {
         if (!live) return;
+        // The room you walk into holds still; only what arrives after
+        // you is animated.
+        if (initial) page.forEach(m => quietIds.current.add(m.id));
         setMessages(prev => mergeIn(prev, page));
         setPins(pinned);
         if (initial) setHasMore(more);
@@ -374,6 +381,7 @@ export function TeamChatScreen({ currentUser }) {
     setLoadingOlder(true);
     try {
       const { messages: older, hasMore: more } = await Db.listChatMessages(messages[0].createdAt);
+      older.forEach(m => quietIds.current.add(m.id));
       restoreHeight.current = el.scrollHeight;
       setMessages(prev => mergeIn(prev, older));
       setHasMore(more);
@@ -522,7 +530,9 @@ export function TeamChatScreen({ currentUser }) {
                 const newRun = !prev || prev.profileId !== m.profileId ||
                   new Date(m.createdAt) - new Date(prev.createdAt) > 30 * 60000;
                 return (
-                  <div key={m.id} style={{ display: "flex", flexDirection: "column", alignItems: mine ? "flex-end" : "flex-start", marginTop: newRun ? 14 : 3 }}>
+                  <div key={m.id}
+                    className={quietIds.current.has(m.id) ? undefined : "chat-msg-in"}
+                    style={{ display: "flex", flexDirection: "column", alignItems: mine ? "flex-end" : "flex-start", marginTop: newRun ? 14 : 3 }}>
                     {newRun && (
                       <div style={{ fontSize: 11, color: muted, padding: "0 2px", marginBottom: 3 }}>
                         {mine ? "You" : (m.name || "Someone")} · {m.at}
