@@ -74,6 +74,7 @@ export const TABS = [
   { key: "upload", label: "Report upload" },
   { key: "ticket", label: "Billing ticket" },
   { key: "mytickets", label: "Open tickets" },
+  { key: "chat", label: "Team chat" },
   { key: "files", label: "Files" },
   { key: "contacts", label: "Contacts" },
   { key: "equipment", label: "Equipment" },
@@ -100,15 +101,15 @@ export const CONTEXT_TABS = ["job", "jha", "upload", "ticket"];
 // the signup trigger seeds a new account from — the two had drifted, leaving
 // accounts created in the app without the tabs this table promises them.
 export const ROLE_PRESETS = {
-  Admin: ["board", "job", "jha", "upload", "ticket", "mytickets", "files", "contacts", "equipment", "timesheets", "rates", "tracker", "users"],
-  Coordinator: ["board", "job", "jha", "upload", "ticket", "mytickets", "files", "contacts", "equipment", "timesheets", "tracker"],
+  Admin: ["board", "job", "jha", "upload", "ticket", "mytickets", "files", "contacts", "equipment", "timesheets", "rates", "tracker", "users", "chat"],
+  Coordinator: ["board", "job", "jha", "upload", "ticket", "mytickets", "files", "contacts", "equipment", "timesheets", "tracker", "chat"],
   // Technicians get the directory read-write too: the person who finds out
   // the site rep's number is usually the one standing on the lease.
-  Technician: ["board", "job", "jha", "upload", "ticket", "mytickets", "files", "contacts"],
+  Technician: ["board", "job", "jha", "upload", "ticket", "mytickets", "files", "contacts", "chat"],
   // A helper assists a technician on site: they sign onto the JHA and appear
   // on the ticket crew for their hours and dose, but they do not raise
   // tickets or upload reports themselves, so those tabs stay off.
-  Helper: ["board", "job", "jha", "files", "contacts"]
+  Helper: ["board", "job", "jha", "files", "contacts", "chat"]
 };
 
 // The contact every screen pre-fills from: an organisation's primary, or its

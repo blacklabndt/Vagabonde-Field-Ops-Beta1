@@ -17,6 +17,10 @@ export const DEFAULT_SCHEDULE = "__default__";
 // Zero-byte object that makes an otherwise-empty folder exist in Storage.
 const FOLDER_MARKER = ".keep";
 
+// How much of the team chat loads at once. A full page coming back is the
+// signal that older messages exist beyond it.
+const CHAT_PAGE = 100;
+
 // One place that turns a timestamp into the "12 Feb 06:31" the tables use, and
 // returns "" rather than "Invalid Date" for a null column.
 function stamp(ts) {
@@ -30,6 +34,20 @@ function stamp(ts) {
 function fullName(p) {
   const joined = [p.first_name, p.last_name].filter(Boolean).join(" ").trim();
   return joined || p.name || "";
+}
+
+// What the chat screen renders, from a chat_messages row with its profiles
+// join. The realtime feed delivers rows without the join, so `name` can come
+// back empty there — the screen fills it from people it already knows.
+function shapeChatMessage(m) {
+  return {
+    id: m.id,
+    profileId: m.profile_id,
+    name: m.profiles ? fullName(m.profiles) : "",
+    body: m.body,
+    createdAt: m.created_at,
+    at: stamp(m.created_at)
+  };
 }
 
 // A failed Edge Function returns its JSON body inside the error's `context`
@@ -2267,6 +2285,81 @@ export const Db = {
       );
       if (error) throw error;
     } finally { Toasts.unmute(); }
+  },
+
+  // ── Team chat ────────────────────────────────────────────────────────
+  // One room for the whole crew. Deliberately outside the offline queue:
+  // a message typed with no signal is a conversation with nobody, and
+  // replaying it hours later would say it out of turn. Online-only,
+  // fail soft — like the arcade.
+  async listChatMessages(before) {
+    let q = sbClient
+      .from("chat_messages")
+      .select("id, profile_id, body, created_at, profiles(name, first_name, last_name)")
+      .order("created_at", { ascending: false })
+      .order("id", { ascending: false })
+      .limit(CHAT_PAGE);
+    if (before) q = q.lt("created_at", before);
+    const { data, error } = await q;
+    if (error) throw error;
+    // Fetched newest-first so the limit takes the right end, shown
+    // oldest-first because that is how a conversation reads.
+    return {
+      messages: (data || []).map(shapeChatMessage).reverse(),
+      hasMore: (data || []).length === CHAT_PAGE
+    };
+  },
+
+  // One row with its sender's name — for a realtime arrival from somebody
+  // the screen hasn't seen yet, whose event carries only the profile id.
+  async getChatMessage(id) {
+    const { data, error } = await sbClient
+      .from("chat_messages")
+      .select("id, profile_id, body, created_at, profiles(name, first_name, last_name)")
+      .eq("id", id)
+      .maybeSingle();
+    if (error) throw error;
+    return data ? shapeChatMessage(data) : null;
+  },
+
+  async sendChatMessage(profileId, body) {
+    const text = String(body || "").trim();
+    if (!text) throw new Error("Nothing to send.");
+    const { data, error } = await sbClient
+      .from("chat_messages")
+      .insert({ profile_id: profileId, body: text.slice(0, 4000) })
+      .select("id, profile_id, body, created_at, profiles(name, first_name, last_name)")
+      .single();
+    if (error) throw error;
+    return shapeChatMessage(data);
+  },
+
+  async deleteChatMessage(id) {
+    const { data: gone, error } = await sbClient
+      .from("chat_messages").delete().eq("id", id).select("id");
+    if (error) throw error;
+    if (gone && gone.length) return;
+    // Zero rows is either "already gone" — deleted from another device,
+    // which is the goal state — or a policy refusal dressed as success.
+    // Ask for the row back to tell the two apart.
+    const { data: still, error: readErr } = await sbClient
+      .from("chat_messages").select("id").eq("id", id).maybeSingle();
+    if (readErr) throw readErr;
+    if (still) throw new Error("Only your own messages can be removed.");
+  },
+
+  // Live feed for the room. Returns the unsubscribe, for the screen's
+  // cleanup. Delete events carry only the row's id — that is all the
+  // replicated key holds — which is also all the screen needs to drop it.
+  subscribeChatMessages({ onInsert, onDelete }) {
+    const channel = sbClient
+      .channel("team-chat")
+      .on("postgres_changes", { event: "INSERT", schema: "public", table: "chat_messages" },
+        p => onInsert(shapeChatMessage(p.new)))
+      .on("postgres_changes", { event: "DELETE", schema: "public", table: "chat_messages" },
+        p => onDelete(p.old.id))
+      .subscribe();
+    return () => { sbClient.removeChannel(channel); };
   }
 };
 
@@ -2341,7 +2434,10 @@ const SAVE_MESSAGES = {
   deleteUserAccount: "Account removed",
   updateProfileDetails: "Account saved",
   updateProfileTabs: "Access updated",
-  updateProfileRole: "Role changed"
+  updateProfileRole: "Role changed",
+
+  // Team chat
+  deleteChatMessage: "Message removed"
 };
 
 // Left deliberately silent, because nobody did them on purpose:
@@ -2353,6 +2449,8 @@ const SAVE_MESSAGES = {
 //   getEditableSchedule creates a draft schedule the first time a client's
 //                       rates are opened — a read, as far as anyone can tell
 //   renderJhaPdf        best-effort background render
+//   sendChatMessage     the message appearing in the room is its own
+//                       confirmation — a toast over it would say it twice
 //
 // Each of those fires inside something already in the table above, and would
 // otherwise produce two confirmations for one press.

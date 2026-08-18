@@ -29,6 +29,7 @@ const RateAdminScreen = lazy(() => import("./components/rateAdmin.jsx").then(m =
 const BillingTrackerScreen = lazy(() => import("./components/billingTracker.jsx").then(m => ({ default: m.BillingTrackerScreen })));
 const TimesheetsScreen = lazy(() => import("./components/timesheets.jsx").then(m => ({ default: m.TimesheetsScreen })));
 const UsersAccessScreen = lazy(() => import("./components/usersAccess.jsx").then(m => ({ default: m.UsersAccessScreen })));
+const TeamChatScreen = lazy(() => import("./components/teamChat.jsx").then(m => ({ default: m.TeamChatScreen })));
 // Not screens. Each its own chunk so a technician on field data never
 // downloads a game they have not gone looking for — the first lives behind
 // the drawer-footer name, the second behind the top-bar one.
@@ -430,6 +431,9 @@ export function App() {
       break;
     case "users":
       body = <UsersAccessScreen currentUser={currentUser} />;
+      break;
+    case "chat":
+      body = <TeamChatScreen currentUser={currentUser} />;
       break;
     default:
       body = (
