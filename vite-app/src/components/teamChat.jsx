@@ -1,6 +1,6 @@
 import React, { useState, useEffect, useLayoutEffect, useRef } from "react";
 import { Db } from "../db.js";
-import { Blueprint, Btn, ErrorBox, Loading } from "./common.jsx";
+import { Blueprint, Btn, Dialog, ErrorBox, Loading } from "./common.jsx";
 
 // Team chat — one room for the whole crew.
 //
@@ -81,6 +81,74 @@ function mergeIn(prev, incoming) {
   return changed ? [...by.values()].sort(inOrder) : prev;
 }
 
+// The GIF search. Opens on what's trending, then searches as you type —
+// through our own Edge Function, so the Tenor key never reaches a phone.
+// Tapping a GIF sends it on its own; whatever is typed in the composer
+// stays there.
+function GifPicker({ onPick, onClose, busy }) {
+  const [term, setTerm] = useState("");
+  const [gifs, setGifs] = useState([]);
+  const [searching, setSearching] = useState(true);
+  const [error, setError] = useState("");
+  // A request token, so a slow earlier search cannot land after a newer one.
+  const seq = useRef(0);
+
+  useEffect(() => {
+    const mine = ++seq.current;
+    setSearching(true);
+    const timer = setTimeout(() => {
+      Db.searchGifs(term)
+        .then(list => { if (mine === seq.current) { setGifs(list); setError(""); } })
+        .catch(e => { if (mine === seq.current) { setGifs([]); setError(e.message || "Couldn't search for GIFs."); } })
+        .finally(() => { if (mine === seq.current) setSearching(false); });
+    }, term ? 350 : 0);
+    return () => clearTimeout(timer);
+  }, [term]);
+
+  return (
+    <Dialog title="Send a GIF" maxWidth={560} onClose={onClose}>
+      <input
+        className="input"
+        value={term}
+        onChange={e => setTerm(e.target.value)}
+        placeholder="Search GIFs…"
+        autoFocus
+        style={{ marginBottom: 10 }}
+      />
+      {error ? (
+        <ErrorBox>{error}</ErrorBox>
+      ) : searching && gifs.length === 0 ? (
+        <Loading label="Finding GIFs…" />
+      ) : gifs.length === 0 ? (
+        <div style={{ color: "color-mix(in srgb, var(--color-text) 55%, transparent)", padding: "16px 0" }}>
+          Nothing for that — try another word.
+        </div>
+      ) : (
+        <div style={{
+          display: "grid", gridTemplateColumns: "repeat(auto-fill, minmax(130px, 1fr))",
+          gap: 8, maxHeight: "50vh", overflowY: "auto", opacity: searching ? 0.6 : 1
+        }}>
+          {gifs.map(g => (
+            <button
+              key={g.id}
+              onClick={() => onPick(g.full)}
+              disabled={busy}
+              aria-label="Send this GIF"
+              style={{ padding: 0, border: "1px solid var(--color-divider)", background: "transparent", cursor: "pointer" }}
+            >
+              <img src={g.preview} alt="" loading="lazy"
+                style={{ display: "block", width: "100%", height: 110, objectFit: "cover" }} />
+            </button>
+          ))}
+        </div>
+      )}
+      <div style={{ fontSize: 11, color: "color-mix(in srgb, var(--color-text) 45%, transparent)", marginTop: 8 }}>
+        Search powered by Tenor
+      </div>
+    </Dialog>
+  );
+}
+
 // A picture in a bubble. The bucket is private, so viewing means a signed
 // URL — minted on mount for the inline copy, and minted fresh on click
 // because the mount-time link may have expired by the time it's tapped.
@@ -130,6 +198,7 @@ export function TeamChatScreen({ currentUser }) {
   const [loadError, setLoadError] = useState("");
   const [draft, setDraft] = useState("");
   const [attach, setAttach] = useState(null);   // { file, url } awaiting send
+  const [gifOpen, setGifOpen] = useState(false);
   const [sending, setSending] = useState(false);
   const [sendError, setSendError] = useState("");
 
@@ -296,8 +365,8 @@ export function TeamChatScreen({ currentUser }) {
     setSending(true);
     setSendError("");
     try {
-      const file = attach ? await shrinkForChat(attach.file) : null;
-      const sent = await Db.sendChatMessage(currentUser.id, text, file);
+      const imageFile = attach ? await shrinkForChat(attach.file) : null;
+      const sent = await Db.sendChatMessage(currentUser.id, text, { imageFile });
       setDraft("");
       dropAttachment();
       stickToBottom.current = true;
@@ -306,6 +375,24 @@ export function TeamChatScreen({ currentUser }) {
       // The draft and the picture stay in the composer — nothing was
       // said, nothing is lost.
       setSendError(e.message || "Couldn't send that — check the connection and try again.");
+    }
+    setSending(false);
+  };
+
+  // A GIF goes on its own the moment it's tapped; whatever is typed in
+  // the composer stays there for its own send.
+  const sendGif = async gifUrl => {
+    if (sending) return;
+    setSending(true);
+    setSendError("");
+    try {
+      const sent = await Db.sendChatMessage(currentUser.id, "", { gifUrl });
+      setGifOpen(false);
+      stickToBottom.current = true;
+      setMessages(prev => mergeIn(prev, [sent]));
+    } catch (e) {
+      setGifOpen(false);
+      setSendError(e.message || "Couldn't send that GIF — check the connection and try again.");
     }
     setSending(false);
   };
@@ -353,7 +440,7 @@ export function TeamChatScreen({ currentUser }) {
                   title={p.body}
                   style={{ flex: 1, minWidth: 0, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}
                 >
-                  {p.body || "(picture)"}
+                  {p.body || (p.gifUrl ? "(GIF)" : "(picture)")}
                 </span>
                 {isAdmin && (
                   <button onClick={() => togglePin(p)} aria-label="Take this pin down" title="Take this pin down"
@@ -410,8 +497,15 @@ export function TeamChatScreen({ currentUser }) {
                           ? "color-mix(in srgb, var(--color-accent) 35%, transparent)"
                           : "var(--color-divider)")
                       }}>
+                        {m.gifUrl && (
+                          // Straight off Tenor's CDN — the constraint on the
+                          // column is what keeps this an image host, not a
+                          // tracking pixel.
+                          <img src={m.gifUrl} alt="GIF" loading="lazy" onLoad={restick}
+                            style={{ display: "block", maxWidth: "100%", maxHeight: 320 }} />
+                        )}
                         {m.imageKey && <ChatImage imageKey={m.imageKey} onSized={restick} />}
-                        {m.body && <div style={m.imageKey ? { marginTop: 6 } : null}>{m.body}</div>}
+                        {m.body && <div style={m.imageKey || m.gifUrl ? { marginTop: 6 } : null}>{m.body}</div>}
                       </div>
                       {(mine || isAdmin) && (
                         <span style={{ display: "flex", gap: 2, flexDirection: mine ? "row-reverse" : "row", flex: "none" }}>
@@ -450,8 +544,11 @@ export function TeamChatScreen({ currentUser }) {
           )}
           <div style={{ display: "flex", gap: 8, alignItems: "flex-end" }}>
             <input ref={fileRef} type="file" accept="image/*" onChange={pickFile} style={{ display: "none" }} />
-            <Btn variant="secondary" onClick={() => fileRef.current && fileRef.current.click()} disabled={sending} title="Attach a picture or GIF">
+            <Btn variant="secondary" onClick={() => fileRef.current && fileRef.current.click()} disabled={sending} title="Attach a picture">
               Photo
+            </Btn>
+            <Btn variant="secondary" onClick={() => setGifOpen(true)} disabled={sending} title="Search and send a GIF">
+              GIF
             </Btn>
             <textarea
               value={draft}
@@ -472,6 +569,7 @@ export function TeamChatScreen({ currentUser }) {
           </div>
         </div>
       </Blueprint>
+      {gifOpen && <GifPicker onPick={sendGif} onClose={() => setGifOpen(false)} busy={sending} />}
     </div>
   );
 }

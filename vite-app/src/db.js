@@ -20,7 +20,10 @@ const FOLDER_MARKER = ".keep";
 // How much of the team chat loads at once. A full page coming back is the
 // signal that older messages exist beyond it.
 const CHAT_PAGE = 100;
-const CHAT_COLUMNS = "id, profile_id, body, image_key, pinned_at, created_at, profiles(name, first_name, last_name)";
+// The sender join is spelled with its column hint: chat_messages points at
+// profiles twice (profile_id and pinned_by), and a bare `profiles(...)` made
+// PostgREST refuse the whole read as ambiguous.
+const CHAT_COLUMNS = "id, profile_id, body, image_key, gif_url, pinned_at, created_at, profiles!profile_id(name, first_name, last_name)";
 
 // One place that turns a timestamp into the "12 Feb 06:31" the tables use, and
 // returns "" rather than "Invalid Date" for a null column.
@@ -47,6 +50,7 @@ function shapeChatMessage(m) {
     name: m.profiles ? fullName(m.profiles) : "",
     body: m.body,
     imageKey: m.image_key || null,
+    gifUrl: m.gif_url || null,
     pinnedAt: m.pinned_at || null,
     createdAt: m.created_at,
     at: stamp(m.created_at)
@@ -2338,13 +2342,24 @@ export const Db = {
     return data ? shapeChatMessage(data) : null;
   },
 
-  // Text, a picture, or both. The picture goes up first, under the
-  // sender's own folder (the storage policy holds everyone to theirs);
-  // if the message row is then refused, the upload is taken back down
-  // rather than stranded.
-  async sendChatMessage(profileId, body, imageFile) {
+  // The GIF picker's search, proxied through an Edge Function so the
+  // Tenor key stays a server-side secret. Returns { gifs: [...] }; an
+  // empty search term asks for what's trending.
+  async searchGifs(q) {
+    const { data, error } = await sbClient.functions.invoke("gif-search", { body: { q } });
+    if (error) throw new Error(await readFnError(error));
+    if (data && data.error) throw new Error(data.error);
+    return (data && data.gifs) || [];
+  },
+
+  // Text, a picture, a GIF, or text with one of the two. The picture goes
+  // up first, under the sender's own folder (the storage policy holds
+  // everyone to theirs); if the message row is then refused, the upload
+  // is taken back down rather than stranded. A GIF is only ever a Tenor
+  // CDN URL — nothing of ours is uploaded for it.
+  async sendChatMessage(profileId, body, { imageFile, gifUrl } = {}) {
     const text = String(body || "").trim();
-    if (!text && !imageFile) throw new Error("Nothing to send.");
+    if (!text && !imageFile && !gifUrl) throw new Error("Nothing to send.");
     let imageKey = null;
     if (imageFile) {
       const ext = { "image/jpeg": "jpg", "image/png": "png", "image/webp": "webp", "image/gif": "gif" }[imageFile.type];
@@ -2361,7 +2376,7 @@ export const Db = {
     }
     const { data, error } = await sbClient
       .from("chat_messages")
-      .insert({ profile_id: profileId, body: text.slice(0, 4000), image_key: imageKey })
+      .insert({ profile_id: profileId, body: text.slice(0, 4000), image_key: imageKey, gif_url: gifUrl || null })
       .select(CHAT_COLUMNS)
       .single();
     if (error) {
