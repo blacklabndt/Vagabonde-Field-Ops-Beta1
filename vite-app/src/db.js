@@ -1937,19 +1937,19 @@ export const Db = {
       .order("position", { ascending: true, nullsFirst: false }).order("label");
     if (lErr) throw lErr;
 
-    // Every row in the editor draws from a line, so a standard line that is
-    // absent renders as a label with no box to type into. Seed whatever is
-    // MISSING rather than only a wholly empty schedule: a schedule holding
-    // nothing but one custom line is the common case, and testing for empty
-    // skipped exactly that.
-    const present = new Set((lines || []).map(l => l.kind + "\u0000" + l.label));
-    const missing = STANDARD_RATE_LINES
-      .filter(l => !present.has(l.kind + "\u0000" + l.label))
-      .map(l => ({ schedule_id: schedule.id, ...l, rate: 0 }));
-    if (missing.length) {
-      const { data: seeded, error: seedErr } = await sbClient.from("rate_lines").insert(missing).select();
+    // The standard card is laid out once, when a schedule is empty — which
+    // in practice means it was just created. This used to top up whatever
+    // was MISSING on every open, which made removing a standard line
+    // cosmetic: it came back at zero the next time anyone looked,
+    // contradicting both the remove button's promise and the Restore
+    // standard lines button, whose whole job is bringing removed lines back
+    // on purpose. The editor draws its rows from the lines themselves now,
+    // so an absent line is simply not there.
+    if (!(lines || []).length) {
+      const seed = STANDARD_RATE_LINES.map(l => ({ schedule_id: schedule.id, ...l, rate: 0 }));
+      const { data: seeded, error: seedErr } = await sbClient.from("rate_lines").insert(seed).select();
       if (seedErr) throw seedErr;
-      lines = (lines || []).concat(seeded);
+      lines = seeded;
     }
     return { schedule, lines };
   },
