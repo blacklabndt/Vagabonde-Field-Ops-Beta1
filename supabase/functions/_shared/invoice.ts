@@ -136,12 +136,18 @@ export function renderInvoice(d: InvoiceData): string {
   const welds = (d.lines || []).filter(l => l.kind === "weld");
   const charges = (d.lines || []).filter(l => l.kind !== "weld");
 
-  const lineTotal = (l: InvoiceLine) => Number(l.quantity || 0) * Number(l.unit_rate || 0);
+  // A line's billable amount is its product rounded to the cent — the same
+  // formula the database stores (sync_ticket_total, migration
+  // 20260818140051), so the printed line totals sum to exactly the printed
+  // subtotal, and both match the stored ticket total to the cent.
+  const lineTotal = (l: InvoiceLine) =>
+    Math.round(Number(l.quantity || 0) * Number(l.unit_rate || 0) * 100) / 100;
 
   // Computed from the lines, never trusted from the caller: the stored total
   // and the sum of what is printed must agree, and if they ever cannot, the
   // printed lines are the ones the client is being asked to sign for.
-  const subtotal = (d.lines || []).reduce((s, l) => s + lineTotal(l), 0);
+  // Summed in integer cents — floats drift, cents don't.
+  const subtotal = (d.lines || []).reduce((s, l) => s + Math.round(lineTotal(l) * 100), 0) / 100;
   // Rounded on integer cents — see gstOn in vite-app/src/data.js. Rounding
   // on dollars puts 408 of the first 500,000 whole-cent subtotals a cent
   // low, and this must match the app to the cent.

@@ -47,8 +47,11 @@ Deno.serve(async (req) => {
 
     // Summed from the lines, like the invoice does, rather than read off
     // tickets.total — the email and the document it links to must not be
-    // able to quote a client two different numbers.
-    const subtotal = lines.reduce((s: number, l: any) => s + Number(l.quantity || 0) * Number(l.unit_rate || 0), 0);
+    // able to quote a client two different numbers. Each line rounded to
+    // the cent, summed in integer cents: the same formula the database
+    // stores (migration 20260818140051) and invoice.ts prints.
+    const lineTotal = (l: any) => Math.round(Number(l.quantity || 0) * Number(l.unit_rate || 0) * 100) / 100;
+    const subtotal = lines.reduce((s: number, l: any) => s + Math.round(lineTotal(l) * 100), 0) / 100;
     const gst = Math.round(Math.round(subtotal * 100) * GST_RATE) / 100;
     const grand = Math.round((subtotal + gst) * 100) / 100;
 
@@ -78,7 +81,7 @@ Deno.serve(async (req) => {
     const rows = lines.map(l =>
       `<tr><td style="padding:6px 0">${esc(l.label)}</td>
        <td style="padding:6px 0;text-align:right;color:#6b6d6e">${esc(l.quantity)} ${esc(l.unit)}</td>
-       <td style="padding:6px 0;text-align:right">${money(l.quantity * l.unit_rate)}</td></tr>`
+       <td style="padding:6px 0;text-align:right">${money(lineTotal(l))}</td></tr>`
     ).join("");
 
     const summary = `
@@ -109,7 +112,7 @@ Deno.serve(async (req) => {
       `${job.job_number} · ${job.clients?.name ?? ""}`,
       `Work performed ${ticket.work_date}`,
       "",
-      ...lines.map(l => `${l.label} — ${l.quantity} ${l.unit ?? ""} — ${money(l.quantity * l.unit_rate)}`),
+      ...lines.map(l => `${l.label} — ${l.quantity} ${l.unit ?? ""} — ${money(lineTotal(l))}`),
       "",
       `Subtotal: ${money(subtotal)}`,
       `GST @ ${(GST_RATE * 100).toFixed(0)}%: ${money(gst)}`,

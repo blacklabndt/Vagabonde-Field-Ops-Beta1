@@ -1,5 +1,5 @@
 import React, { useState, useEffect, useMemo, useRef } from "react";
-import { money, todayLocal, localDate, dayMonth, initialsOf, crewRoleFor, hours } from "../data.js";
+import { money, todayLocal, localDate, dayMonth, initialsOf, crewRoleFor, hours, lineTotal } from "../data.js";
 import { Db } from "../db.js";
 import { Blueprint, Btn, TagX, Field, ErrorBox, emailIn, NoJobSelected, QueuedPanel, NumField , Loading } from "./common.jsx";
 import { OfflineQueue } from "../offlineQueue.js";
@@ -296,10 +296,13 @@ export function TicketMobileScreen({ job, jobRecord, currentUser, onSaved, ticke
   const weldRows = weldLines.map(l => ({ ...l, item: weldItemsByKey[l.key] })).filter(r => r.item);
   const otherRows = otherLines.map(l => ({ ...l, item: serviceByKey[l.key] })).filter(r => r.item);
 
+  // Summed in integer cents of per-line totals — the same formula the
+  // database stores, so the total on this screen is the total on the bill.
+  const centsOf = rows => rows.reduce((s, r) => s + Math.round(lineTotal(r.qty, r.item.rate) * 100), 0);
   const weldCount = weldRows.filter(r => r.item.isWeld).reduce((s, r) => s + r.qty, 0);
-  const weldDollars = weldRows.reduce((s, r) => s + r.qty * r.item.rate, 0);
-  const otherDollars = otherRows.reduce((s, r) => s + r.qty * r.item.rate, 0);
-  const total = weldDollars + otherDollars;
+  const weldDollars = centsOf(weldRows) / 100;
+  const otherDollars = centsOf(otherRows) / 100;
+  const total = (centsOf(weldRows) + centsOf(otherRows)) / 100;
 
   const availableWeld = rates.welds.filter(w => !weldLines.some(l => l.key === w.key));
   const availableService = rates.others.filter(s => !otherLines.some(l => l.key === s.key));
@@ -348,10 +351,13 @@ export function TicketMobileScreen({ job, jobRecord, currentUser, onSaved, ticke
   const assignedOt = crew.reduce((s, c) => s + (c.ot || 0), 0);
   // With blended hours on the ticket, straight and OT can't be compared
   // bucket by bucket — the blended figure covers both — so the comparison
-  // falls back to totals.
+  // falls back to totals. Compared at two decimals: summing typed decimal
+  // hours in floats can differ from the billed figure by a quadrillionth,
+  // and that must not read as a crew-hours discrepancy.
+  const h2 = n => Math.round(n * 100) / 100;
   const hoursMismatch = billedBlended > 0
-    ? (assignedStraight + assignedOt) !== (billedStraight + billedOt + billedBlended)
-    : (assignedStraight !== billedStraight || assignedOt !== billedOt);
+    ? h2(assignedStraight + assignedOt) !== h2(billedStraight + billedOt + billedBlended)
+    : (h2(assignedStraight) !== h2(billedStraight) || h2(assignedOt) !== h2(billedOt));
   const availablePeople = people.filter(p => !crew.some(c => c.profileId === p.id));
   const availableHelpers = availablePeople.filter(p => crewRoleFor(p) === "Helper");
   const availableTechs = availablePeople.filter(p => crewRoleFor(p) !== "Helper");
@@ -569,7 +575,7 @@ export function TicketMobileScreen({ job, jobRecord, currentUser, onSaved, ticke
                   <NumField style={{ width: 66, textAlign: "right" }} value={r.qty}
                     aria-label={r.item.label} onChange={v => setWeldQty(r.key, v)} />
                   <span style={{ fontSize: 11, width: 22 }}>welds</span>
-                  <span className="tabular" style={{ width: 62, textAlign: "right", fontSize: 14 }}>{money(r.qty * rate)}</span>
+                  <span className="tabular" style={{ width: 62, textAlign: "right", fontSize: 14 }}>{money(lineTotal(r.qty, rate))}</span>
                   <button onClick={() => removeWeld(r.key)} style={{ background: "none", border: "none", cursor: "pointer", color: "color-mix(in srgb, var(--color-text) 50%, transparent)", fontSize: 16 }}>×</button>
                 </div>
               );
@@ -616,7 +622,7 @@ export function TicketMobileScreen({ job, jobRecord, currentUser, onSaved, ticke
                   <NumField style={{ width: 66, textAlign: "right" }} step={r.item.step || 1} value={r.qty}
                     onChange={v => setOtherQty(r.key, v)} />
                   <span style={{ fontSize: 11, width: 22 }}>{r.item.unit}</span>
-                  <span className="tabular" style={{ width: 62, textAlign: "right", fontSize: 14 }}>{money(r.qty * rate)}</span>
+                  <span className="tabular" style={{ width: 62, textAlign: "right", fontSize: 14 }}>{money(lineTotal(r.qty, rate))}</span>
                   <button onClick={() => removeOther(r.key)} style={{ background: "none", border: "none", cursor: "pointer", color: "color-mix(in srgb, var(--color-text) 50%, transparent)", fontSize: 16 }}>×</button>
                 </div>
               );

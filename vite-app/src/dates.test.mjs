@@ -15,7 +15,7 @@ import assert from "node:assert/strict";
 import {
   localDate, dayMonth, ticketDateStamp, initialsOf,
   payPeriodLabel, recentPayPeriods, hours, ageInDays,
-  GST_RATE, gstOn
+  GST_RATE, gstOn, lineTotal, nonNegative
 } from "./data.js";
 
 // ── localDate ────────────────────────────────────────────────────────────
@@ -212,4 +212,55 @@ test("no whole-cent subtotal is ever mis-rounded", () => {
     if (Math.abs(gstOn(subtotal) - expected) > 1e-9) wrong++;
   }
   assert.equal(wrong, 0, `${wrong} subtotals round the wrong way`);
+});
+
+// ── lineTotal ────────────────────────────────────────────────────────────
+// A line's billable amount is its product rounded to the cent — the same
+// formula the database triggers store (migration 20260818140051). The audit
+// case: half an hour at $9.25 is $4.63, not the unstorable 4.625.
+
+test("a sub-cent product rounds to the cent", () => {
+  assert.equal(lineTotal(0.5, 9.25), 4.63);
+});
+
+test("exact products pass through untouched", () => {
+  assert.equal(lineTotal(1.5, 6), 9);
+  assert.equal(lineTotal(25, 9), 225);
+  assert.equal(lineTotal(10, 182), 1820);
+});
+
+test("float dust cannot reach a bill", () => {
+  // 1.1 × 95 is 104.50000000000001 in raw floats.
+  assert.equal(lineTotal(1.1, 95), 104.5);
+});
+
+test("nothing times anything is nothing", () => {
+  assert.equal(lineTotal(0, 182), 0);
+  assert.equal(lineTotal(null, 182), 0);
+  assert.equal(lineTotal(8, undefined), 0);
+});
+
+test("GST on a rounded-line subtotal lands on the cent", () => {
+  // The seeded verification ticket: $2,852.50 → GST $142.63 → $2,995.13.
+  const subtotal = 2852.5;
+  const gst = gstOn(subtotal);
+  assert.equal(gst, 142.63);
+  assert.equal(Math.round((subtotal + gst) * 100) / 100, 2995.13);
+});
+
+// ── nonNegative ─────────────────────────────────────────────────────────
+// One copy now, comma-aware (see data.js); these pin the merge.
+
+test("comma decimals are decimals", () => {
+  assert.equal(nonNegative("1,5"), 1.5);
+});
+
+test("negatives floor to zero", () => {
+  assert.equal(nonNegative(-3), 0);
+  assert.equal(nonNegative("-3"), 0);
+});
+
+test("garbage floors to zero", () => {
+  assert.equal(nonNegative("abc"), 0);
+  assert.equal(nonNegative(""), 0);
 });

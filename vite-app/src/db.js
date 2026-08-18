@@ -1,6 +1,6 @@
 import { createClient } from "@supabase/supabase-js";
 import { sbClient, SUPABASE_URL, SUPABASE_ANON_KEY } from "./config.js";
-import { todayLocal, localDate, dayMonth, ticketDateStamp, primaryContact, ageInDays, storageKeySafe, STANDARD_RATE_LINES, nonNegative } from "./data.js";
+import { todayLocal, localDate, dayMonth, ticketDateStamp, primaryContact, ageInDays, storageKeySafe, STANDARD_RATE_LINES, nonNegative, lineTotal } from "./data.js";
 import { OfflineCache } from "./offlineCache.js";
 import { Toasts } from "./toastBus.js";
 import { OfflineQueue, isNetworkError } from "./offlineQueue.js";
@@ -88,7 +88,10 @@ const cleanLine = l => ({
   kind: l.kind, label: l.label, unit: l.unit,
   quantity: nonNegative(l.quantity), unit_rate: nonNegative(l.unit_rate)
 });
-const totalOf = lines => lines.reduce((s, l) => s + l.quantity * l.unit_rate, 0);
+// Summed in integer cents of per-line totals — the same formula the
+// database's sync trigger uses, so the pre-write overflow check and the
+// stored figure can never disagree.
+const totalOf = lines => lines.reduce((s, l) => s + Math.round(lineTotal(l.quantity, l.unit_rate) * 100), 0) / 100;
 
 // tickets.total is numeric(10,2): eight digits before the point. Found in
 // beta testing by billing a nine-figure ticket — the database refused it

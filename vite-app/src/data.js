@@ -229,6 +229,15 @@ export const nonNegative = value => {
   return Number.isFinite(n) && n > 0 ? n : 0;
 };
 
+// A line's billable amount: quantity × rate, rounded to the cent. The one
+// formula the database's total sync, the ticket screen and the printed
+// invoice all share — migration 20260818140051 put the same round() into
+// the triggers, after the audit found half an hour at a $9.25 rate could
+// not be saved: the stored total rounded to 4.63 while the balance check
+// summed the exact 4.625, and the database refused its own arithmetic.
+export const lineTotal = (quantity, unitRate) =>
+  Math.round(Number(quantity || 0) * Number(unitRate || 0) * 100) / 100;
+
 export const GST_RATE = 0.05;
 
 // Rounded on integer cents, not on dollars.
