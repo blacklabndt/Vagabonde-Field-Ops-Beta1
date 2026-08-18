@@ -378,7 +378,8 @@ export function RateAdminScreen() {
         <span style={{ fontSize: 12, color: "color-mix(in srgb, var(--color-text) 50%, transparent)" }}>
           {following ? "Follows the house card"
             : justPublished ? "Published just now"
-            : schedule && schedule.published_at ? "Published" : "Not yet published"}
+            : schedule && schedule.published_at ? "Published — edits go live as they save"
+            : "Not yet published"}
         </span>
         {/* Two different things, deliberately worded apart: rates are saved
             the moment you type them, but they don't price anything until the
@@ -396,10 +397,18 @@ export function RateAdminScreen() {
         </span>
         <div style={{ marginLeft: "auto", display: "flex", gap: 8 }}>
           <Btn variant="secondary" onClick={() => setShowHistory(true)} disabled={!schedule}>Rate history</Btn>
-          <Btn variant="primary" onClick={publish} disabled={publishing || !schedule || following}
-            title={following ? "This client follows the house card — publish Default rates instead." : undefined}>
-            {publishing ? "Publishing…" : "Publish schedule"}
-          </Btn>
+          {/* Publishing matters exactly once per card — it's the gate that
+              lets tickets price from it at all; after that, every edit is
+              live the moment it saves. So the button only exists while
+              there is a gate to open: never-published, and not following
+              the house card (a follower prices from the house card's own
+              publish). Per Kyle — a permanent button implied a step that
+              wasn't there. */}
+          {schedule && !schedule.published_at && !following && (
+            <Btn variant="primary" onClick={publish} disabled={publishing}>
+              {publishing ? "Publishing…" : "Publish schedule"}
+            </Btn>
+          )}
         </div>
       </div>
       <ErrorBox>{error}</ErrorBox>
