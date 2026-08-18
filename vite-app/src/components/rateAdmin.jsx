@@ -246,6 +246,32 @@ export function RateAdminScreen() {
     catch (e) { setError(e.message || "Couldn't remove that line."); }
   };
 
+  // A new size is a real size: all three RT kinds at once, like the
+  // standards. Adding one used to create a single film-only custom line
+  // with no CR or DR cell to type into. (Lines added back then keep their
+  // one cell — remove and re-add to get the full row.)
+  const addSizeRow = async label => {
+    if (!label || !schedule) return;
+    const clean = label.trim();
+    if (SIZE_KINDS.some(k => line(k, clean)) || customLines("custom_weld").some(c => c.label === clean)) {
+      setError(`"${clean}" is already on this schedule.`);
+      return;
+    }
+    const ps = lines.filter(l => (SIZE_KINDS.includes(l.kind) || l.kind === "custom_weld") && l.position != null).map(l => l.position);
+    const position = ps.length ? Math.max(...ps) + 1 : null;
+    try {
+      const created = await Promise.all(SIZE_KINDS.map(kind =>
+        Db.addRateLine({ scheduleId: schedule.id, kind, label: clean, unit: "weld", rate: 0, position })));
+      setLines(p => [...p, ...created]);
+      setJustPublished(false);
+    } catch (e) {
+      setError(e.message || "Couldn't add that size.");
+      // One of the three inserts failing would leave a partial row on
+      // screen; the reload shows what actually landed.
+      await loadSchedule();
+    }
+  };
+
   // An RT size is three lines (film, CR, DR) shown as one row, so removing it
   // has to take all three — otherwise the row half-disappears.
   const removeSizeRow = async label => {
@@ -458,7 +484,7 @@ export function RateAdminScreen() {
                 </tbody>
               </table></TableScroll>
               <div style={{ display: "flex", gap: 8, alignItems: "flex-start" }}>
-                <div style={{ flex: 1 }}><AddLineBox onAdd={label => addCustom("custom_weld", label)} placeholder='e.g. 16" NPS' /></div>
+                <div style={{ flex: 1 }}><AddLineBox onAdd={addSizeRow} placeholder='e.g. 16" NPS' /></div>
                 <ReorderToggle group="sizes" />
               </div>
 
