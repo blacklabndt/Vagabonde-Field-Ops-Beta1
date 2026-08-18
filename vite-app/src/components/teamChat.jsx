@@ -151,9 +151,9 @@ function GifPicker({ onPick, onClose, busy }) {
 }
 
 // A picture in a bubble. The bucket is private, so viewing means a signed
-// URL — minted on mount for the inline copy, and minted fresh on click
-// because the mount-time link may have expired by the time it's tapped.
-function ChatImage({ imageKey, onSized }) {
+// URL — minted on mount for the inline copy; opening it big goes through
+// onOpen, which mints its own fresh link (see openImage below).
+function ChatImage({ imageKey, onSized, onOpen }) {
   const [url, setUrl] = useState("");
   const [failed, setFailed] = useState(false);
   useEffect(() => {
@@ -163,16 +163,6 @@ function ChatImage({ imageKey, onSized }) {
       .catch(() => { if (live) setFailed(true); });
     return () => { live = false; };
   }, [imageKey]);
-
-  const openFull = async () => {
-    try {
-      const fresh = await Db.signedUrl("chat-media", imageKey);
-      // Opened after an await, so some browsers treat this as a non-user
-      // gesture and block it — fall back to same-tab navigation.
-      const win = window.open(fresh, "_blank", "noopener");
-      if (!win) window.location.href = fresh;
-    } catch (_) { /* the inline copy failing to open big is not worth an error box */ }
-  };
 
   if (failed) {
     return <div style={{ fontSize: 12, color: "color-mix(in srgb, var(--color-text) 55%, transparent)", padding: "6px 0" }}>Couldn't load the picture.</div>;
@@ -184,9 +174,62 @@ function ChatImage({ imageKey, onSized }) {
     <img
       src={url} alt="Shared picture" loading="lazy"
       onLoad={onSized}
-      onClick={openFull}
+      onClick={onOpen}
       style={{ display: "block", maxWidth: "100%", maxHeight: 320, cursor: "zoom-in" }}
     />
+  );
+}
+
+// The pinned strip's thumbnail. While the signed URL is on its way — or
+// if it never arrives — the old "(picture)" label stands in, so the row
+// always says what it holds.
+function PinThumb({ pin, onOpen }) {
+  const [url, setUrl] = useState(pin.gifUrl || "");
+  const [failed, setFailed] = useState(false);
+  useEffect(() => {
+    if (pin.gifUrl) { setUrl(pin.gifUrl); return; }
+    let live = true;
+    Db.signedUrl("chat-media", pin.imageKey)
+      .then(u => { if (live) setUrl(u); })
+      .catch(() => { if (live) setFailed(true); });
+    return () => { live = false; };
+  }, [pin.imageKey, pin.gifUrl]);
+
+  if (failed || !url) {
+    return <span style={{ color: "color-mix(in srgb, var(--color-text) 55%, transparent)", flex: "none" }}>{pin.gifUrl ? "(GIF)" : "(picture)"}</span>;
+  }
+  return (
+    <img
+      src={url} alt={pin.gifUrl ? "Pinned GIF" : "Pinned picture"} loading="lazy"
+      onClick={onOpen}
+      style={{ height: 34, width: 48, objectFit: "cover", border: "1px solid var(--color-divider)", cursor: "zoom-in", flex: "none" }}
+    />
+  );
+}
+
+// Any picture or GIF, the full screen. Tapping anywhere — or Escape —
+// puts the room back.
+function Lightbox({ src, onClose }) {
+  useEffect(() => {
+    const onKey = e => { if (e.key === "Escape") onClose(); };
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, [onClose]);
+  return (
+    <div
+      onClick={onClose}
+      role="dialog" aria-label="Picture, full screen"
+      style={{ position: "fixed", inset: 0, zIndex: 1000, background: "rgba(10, 11, 12, .9)", display: "grid", placeItems: "center", cursor: "zoom-out", padding: 14 }}
+    >
+      <img src={src} alt="" style={{ maxWidth: "100%", maxHeight: "100%", objectFit: "contain" }} />
+      <button
+        onClick={onClose}
+        aria-label="Close the picture"
+        style={{ position: "absolute", top: 10, right: 14, background: "transparent", border: "none", color: "#f2f2f3", fontSize: 30, lineHeight: 1, cursor: "pointer", padding: 6 }}
+      >
+        ×
+      </button>
+    </div>
   );
 }
 
@@ -206,6 +249,8 @@ export function TeamChatScreen({ currentUser }) {
   // error state — the 30-second refresh still carries the room — but it
   // is said out loud below the composer instead of being invisible.
   const [feedLive, setFeedLive] = useState(false);
+  // The full-screen viewer: the URL it shows, or null when closed.
+  const [lightbox, setLightbox] = useState(null);
 
   const listRef = useRef(null);
   const fileRef = useRef(null);
@@ -457,6 +502,19 @@ export function TeamChatScreen({ currentUser }) {
     }
   };
 
+  // Full screen for any message's picture or GIF. A stored picture gets
+  // a fresh signed URL at tap time — the one its thumbnail was minted
+  // with may be minutes old, and an expired link at full screen is a
+  // broken image, not a picture.
+  const openImage = async m => {
+    try {
+      const src = m.gifUrl || await Db.signedUrl("chat-media", m.imageKey);
+      setLightbox(src);
+    } catch (e) {
+      setSendError(e.message || "Couldn't open the picture.");
+    }
+  };
+
   const togglePin = async m => {
     try {
       if (m.pinnedAt) await Db.unpinChatMessage(m.id);
@@ -484,13 +542,14 @@ export function TeamChatScreen({ currentUser }) {
           }}>
             <div className="kicker" style={{ marginBottom: 6 }}>Pinned</div>
             {pins.map(p => (
-              <div key={p.id} style={{ display: "flex", gap: 8, alignItems: "baseline", fontSize: 13, marginTop: 4 }}>
+              <div key={p.id} style={{ display: "flex", gap: 8, alignItems: "center", fontSize: 13, marginTop: 4 }}>
                 <span style={{ color: muted, flex: "none" }}>{p.name || "Someone"}:</span>
+                {(p.imageKey || p.gifUrl) && <PinThumb pin={p} onOpen={() => openImage(p)} />}
                 <span
                   title={p.body}
                   style={{ flex: 1, minWidth: 0, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}
                 >
-                  {p.body || (p.gifUrl ? "(GIF)" : "(picture)")}
+                  {p.body}
                 </span>
                 {isAdmin && (
                   <button onClick={() => togglePin(p)} aria-label="Take this pin down" title="Take this pin down"
@@ -554,9 +613,10 @@ export function TeamChatScreen({ currentUser }) {
                           // column is what keeps this an image host, not a
                           // tracking pixel.
                           <img src={m.gifUrl} alt="GIF" loading="lazy" onLoad={restick}
-                            style={{ display: "block", maxWidth: "100%", maxHeight: 320 }} />
+                            onClick={() => openImage(m)}
+                            style={{ display: "block", maxWidth: "100%", maxHeight: 320, cursor: "zoom-in" }} />
                         )}
-                        {m.imageKey && <ChatImage imageKey={m.imageKey} onSized={restick} />}
+                        {m.imageKey && <ChatImage imageKey={m.imageKey} onSized={restick} onOpen={() => openImage(m)} />}
                         {m.body && <div style={m.imageKey || m.gifUrl ? { marginTop: 6 } : null}>{m.body}</div>}
                       </div>
                       {(mine || isAdmin) && (
@@ -630,6 +690,7 @@ export function TeamChatScreen({ currentUser }) {
         </div>
       </Blueprint>
       {gifOpen && <GifPicker onPick={sendGif} onClose={() => setGifOpen(false)} busy={sending} />}
+      {lightbox && <Lightbox src={lightbox} onClose={() => setLightbox(null)} />}
     </div>
   );
 }
