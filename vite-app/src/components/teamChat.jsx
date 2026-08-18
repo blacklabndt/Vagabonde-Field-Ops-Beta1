@@ -5,12 +5,16 @@ import { Blueprint, Btn, ErrorBox, Loading } from "./common.jsx";
 // Team chat — one room for the whole crew.
 //
 // Three feeds keep the room current, cheapest first: the realtime
-// subscription carries messages as they land; a 30-second merge-refresh
-// catches anything a silently dropped websocket missed, which on a lease
-// with one bar of signal is a when, not an if; and regaining focus
-// refreshes immediately, because that is the moment somebody is looking.
-// Everything funnels through one id-keyed merge, so no path can double a
-// message another path already delivered.
+// subscription carries messages (and pin changes) as they land; a
+// 30-second merge-refresh catches anything a silently dropped websocket
+// missed, which on a lease with one bar of signal is a when, not an if;
+// and regaining focus refreshes immediately, because that is the moment
+// somebody is looking. Everything funnels through one id-keyed merge, so
+// no path can double a message another path already delivered.
+//
+// Admins can pin a message to a strip at the top of the room. A message
+// can also carry a picture — photos and GIFs — which big phone cameras
+// make worth shrinking before they cross a field connection.
 //
 // Deliberately online-only (see Db.listChatMessages): a message that
 // cannot send right now fails softly and stays in the composer, rather
@@ -18,37 +22,119 @@ import { Blueprint, Btn, ErrorBox, Loading } from "./common.jsx";
 
 const REFRESH_MS = 30000;
 
+// What the storage bucket accepts. Anything else the browser can still
+// decode (a HEIC off an iPhone, a BMP) is transcoded to JPEG on the way.
+const CHAT_IMAGE_TYPES = new Set(["image/jpeg", "image/png", "image/webp", "image/gif"]);
+const MAX_EDGE_PX = 1600;
+const KEEP_AS_IS_BYTES = 1.5 * 1024 * 1024;
+
+// A phone photo is 10MB+ of pixels nobody needs at chat size. Shrink to
+// 1600px JPEG before upload — except GIFs, whose animation a canvas
+// would freeze, so they go up as they are (the bucket caps them at 8MB).
+async function shrinkForChat(file) {
+  if (file.type === "image/gif") return file;
+  try {
+    const bmp = await createImageBitmap(file);
+    const oversized = bmp.width > MAX_EDGE_PX || bmp.height > MAX_EDGE_PX;
+    if (!oversized && file.size <= KEEP_AS_IS_BYTES && CHAT_IMAGE_TYPES.has(file.type)) {
+      bmp.close();
+      return file;
+    }
+    const scale = Math.min(1, MAX_EDGE_PX / Math.max(bmp.width, bmp.height));
+    const canvas = document.createElement("canvas");
+    canvas.width = Math.max(1, Math.round(bmp.width * scale));
+    canvas.height = Math.max(1, Math.round(bmp.height * scale));
+    canvas.getContext("2d").drawImage(bmp, 0, 0, canvas.width, canvas.height);
+    bmp.close();
+    const blob = await new Promise(res => canvas.toBlob(res, "image/jpeg", 0.85));
+    if (!blob) return file;
+    const stem = (file.name || "photo").replace(/\.[^.]*$/, "");
+    return new File([blob], stem + ".jpg", { type: "image/jpeg" });
+  } catch (_) {
+    // A format this browser can't decode — send as-is and let the bucket
+    // rules give the real answer.
+    return file;
+  }
+}
+
 // Messages sorted as the room reads them: oldest first, ties on the id so
 // the order is stable however they arrived.
 const inOrder = (a, b) =>
   a.createdAt < b.createdAt ? -1 : a.createdAt > b.createdAt ? 1 : a.id < b.id ? -1 : 1;
 
-// Every path into the list goes through here. Known ids are kept (or have
-// a late-arriving name filled in); new ones are added in order. Returning
-// `prev` untouched when nothing changed keeps the timer's refresh from
-// re-rendering a quiet room every 30 seconds.
+// Every path into the list goes through here. New ids are added in order;
+// known ids keep their name when the incoming copy lacks the join, and
+// take the incoming pin state. Returning `prev` untouched when nothing
+// changed keeps the timer's refresh from re-rendering a quiet room.
 function mergeIn(prev, incoming) {
   const by = new Map(prev.map(m => [m.id, m]));
   let changed = false;
   for (const m of incoming) {
     const cur = by.get(m.id);
-    if (!cur) { by.set(m.id, m); changed = true; }
-    else if (!cur.name && m.name) { by.set(m.id, { ...cur, name: m.name }); changed = true; }
+    if (!cur) { by.set(m.id, m); changed = true; continue; }
+    const merged = { ...m, name: m.name || cur.name };
+    if (merged.name !== cur.name || merged.pinnedAt !== cur.pinnedAt) {
+      by.set(m.id, merged);
+      changed = true;
+    }
   }
   return changed ? [...by.values()].sort(inOrder) : prev;
 }
 
+// A picture in a bubble. The bucket is private, so viewing means a signed
+// URL — minted on mount for the inline copy, and minted fresh on click
+// because the mount-time link may have expired by the time it's tapped.
+function ChatImage({ imageKey, onSized }) {
+  const [url, setUrl] = useState("");
+  const [failed, setFailed] = useState(false);
+  useEffect(() => {
+    let live = true;
+    Db.signedUrl("chat-media", imageKey)
+      .then(u => { if (live) setUrl(u); })
+      .catch(() => { if (live) setFailed(true); });
+    return () => { live = false; };
+  }, [imageKey]);
+
+  const openFull = async () => {
+    try {
+      const fresh = await Db.signedUrl("chat-media", imageKey);
+      // Opened after an await, so some browsers treat this as a non-user
+      // gesture and block it — fall back to same-tab navigation.
+      const win = window.open(fresh, "_blank", "noopener");
+      if (!win) window.location.href = fresh;
+    } catch (_) { /* the inline copy failing to open big is not worth an error box */ }
+  };
+
+  if (failed) {
+    return <div style={{ fontSize: 12, color: "color-mix(in srgb, var(--color-text) 55%, transparent)", padding: "6px 0" }}>Couldn't load the picture.</div>;
+  }
+  if (!url) {
+    return <div style={{ width: 200, height: 130, background: "color-mix(in srgb, var(--color-text) 6%, transparent)" }} />;
+  }
+  return (
+    <img
+      src={url} alt="Shared picture" loading="lazy"
+      onLoad={onSized}
+      onClick={openFull}
+      style={{ display: "block", maxWidth: "100%", maxHeight: 320, cursor: "zoom-in" }}
+    />
+  );
+}
+
 export function TeamChatScreen({ currentUser }) {
   const [messages, setMessages] = useState([]);
+  const [pins, setPins] = useState([]);
   const [hasMore, setHasMore] = useState(false);
   const [loading, setLoading] = useState(true);
   const [loadingOlder, setLoadingOlder] = useState(false);
   const [loadError, setLoadError] = useState("");
   const [draft, setDraft] = useState("");
+  const [attach, setAttach] = useState(null);   // { file, url } awaiting send
   const [sending, setSending] = useState(false);
   const [sendError, setSendError] = useState("");
 
   const listRef = useRef(null);
+  const fileRef = useRef(null);
   // Follow the conversation while the reader is at (or near) the bottom;
   // stop the moment they scroll up to read back, so an arriving message
   // cannot yank the history out from under them.
@@ -59,6 +145,20 @@ export function TeamChatScreen({ currentUser }) {
   // Sender names for realtime arrivals, whose rows come without the join.
   const nameOf = useRef(new Map());
 
+  const named = m => m.name ? m : { ...m, name: nameOf.current.get(m.profileId) || "" };
+
+  // Pin state changes arrive as updates; the strip mirrors them. The list
+  // is rebuilt rather than patched — it is at most twenty rows.
+  const applyPinChange = m => {
+    setPins(prev => {
+      const rest = prev.filter(p => p.id !== m.id);
+      if (!m.pinnedAt) return rest.length === prev.length ? prev : rest;
+      const was = prev.find(p => p.id === m.id);
+      const withName = m.name || !was ? named(m) : { ...m, name: was.name };
+      return [...rest, withName].sort((a, b) => (a.pinnedAt < b.pinnedAt ? 1 : -1));
+    });
+  };
+
   useEffect(() => {
     let live = true;
 
@@ -68,16 +168,17 @@ export function TeamChatScreen({ currentUser }) {
         nameOf.current = new Map(people.map(p => [p.id, p.displayName]));
         // Anyone who arrived over realtime before the directory did.
         setMessages(prev => {
-          const named = prev.map(m => m.name ? m : { ...m, name: nameOf.current.get(m.profileId) || "" });
-          return named.some((m, i) => m !== prev[i]) ? named : prev;
+          const filled = prev.map(m => m.name ? m : { ...m, name: nameOf.current.get(m.profileId) || "" });
+          return filled.some((m, i) => m !== prev[i]) ? filled : prev;
         });
       })
       .catch(() => {}); // names degrade to "Someone", the room still works
 
-    const loadLatest = initial => Db.listChatMessages()
-      .then(({ messages: page, hasMore: more }) => {
+    const loadLatest = initial => Promise.all([Db.listChatMessages(), Db.listPinnedChatMessages()])
+      .then(([{ messages: page, hasMore: more }, pinned]) => {
         if (!live) return;
         setMessages(prev => mergeIn(prev, page));
+        setPins(pinned);
         if (initial) setHasMore(more);
         setLoadError("");
       })
@@ -92,17 +193,26 @@ export function TeamChatScreen({ currentUser }) {
     const unsubscribe = Db.subscribeChatMessages({
       onInsert: m => {
         if (!live) return;
-        const named = m.name ? m : { ...m, name: nameOf.current.get(m.profileId) || "" };
-        setMessages(prev => mergeIn(prev, [named]));
+        const withName = named(m);
+        setMessages(prev => mergeIn(prev, [withName]));
         // A sender the directory doesn't know yet — an account created
         // since sign-in. Fetch the row with its join and patch the name.
-        if (!named.name) {
+        if (!withName.name) {
           Db.getChatMessage(m.id)
             .then(full => { if (live && full && full.name) setMessages(prev => mergeIn(prev, [full])); })
             .catch(() => {});
         }
       },
-      onDelete: id => { if (live) setMessages(prev => prev.filter(m => m.id !== id)); }
+      onUpdate: m => {
+        if (!live) return;
+        setMessages(prev => mergeIn(prev, [named(m)]));
+        applyPinChange(m);
+      },
+      onDelete: id => {
+        if (!live) return;
+        setMessages(prev => prev.filter(m => m.id !== id));
+        setPins(prev => prev.some(p => p.id === id) ? prev.filter(p => p.id !== id) : prev);
+      }
     });
 
     const timer = setInterval(() => {
@@ -119,6 +229,9 @@ export function TeamChatScreen({ currentUser }) {
     };
   }, []);
 
+  // The preview URL belongs to the browser until it's given back.
+  useEffect(() => () => { if (attach) URL.revokeObjectURL(attach.url); }, [attach]);
+
   // One scroll rule for every way the list changes: restore the reader's
   // place after a prepend, otherwise follow the bottom if they were there.
   useLayoutEffect(() => {
@@ -131,6 +244,13 @@ export function TeamChatScreen({ currentUser }) {
       el.scrollTop = el.scrollHeight;
     }
   }, [messages, loading]);
+
+  // Pictures finish loading after the scroll rule has run and push the
+  // list taller — follow them down if the reader was at the bottom.
+  const restick = () => {
+    const el = listRef.current;
+    if (el && stickToBottom.current) el.scrollTop = el.scrollHeight;
+  };
 
   const onScroll = () => {
     const el = listRef.current;
@@ -152,18 +272,39 @@ export function TeamChatScreen({ currentUser }) {
     setLoadingOlder(false);
   };
 
+  const pickFile = e => {
+    const file = e.target.files && e.target.files[0];
+    e.target.value = ""; // so choosing the same photo again still fires
+    if (!file) return;
+    setSendError("");
+    setAttach(prev => {
+      if (prev) URL.revokeObjectURL(prev.url);
+      return { file, url: URL.createObjectURL(file) };
+    });
+  };
+
+  const dropAttachment = () => {
+    setAttach(prev => {
+      if (prev) URL.revokeObjectURL(prev.url);
+      return null;
+    });
+  };
+
   const send = async () => {
     const text = draft.trim();
-    if (!text || sending) return;
+    if ((!text && !attach) || sending) return;
     setSending(true);
     setSendError("");
     try {
-      const sent = await Db.sendChatMessage(currentUser.id, text);
+      const file = attach ? await shrinkForChat(attach.file) : null;
+      const sent = await Db.sendChatMessage(currentUser.id, text, file);
       setDraft("");
+      dropAttachment();
       stickToBottom.current = true;
       setMessages(prev => mergeIn(prev, [sent]));
     } catch (e) {
-      // The draft stays in the composer — nothing was said, nothing is lost.
+      // The draft and the picture stay in the composer — nothing was
+      // said, nothing is lost.
       setSendError(e.message || "Couldn't send that — check the connection and try again.");
     }
     setSending(false);
@@ -173,17 +314,58 @@ export function TeamChatScreen({ currentUser }) {
     try {
       await Db.deleteChatMessage(id);
       setMessages(prev => prev.filter(m => m.id !== id));
+      setPins(prev => prev.some(p => p.id === id) ? prev.filter(p => p.id !== id) : prev);
     } catch (e) {
       setSendError(e.message || "Couldn't remove that message.");
     }
   };
 
+  const togglePin = async m => {
+    try {
+      if (m.pinnedAt) await Db.unpinChatMessage(m.id);
+      else await Db.pinChatMessage(m.id, currentUser.id);
+      const flipped = { ...m, pinnedAt: m.pinnedAt ? null : new Date().toISOString() };
+      setMessages(prev => mergeIn(prev, [flipped]));
+      applyPinChange(flipped);
+    } catch (e) {
+      setSendError(e.message || "Couldn't change that pin.");
+    }
+  };
+
   const isAdmin = currentUser.role === "Admin";
   const muted = "color-mix(in srgb, var(--color-text) 55%, transparent)";
+  const tinyBtn = { background: "transparent", border: "none", cursor: "pointer", color: muted, padding: 2, lineHeight: 1 };
 
   return (
     <div className="page" style={{ maxWidth: 760 }}>
       <Blueprint style={{ display: "flex", flexDirection: "column", height: "min(72vh, 640px)", minHeight: 320 }}>
+        {pins.length > 0 && (
+          <div style={{
+            borderBottom: "1px solid var(--color-divider)", padding: "10px 16px",
+            maxHeight: 150, overflowY: "auto", flex: "none",
+            background: "color-mix(in srgb, var(--color-accent) 5%, transparent)"
+          }}>
+            <div className="kicker" style={{ marginBottom: 6 }}>Pinned</div>
+            {pins.map(p => (
+              <div key={p.id} style={{ display: "flex", gap: 8, alignItems: "baseline", fontSize: 13, marginTop: 4 }}>
+                <span style={{ color: muted, flex: "none" }}>{p.name || "Someone"}:</span>
+                <span
+                  title={p.body}
+                  style={{ flex: 1, minWidth: 0, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}
+                >
+                  {p.body || "(picture)"}
+                </span>
+                {isAdmin && (
+                  <button onClick={() => togglePin(p)} aria-label="Take this pin down" title="Take this pin down"
+                    style={{ ...tinyBtn, fontSize: 15, flex: "none" }}>
+                    ×
+                  </button>
+                )}
+              </div>
+            ))}
+          </div>
+        )}
+
         <div ref={listRef} onScroll={onScroll} style={{ flex: 1, overflowY: "auto", padding: "16px 16px 8px" }}>
           {loading ? (
             <Loading label="Loading the chat…" />
@@ -228,17 +410,24 @@ export function TeamChatScreen({ currentUser }) {
                           ? "color-mix(in srgb, var(--color-accent) 35%, transparent)"
                           : "var(--color-divider)")
                       }}>
-                        {m.body}
+                        {m.imageKey && <ChatImage imageKey={m.imageKey} onSized={restick} />}
+                        {m.body && <div style={m.imageKey ? { marginTop: 6 } : null}>{m.body}</div>}
                       </div>
                       {(mine || isAdmin) && (
-                        <button
-                          onClick={() => remove(m.id)}
-                          aria-label="Remove this message"
-                          title="Remove this message"
-                          style={{ background: "transparent", border: "none", cursor: "pointer", color: muted, fontSize: 15, padding: 2, lineHeight: 1 }}
-                        >
-                          ×
-                        </button>
+                        <span style={{ display: "flex", gap: 2, flexDirection: mine ? "row-reverse" : "row", flex: "none" }}>
+                          {isAdmin && (
+                            <button onClick={() => togglePin(m)}
+                              aria-label={m.pinnedAt ? "Unpin this message" : "Pin this message"}
+                              title={m.pinnedAt ? "Unpin this message" : "Pin this message"}
+                              style={{ ...tinyBtn, fontSize: 11, fontWeight: 600 }}>
+                              {m.pinnedAt ? "Unpin" : "Pin"}
+                            </button>
+                          )}
+                          <button onClick={() => remove(m.id)} aria-label="Remove this message" title="Remove this message"
+                            style={{ ...tinyBtn, fontSize: 15 }}>
+                            ×
+                          </button>
+                        </span>
                       )}
                     </div>
                   </div>
@@ -248,9 +437,22 @@ export function TeamChatScreen({ currentUser }) {
           )}
         </div>
 
-        <div style={{ borderTop: "1px solid var(--color-divider)", padding: 12 }}>
+        <div style={{ borderTop: "1px solid var(--color-divider)", padding: 12, flex: "none" }}>
           {sendError && <div style={{ marginBottom: 8 }}><ErrorBox>{sendError}</ErrorBox></div>}
+          {attach && (
+            <div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 8 }}>
+              <img src={attach.url} alt="Ready to send" style={{ height: 56, maxWidth: 120, objectFit: "cover", border: "1px solid var(--color-divider)" }} />
+              <span style={{ fontSize: 12, color: muted, flex: 1, minWidth: 0, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
+                {attach.file.name}
+              </span>
+              <button onClick={dropAttachment} aria-label="Remove the picture" title="Remove the picture" style={{ ...tinyBtn, fontSize: 15 }}>×</button>
+            </div>
+          )}
           <div style={{ display: "flex", gap: 8, alignItems: "flex-end" }}>
+            <input ref={fileRef} type="file" accept="image/*" onChange={pickFile} style={{ display: "none" }} />
+            <Btn variant="secondary" onClick={() => fileRef.current && fileRef.current.click()} disabled={sending} title="Attach a picture or GIF">
+              Photo
+            </Btn>
             <textarea
               value={draft}
               onChange={e => setDraft(e.target.value)}
@@ -264,7 +466,7 @@ export function TeamChatScreen({ currentUser }) {
               className="input"
               style={{ flex: 1, resize: "none", minHeight: 46, lineHeight: 1.45 }}
             />
-            <Btn variant="primary" onClick={send} disabled={sending || !draft.trim()}>
+            <Btn variant="primary" onClick={send} disabled={sending || (!draft.trim() && !attach)}>
               {sending ? "Sending…" : "Send"}
             </Btn>
           </div>

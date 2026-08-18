@@ -20,6 +20,7 @@ const FOLDER_MARKER = ".keep";
 // How much of the team chat loads at once. A full page coming back is the
 // signal that older messages exist beyond it.
 const CHAT_PAGE = 100;
+const CHAT_COLUMNS = "id, profile_id, body, image_key, pinned_at, created_at, profiles(name, first_name, last_name)";
 
 // One place that turns a timestamp into the "12 Feb 06:31" the tables use, and
 // returns "" rather than "Invalid Date" for a null column.
@@ -45,6 +46,8 @@ function shapeChatMessage(m) {
     profileId: m.profile_id,
     name: m.profiles ? fullName(m.profiles) : "",
     body: m.body,
+    imageKey: m.image_key || null,
+    pinnedAt: m.pinned_at || null,
     createdAt: m.created_at,
     at: stamp(m.created_at)
   };
@@ -2295,7 +2298,7 @@ export const Db = {
   async listChatMessages(before) {
     let q = sbClient
       .from("chat_messages")
-      .select("id, profile_id, body, created_at, profiles(name, first_name, last_name)")
+      .select(CHAT_COLUMNS)
       .order("created_at", { ascending: false })
       .order("id", { ascending: false })
       .limit(CHAT_PAGE);
@@ -2310,52 +2313,114 @@ export const Db = {
     };
   },
 
+  // The strip at the top of the room. Newest pin first, and capped — if
+  // twenty things are pinned at once, the strip is no longer a strip.
+  async listPinnedChatMessages() {
+    const { data, error } = await sbClient
+      .from("chat_messages")
+      .select(CHAT_COLUMNS)
+      .not("pinned_at", "is", null)
+      .order("pinned_at", { ascending: false })
+      .limit(20);
+    if (error) throw error;
+    return (data || []).map(shapeChatMessage);
+  },
+
   // One row with its sender's name — for a realtime arrival from somebody
   // the screen hasn't seen yet, whose event carries only the profile id.
   async getChatMessage(id) {
     const { data, error } = await sbClient
       .from("chat_messages")
-      .select("id, profile_id, body, created_at, profiles(name, first_name, last_name)")
+      .select(CHAT_COLUMNS)
       .eq("id", id)
       .maybeSingle();
     if (error) throw error;
     return data ? shapeChatMessage(data) : null;
   },
 
-  async sendChatMessage(profileId, body) {
+  // Text, a picture, or both. The picture goes up first, under the
+  // sender's own folder (the storage policy holds everyone to theirs);
+  // if the message row is then refused, the upload is taken back down
+  // rather than stranded.
+  async sendChatMessage(profileId, body, imageFile) {
     const text = String(body || "").trim();
-    if (!text) throw new Error("Nothing to send.");
+    if (!text && !imageFile) throw new Error("Nothing to send.");
+    let imageKey = null;
+    if (imageFile) {
+      const ext = { "image/jpeg": "jpg", "image/png": "png", "image/webp": "webp", "image/gif": "gif" }[imageFile.type];
+      if (!ext) throw new Error("That file isn't a picture the chat can show — use a JPEG, PNG, WebP or GIF.");
+      imageKey = `${profileId}/${crypto.randomUUID()}.${ext}`;
+      const { error: upErr } = await sbClient.storage
+        .from("chat-media")
+        .upload(imageKey, imageFile, { contentType: imageFile.type });
+      if (upErr) {
+        throw /exceeded|maximum|too large|413/i.test(upErr.message || "")
+          ? new Error("That picture is too big to send — keep it under 8 MB.")
+          : upErr;
+      }
+    }
     const { data, error } = await sbClient
       .from("chat_messages")
-      .insert({ profile_id: profileId, body: text.slice(0, 4000) })
-      .select("id, profile_id, body, created_at, profiles(name, first_name, last_name)")
+      .insert({ profile_id: profileId, body: text.slice(0, 4000), image_key: imageKey })
+      .select(CHAT_COLUMNS)
       .single();
-    if (error) throw error;
+    if (error) {
+      if (imageKey) sbClient.storage.from("chat-media").remove([imageKey]).then(() => {}, () => {});
+      throw error;
+    }
     return shapeChatMessage(data);
   },
 
+  // Only an Admin's update passes the row policy, and only the pin columns
+  // pass the grant — a refused pin comes back as zero rows, not an error.
+  async pinChatMessage(id, profileId) {
+    const { data, error } = await sbClient
+      .from("chat_messages")
+      .update({ pinned_at: new Date().toISOString(), pinned_by: profileId })
+      .eq("id", id).select("id");
+    if (error) throw error;
+    if (!data || !data.length) throw new Error("Only an Admin can pin a message.");
+  },
+
+  async unpinChatMessage(id) {
+    const { data, error } = await sbClient
+      .from("chat_messages")
+      .update({ pinned_at: null, pinned_by: null })
+      .eq("id", id).select("id");
+    if (error) throw error;
+    if (!data || !data.length) throw new Error("Only an Admin can take a pin down.");
+  },
+
   async deleteChatMessage(id) {
+    // The picture's key has to be read before the row disappears — same
+    // shape as deleteJha. No rows means already gone, which is the goal
+    // state; a zero-row delete after that is a policy refusal.
+    const { data: rows, error: readErr } = await sbClient
+      .from("chat_messages").select("image_key").eq("id", id);
+    if (readErr) throw readErr;
+    if (!rows || !rows.length) return;
+    const imageKey = rows[0].image_key;
     const { data: gone, error } = await sbClient
       .from("chat_messages").delete().eq("id", id).select("id");
     if (error) throw error;
-    if (gone && gone.length) return;
-    // Zero rows is either "already gone" — deleted from another device,
-    // which is the goal state — or a policy refusal dressed as success.
-    // Ask for the row back to tell the two apart.
-    const { data: still, error: readErr } = await sbClient
-      .from("chat_messages").select("id").eq("id", id).maybeSingle();
-    if (readErr) throw readErr;
-    if (still) throw new Error("Only your own messages can be removed.");
+    if (!gone || !gone.length) throw new Error("Only your own messages can be removed.");
+    if (imageKey) {
+      try { await sbClient.storage.from("chat-media").remove([imageKey]); }
+      catch (_) { /* the message is gone; an orphaned picture is invisible */ }
+    }
   },
 
   // Live feed for the room. Returns the unsubscribe, for the screen's
-  // cleanup. Delete events carry only the row's id — that is all the
-  // replicated key holds — which is also all the screen needs to drop it.
-  subscribeChatMessages({ onInsert, onDelete }) {
+  // cleanup. Updates are pin changes — bodies are immutable. Delete
+  // events carry only the row's id — that is all the replicated key
+  // holds — which is also all the screen needs to drop it.
+  subscribeChatMessages({ onInsert, onUpdate, onDelete }) {
     const channel = sbClient
       .channel("team-chat")
       .on("postgres_changes", { event: "INSERT", schema: "public", table: "chat_messages" },
         p => onInsert(shapeChatMessage(p.new)))
+      .on("postgres_changes", { event: "UPDATE", schema: "public", table: "chat_messages" },
+        p => onUpdate(shapeChatMessage(p.new)))
       .on("postgres_changes", { event: "DELETE", schema: "public", table: "chat_messages" },
         p => onDelete(p.old.id))
       .subscribe();
@@ -2437,7 +2502,9 @@ const SAVE_MESSAGES = {
   updateProfileRole: "Role changed",
 
   // Team chat
-  deleteChatMessage: "Message removed"
+  deleteChatMessage: "Message removed",
+  pinChatMessage: "Message pinned",
+  unpinChatMessage: "Pin taken down"
 };
 
 // Left deliberately silent, because nobody did them on purpose:
