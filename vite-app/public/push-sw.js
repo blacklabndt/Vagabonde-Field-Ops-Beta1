@@ -26,15 +26,18 @@ self.addEventListener("notificationclick", event => {
   const url = (event.notification.data && event.notification.data.url) || "/";
   event.waitUntil(
     clients.matchAll({ type: "window", includeUncontrolled: true }).then(list => {
-      // An open app gets focused rather than duplicated — and told where
-      // the tap meant to land, because a focus alone would leave it on
-      // whatever screen it happened to be showing. The closed-app path
-      // carries the same destination in the URL instead.
+      // An open app is navigated to the destination, not just focused —
+      // a focus alone leaves it on whatever screen it was showing. This
+      // began life as a postMessage the page listened for, which broke
+      // whenever the running page was a build behind the worker (an
+      // app-switcher resume never reloads); a navigation always lands
+      // on the newest build, and ?goto=chat does the rest. Both paths,
+      // open and closed, now funnel through the same URL.
       for (const c of list) {
-        if ("focus" in c) {
-          c.postMessage({ type: "goto", screen: "chat" });
-          return c.focus();
+        if ("navigate" in c) {
+          return c.navigate(url).then(w => (w || c).focus()).catch(() => c.focus());
         }
+        if ("focus" in c) return c.focus();
       }
       return clients.openWindow(url);
     })

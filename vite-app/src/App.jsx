@@ -57,10 +57,10 @@ class EggBoundary extends React.Component {
 export function App() {
   const [currentUser, setCurrentUser] = useState(null);
   const [checkingSession, setCheckingSession] = useState(true);
-  // A push notification's click lands on /?goto=chat — honoured here so
-  // tapping "Kyle — Team chat" opens the room, not the board. That covers
-  // a closed app; an already-open one is steered by the service worker's
-  // message instead (see the effect below).
+  // A push notification's tap lands on /?goto=chat — honoured here so
+  // tapping "Kyle — Team chat" opens the room, not the board. The
+  // service worker sends both the closed and the already-open app
+  // through this same URL (see public/push-sw.js).
   const [screen, setScreen] = useState(() =>
     new URLSearchParams(window.location.search).get("goto") === "chat" ? "chat" : "board"
   );
@@ -252,22 +252,6 @@ export function App() {
     // usual hazard ratings when they're out of range.
     Db.lastHazardRatings(currentUser.id).catch(() => {});
   }, [currentUser]);
-
-  // The service worker's answer to a notification tap while the app is
-  // already open: a message saying where the tap meant to land. Without
-  // this, the tap would focus the app on whatever screen it was showing.
-  useEffect(() => {
-    if (!("serviceWorker" in navigator)) return;
-    const onMessage = e => {
-      if (e.data && e.data.type === "goto" && e.data.screen === "chat") {
-        setContextScreen("");
-        setScreen("chat");
-        setMenuOpen(false);
-      }
-    };
-    navigator.serviceWorker.addEventListener("message", onMessage);
-    return () => navigator.serviceWorker.removeEventListener("message", onMessage);
-  }, []);
 
   const loadMyTickets = async () => {
     setMyTicketsLoading(true);
