@@ -521,6 +521,17 @@ export function TeamChatScreen({ currentUser }) {
     setPushBusy(false);
   };
 
+  // Admin moderation: take a message out of the room.
+  const remove = async id => {
+    try {
+      await Db.deleteChatMessage(id);
+      setMessages(prev => prev.filter(m => m.id !== id));
+      setPins(prev => prev.some(p => p.id === id) ? prev.filter(p => p.id !== id) : prev);
+    } catch (e) {
+      setSendError(e.message || "Couldn't remove that message.");
+    }
+  };
+
   // Full screen for any message's picture or GIF. A stored picture gets
   // a fresh signed URL at tap time — the one its thumbnail was minted
   // with may be minutes old, and an expired link at full screen is a
@@ -638,16 +649,22 @@ export function TeamChatScreen({ currentUser }) {
                         {m.imageKey && <ChatImage imageKey={m.imageKey} onSized={restick} onOpen={() => openImage(m)} />}
                         {m.body && <div style={m.imageKey || m.gifUrl ? { marginTop: 6 } : null}>{m.body}</div>}
                       </div>
-                      {/* No delete button, on purpose: what was said stays
-                          said until the 30-day sweep takes it. Admins keep
-                          the pin control. */}
+                      {/* Moderation is an Admin's job — pin and delete
+                          both. A tech's own messages stand as sent until
+                          the 30-day sweep takes them. */}
                       {isAdmin && (
-                        <button onClick={() => togglePin(m)}
-                          aria-label={m.pinnedAt ? "Unpin this message" : "Pin this message"}
-                          title={m.pinnedAt ? "Unpin this message" : "Pin this message"}
-                          style={{ ...tinyBtn, fontSize: 11, fontWeight: 600, flex: "none" }}>
-                          {m.pinnedAt ? "Unpin" : "Pin"}
-                        </button>
+                        <span style={{ display: "flex", gap: 2, flexDirection: mine ? "row-reverse" : "row", flex: "none" }}>
+                          <button onClick={() => togglePin(m)}
+                            aria-label={m.pinnedAt ? "Unpin this message" : "Pin this message"}
+                            title={m.pinnedAt ? "Unpin this message" : "Pin this message"}
+                            style={{ ...tinyBtn, fontSize: 11, fontWeight: 600 }}>
+                            {m.pinnedAt ? "Unpin" : "Pin"}
+                          </button>
+                          <button onClick={() => remove(m.id)} aria-label="Remove this message" title="Remove this message"
+                            style={{ ...tinyBtn, fontSize: 15 }}>
+                            ×
+                          </button>
+                        </span>
                       )}
                     </div>
                   </div>

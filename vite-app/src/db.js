@@ -2460,10 +2460,27 @@ export const Db = {
     if (!data || !data.length) throw new Error("Only an Admin can take a pin down.");
   },
 
-  // No deleteChatMessage: Kyle took the delete button out — what was
-  // said stays said until the 30-day sweep. The RLS delete policy
-  // remains, because retention is a capability of the schema, not of
-  // this file.
+  // Deleting is moderation, not editing your past: the screen offers it
+  // to Admins only. (The RLS policy also lets an author delete their own
+  // row — capability of the schema, deliberately wider than the UI.)
+  async deleteChatMessage(id) {
+    // The picture's key has to be read before the row disappears — same
+    // shape as deleteJha. No rows means already gone, which is the goal
+    // state; a zero-row delete after that is a policy refusal.
+    const { data: rows, error: readErr } = await sbClient
+      .from("chat_messages").select("image_key").eq("id", id);
+    if (readErr) throw readErr;
+    if (!rows || !rows.length) return;
+    const imageKey = rows[0].image_key;
+    const { data: gone, error } = await sbClient
+      .from("chat_messages").delete().eq("id", id).select("id");
+    if (error) throw error;
+    if (!gone || !gone.length) throw new Error("Only an Admin can remove a message.");
+    if (imageKey) {
+      try { await sbClient.storage.from("chat-media").remove([imageKey]); }
+      catch (_) { /* the message is gone; an orphaned picture is invisible */ }
+    }
+  },
 
   // Live feed for the room. Returns the unsubscribe, for the screen's
   // cleanup. Updates are pin changes — bodies are immutable. Delete
@@ -2625,6 +2642,7 @@ const SAVE_MESSAGES = {
   updateProfileRole: "Role changed",
 
   // Team chat
+  deleteChatMessage: "Message removed",
   pinChatMessage: "Message pinned",
   unpinChatMessage: "Pin taken down",
   enableChatPush: "Notifications on — this device will hear about new messages",
