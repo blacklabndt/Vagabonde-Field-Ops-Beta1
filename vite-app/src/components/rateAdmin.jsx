@@ -404,38 +404,49 @@ export function RateAdminScreen() {
       </div>
       <ErrorBox>{error}</ErrorBox>
 
-      {/* Whose rates: the house card as a permanent option, everyone else by
-          name. The default card is not a client and is the one people reach
-          for most, so it stays a single tap rather than something to search
-          for. Clients are already loaded in full, so the search runs here
-          rather than going back to the server for a list it already has. */}
+      {/* Whose rates: one search box, with the house card as the first row
+          of the list rather than a button beside it — per Kyle. Clients are
+          already loaded in full, so the search runs here rather than going
+          back to the server for a list it already has. */}
       <div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 16, flexWrap: "wrap" }}>
-        <button type="button" className={`pill${isDefault ? " active" : ""}`}
-          onClick={() => setSelected(DEFAULT_SCHEDULE)}
-          title="The house rate card — what a new client starts from.">
-          Default rates
-        </button>
         <SearchSelect
-          // Narrower than the default so the pill, the box and "+ New client"
-          // stay on one line down to a small laptop; the search box is the
-          // thing that can afford to give up the width.
+          // Narrower than the default so the box and "+ New client" stay on
+          // one line down to a small laptop; the search box is the thing
+          // that can afford to give up the width.
           style={{ flex: "1 1 200px", maxWidth: 380 }}
           listId="rate-client-list"
           ariaLabel="Search clients"
-          placeholder={client ? `${client.name} — search to change…` : "Search clients…"}
+          placeholder={isDefault ? "Default rates — search to change…"
+            : client ? `${client.name} — search to change…` : "Search clients…"}
           search={text => {
             const q = text.trim().toLowerCase();
             const matched = q
               ? clients.filter(c => (c.name || "").toLowerCase().includes(q) || (c.agreement_ref || "").toLowerCase().includes(q))
               : clients;
+            // The house card leads the list whenever it fits what was typed
+            // — an empty box always shows it first.
+            const withDefault = !q || "default rates house card".includes(q) || q.includes("default")
+              ? [{ id: DEFAULT_SCHEDULE, isDefaultCard: true }, ...matched]
+              : matched;
             // Sliced, but the true count goes back so the list can say how
             // many it is not showing.
-            return { rows: matched.slice(0, 25), total: matched.length };
+            return { rows: withDefault.slice(0, 25), total: withDefault.length };
           }}
           optionKey={c => c.id}
           onPick={c => setSelected(c.id)}
           onError={setError}
           renderOption={c => {
+            if (c.isDefaultCard) {
+              return (
+                <>
+                  <div style={{ fontSize: 15 }}>Default rates</div>
+                  <div style={{ display: "flex", alignItems: "center", gap: 8, fontSize: 11, color: "color-mix(in srgb, var(--color-text) 55%, transparent)" }}>
+                    <TagX variant="accent">House rate card</TagX>
+                    <span>What a new client starts on</span>
+                  </div>
+                </>
+              );
+            }
             const n = overrides.filter(o => o.jobs && o.jobs.client_id === c.id).length;
             return (
               <>
