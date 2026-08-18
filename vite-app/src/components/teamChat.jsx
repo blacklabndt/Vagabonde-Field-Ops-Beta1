@@ -568,6 +568,11 @@ export function TeamChatScreen({ currentUser }) {
               {sending ? "Sending…" : "Send"}
             </Btn>
           </div>
+          {/* Said here because history quietly ending mid-scroll would
+              otherwise read as a bug, not a policy. */}
+          <div style={{ fontSize: 11, color: "color-mix(in srgb, var(--color-text) 45%, transparent)", marginTop: 6 }}>
+            Messages clear after 30 days — pinned messages stay.
+          </div>
         </div>
       </Blueprint>
       {gifOpen && <GifPicker onPick={sendGif} onClose={() => setGifOpen(false)} busy={sending} />}
