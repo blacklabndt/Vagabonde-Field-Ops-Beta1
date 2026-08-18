@@ -765,9 +765,13 @@ function TicketViewDialog({ ticketId, jobRecord, onClose, onSent }) {
 // under its own label instead of colliding with the next column.
 function RecordCell({ label, value }) {
   return (
-    <div>
+    <div style={{ minWidth: 0 }}>
       <div style={{ fontSize: 11, textTransform: "uppercase", letterSpacing: ".08em", color: "color-mix(in srgb, var(--color-text) 55%, transparent)", marginBottom: 3 }}>{label}</div>
-      <div className="tabular" style={{ fontSize: 14, textWrap: "pretty" }}>
+      {/* overflowWrap anywhere: a rep's email is one unbreakable token, and
+          on a phone it is wider than a third-of-the-screen column — without
+          a break opportunity it painted straight across the neighbouring
+          cell instead of wrapping inside its own. */}
+      <div className="tabular" style={{ fontSize: 14, textWrap: "pretty", overflowWrap: "anywhere" }}>
         {value || <span style={{ color: "color-mix(in srgb, var(--color-text) 35%, transparent)" }}>—</span>}
       </div>
     </div>
