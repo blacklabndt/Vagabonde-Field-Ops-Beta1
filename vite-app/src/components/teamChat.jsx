@@ -495,16 +495,6 @@ export function TeamChatScreen({ currentUser }) {
     setSending(false);
   };
 
-  const remove = async id => {
-    try {
-      await Db.deleteChatMessage(id);
-      setMessages(prev => prev.filter(m => m.id !== id));
-      setPins(prev => prev.some(p => p.id === id) ? prev.filter(p => p.id !== id) : prev);
-    } catch (e) {
-      setSendError(e.message || "Couldn't remove that message.");
-    }
-  };
-
   // Once, on arrival: where this device stands on notifications.
   useEffect(() => {
     let live = true;
@@ -648,21 +638,16 @@ export function TeamChatScreen({ currentUser }) {
                         {m.imageKey && <ChatImage imageKey={m.imageKey} onSized={restick} onOpen={() => openImage(m)} />}
                         {m.body && <div style={m.imageKey || m.gifUrl ? { marginTop: 6 } : null}>{m.body}</div>}
                       </div>
-                      {(mine || isAdmin) && (
-                        <span style={{ display: "flex", gap: 2, flexDirection: mine ? "row-reverse" : "row", flex: "none" }}>
-                          {isAdmin && (
-                            <button onClick={() => togglePin(m)}
-                              aria-label={m.pinnedAt ? "Unpin this message" : "Pin this message"}
-                              title={m.pinnedAt ? "Unpin this message" : "Pin this message"}
-                              style={{ ...tinyBtn, fontSize: 11, fontWeight: 600 }}>
-                              {m.pinnedAt ? "Unpin" : "Pin"}
-                            </button>
-                          )}
-                          <button onClick={() => remove(m.id)} aria-label="Remove this message" title="Remove this message"
-                            style={{ ...tinyBtn, fontSize: 15 }}>
-                            ×
-                          </button>
-                        </span>
+                      {/* No delete button, on purpose: what was said stays
+                          said until the 30-day sweep takes it. Admins keep
+                          the pin control. */}
+                      {isAdmin && (
+                        <button onClick={() => togglePin(m)}
+                          aria-label={m.pinnedAt ? "Unpin this message" : "Pin this message"}
+                          title={m.pinnedAt ? "Unpin this message" : "Pin this message"}
+                          style={{ ...tinyBtn, fontSize: 11, fontWeight: 600, flex: "none" }}>
+                          {m.pinnedAt ? "Unpin" : "Pin"}
+                        </button>
                       )}
                     </div>
                   </div>
