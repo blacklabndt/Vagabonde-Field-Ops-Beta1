@@ -121,9 +121,17 @@ export function RateAdminScreen() {
   // every drop writes the whole group's positions through the same
   // saving/saved status the rates use. Rate boxes become plain figures while
   // dragging, so a drag can start anywhere on the row.
+  //
+  // Pointer events, not the HTML5 drag API: dragstart/drop never fire from a
+  // touch, so the first phone that tried this couldn't move a row at all.
+  // One pointer path serves mouse and finger alike; touch-action: none on
+  // the rows keeps the page from scrolling out from under a finger drag.
   const [reorderGroup, setReorderGroup] = useState("");
   const [dragOver, setDragOver] = useState(-1);
   const dragFrom = useRef(null);
+  // The drop target lives in a ref as well as in state: state paints the
+  // highlight, the ref is what pointer-up reads, immune to a stale render.
+  const dragTo = useRef(-1);
 
   const persistOrder = async rows => {
     const updates = rows.flatMap((r, i) => r.ids.map(id => ({ id, position: i })));
@@ -145,26 +153,48 @@ export function RateAdminScreen() {
     }
   };
 
+  const endDrag = () => {
+    dragFrom.current = null;
+    dragTo.current = -1;
+    setDragOver(-1);
+  };
   const dragProps = (group, rows, i) => reorderGroup !== group ? {} : {
-    draggable: true,
-    onDragStart: e => { dragFrom.current = i; e.dataTransfer.effectAllowed = "move"; },
-    onDragOver: e => { e.preventDefault(); e.dataTransfer.dropEffect = "move"; setDragOver(i); },
-    onDragLeave: () => setDragOver(d => (d === i ? -1 : d)),
-    onDrop: e => {
-      e.preventDefault();
-      setDragOver(-1);
-      const from = dragFrom.current;
-      dragFrom.current = null;
-      if (from == null || from === i) return;
+    "data-drag-row": i,
+    onPointerDown: e => {
+      if (e.button !== 0 && e.pointerType === "mouse") return;
+      // Capture, so the row keeps receiving moves wherever the pointer goes.
+      e.currentTarget.setPointerCapture(e.pointerId);
+      dragFrom.current = { group, from: i };
+      dragTo.current = i;
+      setDragOver(i);
+    },
+    onPointerMove: e => {
+      const d = dragFrom.current;
+      if (!d || d.group !== group) return;
+      // Capture retargets events at this row, so the row under the pointer
+      // is found by position rather than by who the event says it hit.
+      const el = document.elementFromPoint(e.clientX, e.clientY);
+      const tr = el && el.closest ? el.closest("tr[data-drag-row]") : null;
+      if (tr) {
+        const over = Number(tr.getAttribute("data-drag-row"));
+        dragTo.current = over;
+        setDragOver(over);
+      }
+    },
+    onPointerUp: () => {
+      const d = dragFrom.current;
+      const to = dragTo.current;
+      endDrag();
+      if (!d || d.group !== group || to < 0 || to === d.from) return;
       const next = [...rows];
-      const [moved] = next.splice(from, 1);
-      next.splice(i, 0, moved);
+      const [moved] = next.splice(d.from, 1);
+      next.splice(to, 0, moved);
       persistOrder(next);
     },
-    onDragEnd: () => { setDragOver(-1); dragFrom.current = null; },
+    onPointerCancel: endDrag,
     style: {
-      cursor: "grab",
-      ...(dragOver === i ? { outline: "2px solid var(--color-accent)", outlineOffset: -2 } : null)
+      cursor: "grab", touchAction: "none", userSelect: "none", WebkitUserSelect: "none",
+      ...(dragOver === i && dragFrom.current ? { outline: "2px solid var(--color-accent)", outlineOffset: -2 } : null)
     }
   };
 
@@ -172,10 +202,17 @@ export function RateAdminScreen() {
     <span aria-hidden style={{ marginRight: 8, color: "var(--color-accent)", fontWeight: 600 }}>≡</span>
   );
   const ReorderToggle = ({ group }) => (
-    <Btn variant={reorderGroup === group ? "primary" : "secondary"} style={{ whiteSpace: "nowrap", marginTop: 6 }}
-      onClick={() => { setReorderGroup(g => (g === group ? "" : group)); setDragOver(-1); dragFrom.current = null; }}>
-      {reorderGroup === group ? "Done" : "Reorder"}
-    </Btn>
+    <div style={{ display: "flex", alignItems: "center", gap: 8, marginTop: 6 }}>
+      {reorderGroup === group && (
+        <span style={{ fontSize: 11, color: "color-mix(in srgb, var(--color-text) 55%, transparent)", whiteSpace: "nowrap" }}>
+          Drag rows into order
+        </span>
+      )}
+      <Btn variant={reorderGroup === group ? "primary" : "secondary"} style={{ whiteSpace: "nowrap" }}
+        onClick={() => { setReorderGroup(g => (g === group ? "" : group)); endDrag(); }}>
+        {reorderGroup === group ? "Done" : "Reorder"}
+      </Btn>
+    </div>
   );
 
   const [copying, setCopying] = useState(false);
