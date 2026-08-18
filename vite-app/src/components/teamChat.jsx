@@ -514,20 +514,17 @@ export function TeamChatScreen({ currentUser }) {
     return () => { live = false; };
   }, []);
 
-  const togglePush = async () => {
+  // Enable-only: the switch hides itself once this device is subscribed
+  // (turning notifications off again is the phone's own settings).
+  const enablePush = async () => {
     if (pushBusy) return;
     setPushBusy(true);
     setSendError("");
     try {
-      if (pushState === "on") {
-        await Db.disableChatPush();
-        setPushState("off");
-      } else {
-        await Db.enableChatPush();
-        setPushState("on");
-      }
+      await Db.enableChatPush();
+      setPushState("on");
     } catch (e) {
-      setSendError(e.message || "Couldn't change notifications.");
+      setSendError(e.message || "Couldn't turn notifications on.");
       // Permission may have just been denied for good — re-read reality.
       Db.getChatPushState().then(setPushState).catch(() => {});
     }
@@ -725,11 +722,15 @@ export function TeamChatScreen({ currentUser }) {
         </div>
       </Blueprint>
       {/* Below the room rather than in it: settings are not conversation.
-          Hidden entirely where the device can't do push (an iPhone that
-          hasn't been installed to the home screen). */}
-      {pushState !== "unsupported" && (
+          Shown only while there is something to do — a device that can't
+          push (an iPhone not installed to the home screen) never sees it,
+          and a device already subscribed is done with it. Turning
+          notifications back off is the phone's own settings; a blocked
+          permission invalidates the subscription, and the sender prunes
+          it on the next push. */}
+      {pushState !== "unsupported" && pushState !== "on" && (
         <div style={{ marginTop: 14, opacity: pushBusy ? 0.6 : 1 }}>
-          <Switch on={pushState === "on"} onClick={togglePush} label="Notify me about new messages" />
+          <Switch on={false} onClick={enablePush} label="Notify me about new messages" />
           <div style={{ fontSize: 12, color: muted, marginTop: 4, maxWidth: 520 }}>
             Sends a notification to this device when someone posts in the team chat — even with the
             app closed. The switch is per device: turn it on on every phone or tablet that should buzz.
