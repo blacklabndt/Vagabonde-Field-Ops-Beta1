@@ -5,9 +5,11 @@
 // the opposite architecture: its integration terms require search and
 // media requests to come from the end user's own browser, not through a
 // partner server, so there is nothing to proxy. The key itself still
-// lives as a Supabase secret rather than in the public bundle: this
-// function hands it only to signed-in accounts (verify_jwt is on),
-// which is as guarded as a client-side key can be.
+// lives as a Supabase secret rather than in the public bundle or git:
+// verify_jwt is on, and the gateway honours the project's publishable
+// key, so in practice anyone holding the app can obtain it — the same
+// exposure as any client-side GIF key, and KLIPY's intended model. The
+// secret buys central rotation, not secrecy.
 //
 // Until the KLIPY_API_KEY secret is set, the picker shows this
 // function's own explanation instead of a grid — the same
