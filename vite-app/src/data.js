@@ -341,9 +341,12 @@ export const STANDARD_RATE_LINES = [
   ]),
   ...METHODS.map(m => ({ kind: "method", label: m.label, unit: "weld" })),
   // The crew rate is per truck, not per person: a second technician in the
-  // same truck does not double it, and a second truck is a second ticket.
-  { kind: "expense", label: "Technician — straight", unit: "h" },
-  { kind: "expense", label: "Technician — overtime", unit: "h" },
+  // same truck does not double it, and a second truck is a second ticket —
+  // which is why these no longer say "Technician". Renamed live in migration
+  // 20260818025620; the DB labels and these must stay identical, since
+  // rates.exp is matched by label text.
+  { kind: "expense", label: "Straight time", unit: "h" },
+  { kind: "expense", label: "Overtime", unit: "h" },
   // Travel is billed apart from hours worked, at its own rate — that is how
   // the paper field ticket has always split it.
   { kind: "expense", label: "Travel — straight", unit: "h" },
@@ -368,8 +371,8 @@ const expIdx = label => {
 };
 
 export const SERVICES = [
-  { key: "straight", label: "Technician — straight", unit: "h", rateIdx: expIdx("Technician — straight"), step: 0.5 },
-  { key: "ot", label: "Technician — overtime", unit: "h", rateIdx: expIdx("Technician — overtime"), step: 0.5 },
+  { key: "straight", label: "Straight time", unit: "h", rateIdx: expIdx("Straight time"), step: 0.5 },
+  { key: "ot", label: "Overtime", unit: "h", rateIdx: expIdx("Overtime"), step: 0.5 },
   { key: "travel", label: "Travel — straight", unit: "h", rateIdx: expIdx("Travel — straight"), step: 0.5 },
   { key: "travelOt", label: "Travel — overtime", unit: "h", rateIdx: expIdx("Travel — overtime"), step: 0.5 },
   { key: "km", label: "Mileage", unit: "km", rateIdx: expIdx("Mileage") },

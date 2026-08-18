@@ -25,6 +25,10 @@ function rateForService(svc, rates) {
 function linesToForm(lines, keepQuantities) {
   const weldKeyByLabel = Object.fromEntries(WELD_ITEMS.map(w => [w.label, w.key]));
   const serviceKeyByLabel = Object.fromEntries(SERVICES.map(s => [s.label, s.key]));
+  // Tickets billed before the 20260818025620 rename stored the old names.
+  // They still reopen and copy forward as the lines they are.
+  serviceKeyByLabel["Technician — straight"] = "straight";
+  serviceKeyByLabel["Technician — overtime"] = "ot";
   const welds = [], others = [];
   (lines || []).forEach(l => {
     const qty = keepQuantities ? Number(l.quantity) : 0;

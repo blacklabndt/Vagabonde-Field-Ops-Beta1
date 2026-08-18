@@ -376,7 +376,7 @@ export function RateAdminScreen() {
               <TableScroll><table className="table">
                 <thead><tr><th>Item</th><th style={{ width: 92 }}>Rate</th><th style={{ width: 44 }}></th></tr></thead>
                 <tbody>
-                  {["Technician — straight", "Technician — overtime", "Mileage", "Film & consumables", "Subsistence / LOA"].map(label => {
+                  {["Straight time", "Overtime", "Mileage", "Film & consumables", "Subsistence / LOA"].map(label => {
                     const l = line("expense", label);
                     if (!l) return null;
                     return (
