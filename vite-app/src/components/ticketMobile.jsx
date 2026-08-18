@@ -63,19 +63,15 @@ export function TicketMobileScreen({ job, jobRecord, currentUser, onSaved, ticke
   // zeros rather than as "not read yet".
   const [loadingTicket, setLoadingTicket] = useState(!!ticket);
 
-  // Every ticket starts at zero. The usual lines are laid out ready to step
-  // up, but nothing is claimed until someone enters it — a ticket must never
-  // arrive pre-loaded with quantities no one typed.
-  const [weldLines, setWeldLines] = useState([
-    { key: "film0", qty: 0 }, { key: "film1", qty: 0 }, { key: "film2", qty: 0 },
-    { key: "film3", qty: 0 }, { key: "film4", qty: 0 }
-  ]);
+  // Every ticket starts empty, per Kyle. The usual lines used to be laid out
+  // ready to step up, but a pre-laid line is a claim waiting to be skimmed
+  // past — every charge on a ticket is now one somebody picked from the
+  // dropdown on purpose. (Reopened drafts and "start from last ticket" still
+  // bring their own lines; this is only what a blank ticket opens with.)
+  const [weldLines, setWeldLines] = useState([]);
   const [weldPick, setWeldPick] = useState(WELD_ITEMS[0].key);
-  const [otherLines, setOtherLines] = useState([
-    { key: "straight", qty: 0 }, { key: "ot", qty: 0 }, { key: "km", qty: 0 },
-    { key: "exposures", qty: 0 }, { key: "loaDays", qty: 0 }
-  ]);
-  const [servicePick, setServicePick] = useState("standby");
+  const [otherLines, setOtherLines] = useState([]);
+  const [servicePick, setServicePick] = useState(SERVICES[0].key);
   const [saving, setSaving] = useState(false);
   const [saveError, setSaveError] = useState("");
   const [queued, setQueued] = useState(false);
@@ -270,14 +266,9 @@ export function TicketMobileScreen({ job, jobRecord, currentUser, onSaved, ticke
   const discardRecovered = () => {
     OfflineCache.remove(wipKey);
     setRecovered(null);
-    setWeldLines([
-      { key: "film0", qty: 0 }, { key: "film1", qty: 0 }, { key: "film2", qty: 0 },
-      { key: "film3", qty: 0 }, { key: "film4", qty: 0 }
-    ]);
-    setOtherLines([
-      { key: "straight", qty: 0 }, { key: "ot", qty: 0 }, { key: "km", qty: 0 },
-      { key: "exposures", qty: 0 }, { key: "loaDays", qty: 0 }
-    ]);
+    // Back to what a fresh ticket opens with: nothing.
+    setWeldLines([]);
+    setOtherLines([]);
     setCrew(p => p.map(c => ({ ...c, ...Object.fromEntries(CREW_FIGURES.map(k => [k, 0])) })));
   };
 
@@ -508,6 +499,11 @@ export function TicketMobileScreen({ job, jobRecord, currentUser, onSaved, ticke
             <span style={{ fontSize: 13, fontFamily: "var(--font-heading)", fontWeight: 600 }}>Per-weld charges</span>
             <span className="tabular" style={{ marginLeft: "auto", fontSize: 12, color: "var(--color-accent)" }}>{weldCount} welds · {money(weldDollars)}</span>
           </div>
+          {weldLines.length === 0 && (
+            <div style={{ fontSize: 12, color: "color-mix(in srgb, var(--color-text) 55%, transparent)" }}>
+              Nothing billed yet — pick a line below and tap Add.
+            </div>
+          )}
           <div style={{ display: "flex", flexDirection: "column", gap: 6 }}>
             {weldLines.map(l => {
               const item = weldItemsByKey[l.key];
@@ -542,6 +538,11 @@ export function TicketMobileScreen({ job, jobRecord, currentUser, onSaved, ticke
             <span style={{ fontSize: 13, fontFamily: "var(--font-heading)", fontWeight: 600 }}>Other charges</span>
             <span className="tabular" style={{ marginLeft: "auto", fontSize: 12, color: "var(--color-accent)" }}>{money(otherDollars)}</span>
           </div>
+          {otherLines.length === 0 && (
+            <div style={{ fontSize: 12, color: "color-mix(in srgb, var(--color-text) 55%, transparent)" }}>
+              Nothing billed yet — pick a line below and tap Add.
+            </div>
+          )}
           <div style={{ display: "flex", flexDirection: "column", gap: 6 }}>
             {otherLines.map(l => {
               const svc = serviceByKey[l.key];
