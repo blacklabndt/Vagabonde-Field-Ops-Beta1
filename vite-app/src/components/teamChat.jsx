@@ -677,11 +677,6 @@ export function TeamChatScreen({ currentUser }) {
 
         <div style={{ borderTop: "1px solid var(--color-divider)", padding: 12, flex: "none" }}>
           {sendError && <div style={{ marginBottom: 8 }}><ErrorBox>{sendError}</ErrorBox></div>}
-          {pushState !== "unsupported" && (
-            <div style={{ display: "flex", justifyContent: "flex-end", marginBottom: 8, opacity: pushBusy ? 0.6 : 1 }}>
-              <Switch on={pushState === "on"} onClick={togglePush} label="Notify me about new messages" />
-            </div>
-          )}
           {attach && (
             <div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 8 }}>
               <img src={attach.url} alt="Ready to send" style={{ height: 56, maxWidth: 120, objectFit: "cover", border: "1px solid var(--color-divider)" }} />
@@ -729,6 +724,18 @@ export function TeamChatScreen({ currentUser }) {
           </div>
         </div>
       </Blueprint>
+      {/* Below the room rather than in it: settings are not conversation.
+          Hidden entirely where the device can't do push (an iPhone that
+          hasn't been installed to the home screen). */}
+      {pushState !== "unsupported" && (
+        <div style={{ marginTop: 14, opacity: pushBusy ? 0.6 : 1 }}>
+          <Switch on={pushState === "on"} onClick={togglePush} label="Notify me about new messages" />
+          <div style={{ fontSize: 12, color: muted, marginTop: 4, maxWidth: 520 }}>
+            Sends a notification to this device when someone posts in the team chat — even with the
+            app closed. The switch is per device: turn it on on every phone or tablet that should buzz.
+          </div>
+        </div>
+      )}
       {gifOpen && <GifPicker onPick={sendGif} onClose={() => setGifOpen(false)} busy={sending} />}
       {lightbox && <Lightbox src={lightbox} onClose={() => setLightbox(null)} />}
     </div>
