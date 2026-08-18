@@ -9,6 +9,11 @@ self.addEventListener("push", event => {
   event.waitUntil(self.registration.showNotification(data.title || "Team chat", {
     body: data.body || "New message",
     icon: "/icons/icon-192.png",
+    // The status-bar icon. Android renders only its alpha silhouette —
+    // this is the wordmark's V, white on transparent (badge-96.png,
+    // extracted from icon-192) — and without one, Chrome shows a
+    // generic bell up there instead of the app.
+    badge: "/icons/badge-96.png",
     // One tag: a burst of messages collapses into the latest notification
     // instead of stacking a dozen on the lock screen.
     tag: "team-chat",
