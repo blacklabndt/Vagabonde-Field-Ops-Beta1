@@ -65,8 +65,10 @@ export function TicketMobileScreen({ job, jobRecord, currentUser, onSaved, ticke
   // bring their own lines; this is only what a blank ticket opens with.)
   const [weldLines, setWeldLines] = useState([]);
   // The dropdown picks start empty because the menus themselves arrive with
-  // the catalog; the render falls back to the first available item.
-  const [weldPick, setWeldPick] = useState("");
+  // the catalog; the render falls back to the first available item. Per-weld
+  // picks are one per mode dropdown (film / CR / DR / methods), keyed the
+  // same way the groups are.
+  const [weldPicks, setWeldPicks] = useState({});
   const [otherLines, setOtherLines] = useState([]);
   const [servicePick, setServicePick] = useState("");
   const [saving, setSaving] = useState(false);
@@ -303,8 +305,25 @@ export function TicketMobileScreen({ job, jobRecord, currentUser, onSaved, ticke
   const availableService = rates.others.filter(s => !otherLines.some(l => l.key === s.key));
   // The dropdown picks fall back to the first item still available, so the
   // selects are never pointing at something already added or off the card.
-  const effWeldPick = availableWeld.some(w => w.key === weldPick) ? weldPick : (availableWeld[0] || {}).key || "";
   const effServicePick = availableService.some(s => s.key === servicePick) ? servicePick : (availableService[0] || {}).key || "";
+
+  // Per Kyle, film, CR and DR each get their own dropdown; methods (and the
+  // odd legacy one-cell weld line) share a fourth. Catalog keys are
+  // kind:label, so the group is right there in the key, and inside a mode's
+  // own dropdown the " · RT film" suffix is noise — the added line still
+  // shows its full name.
+  const WELD_GROUPS = [
+    { id: "rt_film", title: "Film" },
+    { id: "rt_cr", title: "CR" },
+    { id: "rt_dr", title: "DR" },
+    { id: "other", title: "Methods" }
+  ];
+  const weldGroupOf = key => {
+    const kind = key.split(":")[0];
+    return kind === "rt_film" || kind === "rt_cr" || kind === "rt_dr" ? kind : "other";
+  };
+  const shortWeldLabel = (group, label) =>
+    group === "other" ? label : label.replace(/ · RT (film|CR|DR)$/, "");
 
   // What the client is billed for hours — the figure the crew split is
   // measured against. A crew line can legitimately differ from it (crew-hours
@@ -543,14 +562,25 @@ export function TicketMobileScreen({ job, jobRecord, currentUser, onSaved, ticke
               );
             })}
           </div>
-          {availableWeld.length > 0 && (
-            <div style={{ display: "flex", gap: 6 }}>
-              <select className="input" value={effWeldPick} onChange={e => setWeldPick(e.target.value)} style={{ flex: 1 }}>
-                {availableWeld.map(w => <option key={w.key} value={w.key}>{w.label}</option>)}
-              </select>
-              <Btn variant="secondary" onClick={() => { const pick = effWeldPick; if (!pick) return; setWeldLines(p => [...p, { key: pick, qty: 1 }]); const rest = availableWeld.filter(w => w.key !== pick); if (rest[0]) setWeldPick(rest[0].key); }}>Add</Btn>
-            </div>
-          )}
+          {WELD_GROUPS.map(g => {
+            const avail = availableWeld.filter(w => weldGroupOf(w.key) === g.id);
+            if (!avail.length) return null;
+            const pick = avail.some(w => w.key === weldPicks[g.id]) ? weldPicks[g.id] : avail[0].key;
+            return (
+              <div key={g.id} style={{ display: "flex", gap: 6, alignItems: "center" }}>
+                <span style={{ fontSize: 11, width: 52, flex: "none", textTransform: "uppercase", letterSpacing: ".04em", color: "color-mix(in srgb, var(--color-text) 60%, transparent)" }}>{g.title}</span>
+                <select className="input" value={pick} aria-label={`Add a ${g.title} line`}
+                  onChange={e => setWeldPicks(p => ({ ...p, [g.id]: e.target.value }))} style={{ flex: 1, minWidth: 0 }}>
+                  {avail.map(w => <option key={w.key} value={w.key}>{shortWeldLabel(g.id, w.label)}</option>)}
+                </select>
+                <Btn variant="secondary" onClick={() => {
+                  setWeldLines(p => [...p, { key: pick, qty: 1 }]);
+                  const rest = avail.filter(w => w.key !== pick);
+                  setWeldPicks(p => ({ ...p, [g.id]: rest[0] ? rest[0].key : "" }));
+                }}>Add</Btn>
+              </div>
+            );
+          })}
 
           <div style={{ display: "flex", alignItems: "center", marginTop: 6 }}>
             <span style={{ fontSize: 13, fontFamily: "var(--font-heading)", fontWeight: 600 }}>Other charges</span>
