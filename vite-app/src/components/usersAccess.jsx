@@ -83,7 +83,10 @@ export function UsersAccessScreen({ currentUser }) {
               crew outgrew a list you could eyeball, per Kyle. It opens on
               your own account, same as the rail's default selection did. */}
           <SearchSelect
-            style={{ maxWidth: 420 }}
+            // flex none: the component's default flex-basis is meant for the
+            // side-by-side rows it usually sits in — inside this column
+            // container it becomes 320px of reserved HEIGHT under the box.
+            style={{ maxWidth: 420, flex: "none" }}
             listId="user-picker-list"
             ariaLabel="Search people"
             placeholder={account ? `${account.displayName} — search to change…` : "Search people…"}
