@@ -656,21 +656,14 @@ export const Db = {
     if (error) throw error;
     invalidate("clients");
 
-    // Start them on the house rate card rather than a blank sheet. Best
-    // effort: a missing default is not a reason to fail creating a client.
+    // Start them following the house card, literally: the schedule is born
+    // with the follows_default flag on, so their tickets price at Default
+    // rates until an admin flips the switch and gives them their own card.
+    // Best effort: a missing schedule is not a reason to fail the client.
     try {
-      const { data: sched } = await sbClient
-        .from("rate_schedules").insert({ client_id: data.id }).select().single();
-      // Muted: seeding the new client's card is part of adding the client, not
-      // a second thing the user did. Without this, one press says both
-      // "Client added" and "Default rates copied in".
-      if (sched) {
-        Toasts.mute();
-        try { await this.copyDefaultInto(sched.id); }
-        finally { Toasts.unmute(); }
-      }
+      await sbClient.from("rate_schedules").insert({ client_id: data.id, follows_default: true });
     } catch (e) {
-      console.warn("Client created, but default rates were not copied:", e.message);
+      console.warn("Client created, but their rate schedule was not:", e.message);
     }
     return data;
   },
@@ -1892,10 +1885,36 @@ export const Db = {
   },
 
   async _fetchPublishedRates(clientId) {
-    const { data: schedule, error: sErr } = await sbClient
-      .from("rate_schedules").select("id").eq("client_id", clientId)
-      .not("published_at", "is", null).order("effective_from", { ascending: false }).limit(1).maybeSingle();
+    // The client's newest schedule decides where the catalog comes from: a
+    // schedule that follows the house card prices from the default schedule,
+    // live; one that doesn't prices from its own published lines, exactly
+    // as before.
+    const { data: latest, error: sErr } = await sbClient
+      .from("rate_schedules").select("id, follows_default, published_at")
+      .eq("client_id", clientId)
+      .order("effective_from", { ascending: false }).limit(1).maybeSingle();
     if (sErr) throw sErr;
+
+    let schedule = null;
+    if (latest && latest.follows_default) {
+      const { data: def, error: dErr } = await sbClient
+        .from("rate_schedules").select("id").is("client_id", null)
+        .not("published_at", "is", null)
+        .order("effective_from", { ascending: false }).limit(1).maybeSingle();
+      if (dErr) throw dErr;
+      schedule = def;
+    } else if (latest && latest.published_at) {
+      schedule = latest;
+    } else {
+      // The newest schedule may be an unpublished draft sitting in front of
+      // an older published one — the published one still prices tickets.
+      const { data: pub, error: pErr } = await sbClient
+        .from("rate_schedules").select("id").eq("client_id", clientId)
+        .not("published_at", "is", null)
+        .order("effective_from", { ascending: false }).limit(1).maybeSingle();
+      if (pErr) throw pErr;
+      schedule = pub;
+    }
     if (!schedule) return null;
 
     const { data: lines, error: lErr } = await sbClient
@@ -2018,6 +2037,18 @@ export const Db = {
   async publishSchedule(scheduleId) {
     const { error } = await sbClient.from("rate_schedules").update({ published_at: new Date().toISOString() }).eq("id", scheduleId);
     if (error) throw error;
+  },
+
+  // The switch on a client's card. On: their tickets price from the house
+  // card, live, and their own lines lie dormant. Off: their own card prices
+  // again, exactly as it was left.
+  async setFollowsDefault(scheduleId, follows) {
+    const { data, error } = await sbClient.from("rate_schedules")
+      .update({ follows_default: !!follows }).eq("id", scheduleId).select("id");
+    if (error) throw error;
+    if (!data || !data.length) {
+      throw new Error("That schedule wasn't updated — rate cards are an admin's to change.");
+    }
   },
 
   // Copies the house default into a schedule — the card itself, not just
@@ -2301,6 +2332,7 @@ const SAVE_MESSAGES = {
   reorderRateLines: "Line order saved",
   publishSchedule: "Schedule published",
   copyDefaultInto: "Default rates copied in",
+  setFollowsDefault: "Rate card updated",
   createOverride: "Override added",
   deleteOverride: "Override removed",
   toggleOverrideActive: "Override updated",

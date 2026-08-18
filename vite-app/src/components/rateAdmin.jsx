@@ -1,6 +1,7 @@
 import React, { useState, useEffect, useRef } from "react";
 import { STANDARD_RATE_LINES } from "../data.js";
 import { Db, DEFAULT_SCHEDULE } from "../db.js";
+import { Toasts } from "../toastBus.js";
 import { Blueprint, Btn, useDebounced, TagX, Field, Dialog, ErrorBox, Switch, NumField, useMissingFields, SearchSelect, TableScroll, Loading } from "./common.jsx";
 
 export function RateAdminScreen() {
@@ -44,8 +45,16 @@ export function RateAdminScreen() {
     setError("");
     try {
       const { schedule: s, lines: l } = await Db.getEditableSchedule(selected);
+      // A card that follows the house card displays the house card — the
+      // client's own dormant lines would read as what they're billed, and
+      // they aren't while the switch is on.
+      let shown = l;
+      if (s.follows_default && selected !== DEFAULT_SCHEDULE) {
+        const def = await Db.getEditableSchedule(DEFAULT_SCHEDULE);
+        shown = def.lines;
+      }
       if (mine !== loadSeq.current) return;
-      setSchedule(s); setLines(l);
+      setSchedule(s); setLines(shown);
     } catch (e) {
       if (mine !== loadSeq.current) return;
       setError(e.message || "Couldn't load rates.");
@@ -69,6 +78,13 @@ export function RateAdminScreen() {
   const client = clients.find(c => c.id === selected);
   const line = (kind, label) => lines.find(l => l.kind === kind && l.label === label);
   const customLines = kind => lines.filter(l => l.kind === kind);
+  // The switch: this client's tickets price from the house card, and the
+  // lines on screen are the house card's, read-only here.
+  const following = !isDefault && !!(schedule && schedule.follows_default);
+  // A group's rates render as plain figures when it can't be edited —
+  // while its rows are being reordered, or while the card follows the
+  // house card.
+  const locked = group => following || reorderGroup === group;
 
   // ── Row order ──────────────────────────────────────────────────────────
   // Each group's rows follow rate_lines.position, dragged into place below.
@@ -173,18 +189,32 @@ export function RateAdminScreen() {
     </Btn>
   );
 
-  const [copying, setCopying] = useState(false);
-  const copyDefault = async () => {
-    if (!schedule) return;
+  // The follows-the-house-card switch. On: this client's tickets price from
+  // Default rates, live, and the card below shows the house card read-only.
+  // Off: their own card prices again — topped up from the house card first,
+  // so a client coming off house rates starts from the figures they were
+  // just on rather than a sheet of zeros. Their own edits are never
+  // overwritten by the top-up.
+  const [switching, setSwitching] = useState(false);
+  const toggleFollow = async () => {
+    if (!schedule || isDefault || switching) return;
+    const name = client ? client.name : "this client";
+    if (!following && !confirm(`Price ${name}'s new tickets from the house card? Their own rates stay saved and come back when the switch is turned off.`)) return;
     await persistRate.flush();
-    setCopying(true);
+    setSwitching(true);
     setError("");
     try {
-      const n = await Db.copyDefaultInto(schedule.id);
+      if (following) {
+        await Db.setFollowsDefault(schedule.id, false);
+        Toasts.mute();
+        try { await Db.copyDefaultInto(schedule.id); }
+        finally { Toasts.unmute(); }
+      } else {
+        await Db.setFollowsDefault(schedule.id, true);
+      }
       await loadSchedule();
-      if (n === 0) setError("Nothing to fill — this card already carries every line the default has, and no unset rate here has a default figure to copy in. Rates already entered are never overwritten.");
-    } catch (e) { setError(e.message || "Couldn't copy the default rates."); }
-    setCopying(false);
+    } catch (e) { setError(e.message || "Couldn't change who prices this client's tickets."); }
+    setSwitching(false);
   };
 
   // There is no save button on this screen because there is nothing to save:
@@ -346,7 +376,9 @@ export function RateAdminScreen() {
           <h2 style={{ fontSize: 34, margin: "2px 0 0" }}>Billing rates</h2>
         </div>
         <span style={{ fontSize: 12, color: "color-mix(in srgb, var(--color-text) 50%, transparent)" }}>
-          {justPublished ? "Published just now" : schedule && schedule.published_at ? "Published" : "Not yet published"}
+          {following ? "Follows the house card"
+            : justPublished ? "Published just now"
+            : schedule && schedule.published_at ? "Published" : "Not yet published"}
         </span>
         {/* Two different things, deliberately worded apart: rates are saved
             the moment you type them, but they don't price anything until the
@@ -364,7 +396,10 @@ export function RateAdminScreen() {
         </span>
         <div style={{ marginLeft: "auto", display: "flex", gap: 8 }}>
           <Btn variant="secondary" onClick={() => setShowHistory(true)} disabled={!schedule}>Rate history</Btn>
-          <Btn variant="primary" onClick={publish} disabled={publishing || !schedule}>{publishing ? "Publishing…" : "Publish schedule"}</Btn>
+          <Btn variant="primary" onClick={publish} disabled={publishing || !schedule || following}
+            title={following ? "This client follows the house card — publish Default rates instead." : undefined}>
+            {publishing ? "Publishing…" : "Publish schedule"}
+          </Btn>
         </div>
       </div>
       <ErrorBox>{error}</ErrorBox>
@@ -430,16 +465,20 @@ export function RateAdminScreen() {
                   : <TagX variant="neutral">{client.agreement_ref}</TagX>}
                 {!isDefault && client.effective_from && <span style={{ fontSize: 12, color: "color-mix(in srgb, var(--color-text) 55%, transparent)" }}>effective {client.effective_from}</span>}
                 {!isDefault && (
-                  <Btn variant="secondary" style={{ marginLeft: "auto", padding: "4px 12px" }}
-                    onClick={copyDefault} disabled={copying}>
-                    {copying ? "Copying…" : "Fill from default"}
-                  </Btn>
+                  <div style={{ marginLeft: "auto", display: "flex", alignItems: "center", gap: 8, opacity: switching ? 0.6 : 1 }}>
+                    <span style={{ fontSize: 12, fontWeight: 600, color: following ? "var(--color-accent-700)" : "color-mix(in srgb, var(--color-text) 55%, transparent)" }}>
+                      {switching ? "Saving…" : "Follows the house card"}
+                    </span>
+                    <Switch on={following} onClick={toggleFollow} label="Follows the house card" />
+                  </div>
                 )}
               </div>
               <div style={{ fontSize: 12, color: "color-mix(in srgb, var(--color-text) 60%, transparent)", marginBottom: 4 }}>
                 {isDefault
-                  ? "What a new client starts on, and what Fill from default copies in. Nothing bills against this directly — every ticket prices off its own client schedule."
-                  : "Fill from default copies in any line this card is missing and sets any rate still at zero from the house card. Rates already entered here are never overwritten, and nothing is removed."}
+                  ? "The house rate card. What a new client starts on, and what every client with the switch on prices from — edit a rate here and their next tickets follow it."
+                  : following
+                    ? "This client's tickets price from the house card, live — the rates below are Default rates, read-only here. Turn the switch off to give them their own card; it starts from these figures."
+                    : "This client has their own card. Turning the switch on prices their tickets from the house card instead; nothing here is lost, and it comes back when the switch is turned off."}
               </div>
 
 
@@ -456,7 +495,7 @@ export function RateAdminScreen() {
                       <td>{r.label}</td>
                       {r.line ? (
                         <>
-                          <td>{reorderGroup === "sizes"
+                          <td>{locked("sizes")
                             ? <span className="tabular">{r.line.rate}</span>
                             : <RateInput value={r.line.rate} onChange={v => setRate(r.line.id, v)} />}</td>
                           <td></td>
@@ -465,13 +504,14 @@ export function RateAdminScreen() {
                       ) : (
                         SIZE_KINDS.map(kind => {
                           const l = line(kind, r.label);
-                          return <td key={kind}>{l && (reorderGroup === "sizes"
+                          return <td key={kind}>{l && (locked("sizes")
                             ? <span className="tabular">{l.rate}</span>
                             : <RateInput value={l.rate} onChange={v => setRate(l.id, v)} />)}</td>;
                         })
                       )}
                       <td style={{ textAlign: "right" }}>
-                        {reorderGroup === "sizes"
+                        {following ? null
+                          : reorderGroup === "sizes"
                           ? <MoveButtons rows={sizeRows} i={i} />
                           : (r.ids.length > 0 && (
                             <button className="row-x" aria-label={`Remove ${r.label}`}
@@ -483,10 +523,12 @@ export function RateAdminScreen() {
                   {!isDefault && <tr><td colSpan={5} style={{ color: "color-mix(in srgb, var(--color-text) 55%, transparent)" }}>Minimum call-out — {client.minimum_callout || "not set"}</td></tr>}
                 </tbody>
               </table></TableScroll>
-              <div style={{ display: "flex", gap: 8, alignItems: "flex-start" }}>
-                <div style={{ flex: 1 }}><AddLineBox onAdd={addSizeRow} placeholder='e.g. 16" NPS' /></div>
-                <ReorderToggle group="sizes" />
-              </div>
+              {!following && (
+                <div style={{ display: "flex", gap: 8, alignItems: "flex-start" }}>
+                  <div style={{ flex: 1 }}><AddLineBox onAdd={addSizeRow} placeholder='e.g. 16" NPS' /></div>
+                  <ReorderToggle group="sizes" />
+                </div>
+              )}
 
               <div style={{ fontSize: 11, textTransform: "uppercase", letterSpacing: ".08em", color: "var(--color-accent)", margin: "16px 0 6px" }}>Other methods — rate per weld</div>
               <TableScroll><table className="table">
@@ -495,11 +537,12 @@ export function RateAdminScreen() {
                   {methodRows.map((r, i) => (
                     <tr key={r.key}>
                       <td>{r.label}</td>
-                      <td>{reorderGroup === "methods"
+                      <td>{locked("methods")
                         ? <span className="tabular">{r.line.rate}</span>
                         : <RateInput value={r.line.rate} onChange={v => setRate(r.line.id, v)} />}</td>
                       <td style={{ textAlign: "right" }}>
-                        {reorderGroup === "methods"
+                        {following ? null
+                          : reorderGroup === "methods"
                           ? <MoveButtons rows={methodRows} i={i} />
                           : <button className="row-x" onClick={() => removeCustom(r.line.id)} aria-label={`Remove ${r.label}`}>×</button>}
                       </td>
@@ -507,10 +550,12 @@ export function RateAdminScreen() {
                   ))}
                 </tbody>
               </table></TableScroll>
-              <div style={{ display: "flex", gap: 8, alignItems: "flex-start" }}>
-                <div style={{ flex: 1 }}><AddLineBox onAdd={label => addCustom("custom_method", label)} placeholder="e.g. PAUT" /></div>
-                <ReorderToggle group="methods" />
-              </div>
+              {!following && (
+                <div style={{ display: "flex", gap: 8, alignItems: "flex-start" }}>
+                  <div style={{ flex: 1 }}><AddLineBox onAdd={label => addCustom("custom_method", label)} placeholder="e.g. PAUT" /></div>
+                  <ReorderToggle group="methods" />
+                </div>
+              )}
 
               <div style={{ fontSize: 11, textTransform: "uppercase", letterSpacing: ".08em", color: "var(--color-accent)", margin: "16px 0 6px" }}>Time &amp; expense</div>
               <TableScroll><table className="table">
@@ -519,11 +564,12 @@ export function RateAdminScreen() {
                   {expenseRows.map((r, i) => (
                     <tr key={r.key}>
                       <td>{r.label}<div style={{ fontSize: 11, color: "color-mix(in srgb, var(--color-text) 55%, transparent)" }}>{r.line.unit}</div></td>
-                      <td>{reorderGroup === "expense"
+                      <td>{locked("expense")
                         ? <span className="tabular">{r.line.rate}</span>
                         : <RateInput value={r.line.rate} onChange={v => setRate(r.line.id, v)} />}</td>
                       <td style={{ textAlign: "right" }}>
-                        {reorderGroup === "expense"
+                        {following ? null
+                          : reorderGroup === "expense"
                           ? <MoveButtons rows={expenseRows} i={i} />
                           : <button className="row-x" onClick={() => removeCustom(r.line.id)} aria-label={`Remove ${r.label}`}>×</button>}
                       </td>
@@ -531,26 +577,30 @@ export function RateAdminScreen() {
                   ))}
                 </tbody>
               </table></TableScroll>
-              <div style={{ display: "flex", gap: 8, alignItems: "flex-start" }}>
-                <div style={{ flex: 1 }}><AddLineBox onAdd={(label, unit) => addCustom("custom_expense", label, unit)} units={["h", "ea", "days", "km"]} placeholder="e.g. Blended rate" /></div>
-                <ReorderToggle group="expense" />
-              </div>
+              {!following && (
+                <div style={{ display: "flex", gap: 8, alignItems: "flex-start" }}>
+                  <div style={{ flex: 1 }}><AddLineBox onAdd={(label, unit) => addCustom("custom_expense", label, unit)} units={["h", "ea", "days", "km"]} placeholder="e.g. Blended rate" /></div>
+                  <ReorderToggle group="expense" />
+                </div>
+              )}
               </div>
 
 
-              <div style={{ display: "flex", alignItems: "center", gap: 10, marginTop: 18, paddingTop: 12, borderTop: "1px solid var(--color-divider)" }}>
-                <span style={{ fontSize: 11, color: "color-mix(in srgb, var(--color-text) 55%, transparent)" }}>
-                  Removing a line takes it off this schedule only — tickets already raised keep the rate they were priced at.
-                </span>
-                {/* Named for what it does. "Set standard lines" read like a
-                    save, and it is the opposite: it puts missing standard
-                    lines back at zero, ready to be priced. */}
-                <Btn variant="secondary" style={{ marginLeft: "auto", padding: "4px 12px", whiteSpace: "nowrap" }}
-                  onClick={restoreStandard} disabled={restoring}
-                  title="Puts back any standard line removed from this schedule, at zero. Rates already entered are untouched.">
-                  {restoring ? "Restoring…" : "Restore removed lines"}
-                </Btn>
-              </div>
+              {!following && (
+                <div style={{ display: "flex", alignItems: "center", gap: 10, marginTop: 18, paddingTop: 12, borderTop: "1px solid var(--color-divider)" }}>
+                  <span style={{ fontSize: 11, color: "color-mix(in srgb, var(--color-text) 55%, transparent)" }}>
+                    Removing a line takes it off this schedule only — tickets already raised keep the rate they were priced at.
+                  </span>
+                  {/* Named for what it does. "Set standard lines" read like a
+                      save, and it is the opposite: it puts missing standard
+                      lines back at zero, ready to be priced. */}
+                  <Btn variant="secondary" style={{ marginLeft: "auto", padding: "4px 12px", whiteSpace: "nowrap" }}
+                    onClick={restoreStandard} disabled={restoring}
+                    title="Puts back any standard line removed from this schedule, at zero. Rates already entered are untouched.">
+                    {restoring ? "Restoring…" : "Restore removed lines"}
+                  </Btn>
+                </div>
+              )}
             </Blueprint>
           )}
 
