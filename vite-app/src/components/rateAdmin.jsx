@@ -117,21 +117,15 @@ export function RateAdminScreen() {
   const expenseRows = rowsOf("expense", "custom_expense");
 
   // ── Reordering ─────────────────────────────────────────────────────────
-  // One group at a time. The button under a group flips its rows draggable;
-  // every drop writes the whole group's positions through the same
-  // saving/saved status the rates use. Rate boxes become plain figures while
-  // dragging, so a drag can start anywhere on the row.
+  // One group at a time. The button under a group swaps its remove buttons
+  // for up/down arrows; every move writes the whole group's positions
+  // through the same saving/saved status the rates use.
   //
-  // Pointer events, not the HTML5 drag API: dragstart/drop never fire from a
-  // touch, so the first phone that tried this couldn't move a row at all.
-  // One pointer path serves mouse and finger alike; touch-action: none on
-  // the rows keeps the page from scrolling out from under a finger drag.
+  // Arrows, after two rounds of drag-and-drop: the HTML5 drag API never
+  // fires from a touch at all, and the pointer-events rewrite still lost
+  // the gesture to page scrolling on a real phone. A tap on an arrow has no
+  // gesture for the browser to argue about.
   const [reorderGroup, setReorderGroup] = useState("");
-  const [dragOver, setDragOver] = useState(-1);
-  const dragFrom = useRef(null);
-  // The drop target lives in a ref as well as in state: state paints the
-  // highlight, the ref is what pointer-up reads, immune to a stale render.
-  const dragTo = useRef(-1);
 
   const persistOrder = async rows => {
     const updates = rows.flatMap((r, i) => r.ids.map(id => ({ id, position: i })));
@@ -153,66 +147,30 @@ export function RateAdminScreen() {
     }
   };
 
-  const endDrag = () => {
-    dragFrom.current = null;
-    dragTo.current = -1;
-    setDragOver(-1);
-  };
-  const dragProps = (group, rows, i) => reorderGroup !== group ? {} : {
-    "data-drag-row": i,
-    onPointerDown: e => {
-      if (e.button !== 0 && e.pointerType === "mouse") return;
-      // Capture, so the row keeps receiving moves wherever the pointer goes.
-      e.currentTarget.setPointerCapture(e.pointerId);
-      dragFrom.current = { group, from: i };
-      dragTo.current = i;
-      setDragOver(i);
-    },
-    onPointerMove: e => {
-      const d = dragFrom.current;
-      if (!d || d.group !== group) return;
-      // Capture retargets events at this row, so the row under the pointer
-      // is found by position rather than by who the event says it hit.
-      const el = document.elementFromPoint(e.clientX, e.clientY);
-      const tr = el && el.closest ? el.closest("tr[data-drag-row]") : null;
-      if (tr) {
-        const over = Number(tr.getAttribute("data-drag-row"));
-        dragTo.current = over;
-        setDragOver(over);
-      }
-    },
-    onPointerUp: () => {
-      const d = dragFrom.current;
-      const to = dragTo.current;
-      endDrag();
-      if (!d || d.group !== group || to < 0 || to === d.from) return;
-      const next = [...rows];
-      const [moved] = next.splice(d.from, 1);
-      next.splice(to, 0, moved);
-      persistOrder(next);
-    },
-    onPointerCancel: endDrag,
-    style: {
-      cursor: "grab", touchAction: "none", userSelect: "none", WebkitUserSelect: "none",
-      ...(dragOver === i && dragFrom.current ? { outline: "2px solid var(--color-accent)", outlineOffset: -2 } : null)
-    }
+  const moveRow = (rows, i, delta) => {
+    const j = i + delta;
+    if (j < 0 || j >= rows.length) return;
+    const next = [...rows];
+    [next[i], next[j]] = [next[j], next[i]];
+    persistOrder(next);
   };
 
-  const grip = group => reorderGroup === group && (
-    <span aria-hidden style={{ marginRight: 8, color: "var(--color-accent)", fontWeight: 600 }}>≡</span>
+  const MoveButtons = ({ rows, i }) => (
+    <span style={{ display: "inline-flex", gap: 4 }}>
+      <button className="row-x" aria-label="Move up" disabled={i === 0}
+        style={i === 0 ? { opacity: .25, cursor: "default" } : undefined}
+        onClick={() => moveRow(rows, i, -1)}>↑</button>
+      <button className="row-x" aria-label="Move down" disabled={i === rows.length - 1}
+        style={i === rows.length - 1 ? { opacity: .25, cursor: "default" } : undefined}
+        onClick={() => moveRow(rows, i, 1)}>↓</button>
+    </span>
   );
+
   const ReorderToggle = ({ group }) => (
-    <div style={{ display: "flex", alignItems: "center", gap: 8, marginTop: 6 }}>
-      {reorderGroup === group && (
-        <span style={{ fontSize: 11, color: "color-mix(in srgb, var(--color-text) 55%, transparent)", whiteSpace: "nowrap" }}>
-          Drag rows into order
-        </span>
-      )}
-      <Btn variant={reorderGroup === group ? "primary" : "secondary"} style={{ whiteSpace: "nowrap" }}
-        onClick={() => { setReorderGroup(g => (g === group ? "" : group)); endDrag(); }}>
-        {reorderGroup === group ? "Done" : "Reorder"}
-      </Btn>
-    </div>
+    <Btn variant={reorderGroup === group ? "primary" : "secondary"} style={{ whiteSpace: "nowrap", marginTop: 6 }}
+      onClick={() => setReorderGroup(g => (g === group ? "" : group))}>
+      {reorderGroup === group ? "Done" : "Reorder"}
+    </Btn>
   );
 
   const [copying, setCopying] = useState(false);
@@ -468,8 +426,8 @@ export function RateAdminScreen() {
                 <thead><tr><th>Size</th><th style={{ width: 92 }}>Film</th><th style={{ width: 92 }}>CR</th><th style={{ width: 92 }}>DR</th><th style={{ width: 44 }}></th></tr></thead>
                 <tbody>
                   {sizeRows.map((r, i) => (
-                    <tr key={r.key} {...dragProps("sizes", sizeRows, i)}>
-                      <td>{grip("sizes")}{r.label}</td>
+                    <tr key={r.key}>
+                      <td>{r.label}</td>
                       {r.line ? (
                         <>
                           <td>{reorderGroup === "sizes"
@@ -487,10 +445,12 @@ export function RateAdminScreen() {
                         })
                       )}
                       <td style={{ textAlign: "right" }}>
-                        {reorderGroup !== "sizes" && r.ids.length > 0 && (
-                          <button className="row-x" aria-label={`Remove ${r.label}`}
-                            onClick={() => r.line ? removeCustom(r.line.id) : removeSizeRow(r.label)}>×</button>
-                        )}
+                        {reorderGroup === "sizes"
+                          ? <MoveButtons rows={sizeRows} i={i} />
+                          : (r.ids.length > 0 && (
+                            <button className="row-x" aria-label={`Remove ${r.label}`}
+                              onClick={() => r.line ? removeCustom(r.line.id) : removeSizeRow(r.label)}>×</button>
+                          ))}
                       </td>
                     </tr>
                   ))}
@@ -507,15 +467,15 @@ export function RateAdminScreen() {
                 <thead><tr><th>Method</th><th style={{ width: 92 }}>Rate</th><th style={{ width: 44 }}></th></tr></thead>
                 <tbody>
                   {methodRows.map((r, i) => (
-                    <tr key={r.key} {...dragProps("methods", methodRows, i)}>
-                      <td>{grip("methods")}{r.label}</td>
+                    <tr key={r.key}>
+                      <td>{r.label}</td>
                       <td>{reorderGroup === "methods"
                         ? <span className="tabular">{r.line.rate}</span>
                         : <RateInput value={r.line.rate} onChange={v => setRate(r.line.id, v)} />}</td>
                       <td style={{ textAlign: "right" }}>
-                        {reorderGroup !== "methods" && (
-                          <button className="row-x" onClick={() => removeCustom(r.line.id)} aria-label={`Remove ${r.label}`}>×</button>
-                        )}
+                        {reorderGroup === "methods"
+                          ? <MoveButtons rows={methodRows} i={i} />
+                          : <button className="row-x" onClick={() => removeCustom(r.line.id)} aria-label={`Remove ${r.label}`}>×</button>}
                       </td>
                     </tr>
                   ))}
@@ -531,15 +491,15 @@ export function RateAdminScreen() {
                 <thead><tr><th>Item</th><th style={{ width: 92 }}>Rate</th><th style={{ width: 44 }}></th></tr></thead>
                 <tbody>
                   {expenseRows.map((r, i) => (
-                    <tr key={r.key} {...dragProps("expense", expenseRows, i)}>
-                      <td>{grip("expense")}{r.label}<div style={{ fontSize: 11, color: "color-mix(in srgb, var(--color-text) 55%, transparent)" }}>{r.line.unit}</div></td>
+                    <tr key={r.key}>
+                      <td>{r.label}<div style={{ fontSize: 11, color: "color-mix(in srgb, var(--color-text) 55%, transparent)" }}>{r.line.unit}</div></td>
                       <td>{reorderGroup === "expense"
                         ? <span className="tabular">{r.line.rate}</span>
                         : <RateInput value={r.line.rate} onChange={v => setRate(r.line.id, v)} />}</td>
                       <td style={{ textAlign: "right" }}>
-                        {reorderGroup !== "expense" && (
-                          <button className="row-x" onClick={() => removeCustom(r.line.id)} aria-label={`Remove ${r.label}`}>×</button>
-                        )}
+                        {reorderGroup === "expense"
+                          ? <MoveButtons rows={expenseRows} i={i} />
+                          : <button className="row-x" onClick={() => removeCustom(r.line.id)} aria-label={`Remove ${r.label}`}>×</button>}
                       </td>
                     </tr>
                   ))}
