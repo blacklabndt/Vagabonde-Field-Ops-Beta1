@@ -485,12 +485,18 @@ label.field-label-missing {
 }
 
 /* — team chat — */
-/* A new message rises into place. The class is only ever put on rows
-   that arrive while you watch: history mounts still, because eighty
-   bubbles animating on open is a screensaver, not a chat. The global
-   prefers-reduced-motion rule above already flattens this to nothing. */
-.chat-msg-in { animation: chat-msg-in .22s ease-out both; }
+/* A new message rises into place, with a slight overshoot so the
+   motion registers. The class is only ever put on rows that arrive
+   while you watch: history mounts still, because eighty bubbles
+   animating on open is a screensaver, not a chat. The global
+   prefers-reduced-motion rule above flattens this to nothing for
+   anyone whose device asks (phone settings named "Reduce Motion" or
+   "Remove animations" — worth knowing when it "doesn't work").
+   Opacity starts at .3, not 0: a hidden tab holds a CSS animation on
+   its first frame, and a message that parks invisible until the tab
+   is looked at again is worse than one that arrives a little pale. */
+.chat-msg-in { animation: chat-msg-in .3s cubic-bezier(.2, .85, .3, 1.15) both; }
 @keyframes chat-msg-in {
-  from { opacity: 0; transform: translateY(8px); }
+  from { opacity: .3; transform: translateY(16px) scale(.97); }
   to   { opacity: 1; transform: none; }
 }
