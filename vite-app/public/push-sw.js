@@ -26,10 +26,15 @@ self.addEventListener("notificationclick", event => {
   const url = (event.notification.data && event.notification.data.url) || "/";
   event.waitUntil(
     clients.matchAll({ type: "window", includeUncontrolled: true }).then(list => {
-      // An open app gets focused rather than duplicated; the chat is one
-      // tap away and the person is now looking at the screen.
+      // An open app gets focused rather than duplicated — and told where
+      // the tap meant to land, because a focus alone would leave it on
+      // whatever screen it happened to be showing. The closed-app path
+      // carries the same destination in the URL instead.
       for (const c of list) {
-        if ("focus" in c) return c.focus();
+        if ("focus" in c) {
+          c.postMessage({ type: "goto", screen: "chat" });
+          return c.focus();
+        }
       }
       return clients.openWindow(url);
     })
