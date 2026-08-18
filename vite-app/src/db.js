@@ -263,28 +263,35 @@ export const Db = {
   // 30-second in-memory cache kills repeat round trips inside a session, and
   // the IndexedDB one underneath it keeps the last good copy for a day with
   // no signal.
-  async listClients() {
-    return cached("clients", () => OfflineCache.readThrough("clients", async () => {
-      const { data, error } = await sbClient.from("clients").select("*").order("name");
+  //
+  // Paged through fetchAllPages, because these lists mean "all of them" and
+  // PostgREST answers at most 1,000 rows per response, silently. The seeded
+  // load test found it: 1,167 contacts came back as a directory that
+  // quietly ended partway through the alphabet. Ordered by name THEN id —
+  // seeded data proves duplicate names happen, and a page boundary landing
+  // inside a run of one name would otherwise drop or double people.
+  async _allRows(table) {
+    return fetchAllPages(async page => {
+      const { data, error, count } = await sbClient
+        .from(table)
+        .select("*", page === 0 ? { count: "exact" } : {})
+        .order("name").order("id")
+        .range(page * RESPONSE_ROW_CAP, (page + 1) * RESPONSE_ROW_CAP - 1);
       if (error) throw error;
-      return data;
-    }));
+      return { rows: data || [], total: count ?? (data || []).length };
+    });
+  },
+
+  async listClients() {
+    return cached("clients", () => OfflineCache.readThrough("clients", () => this._allRows("clients")));
   },
 
   async listContractors() {
-    return cached("contractors", () => OfflineCache.readThrough("contractors", async () => {
-      const { data, error } = await sbClient.from("contractors").select("*").order("name");
-      if (error) throw error;
-      return data;
-    }));
+    return cached("contractors", () => OfflineCache.readThrough("contractors", () => this._allRows("contractors")));
   },
 
   async listContacts() {
-    return cached("contacts", () => OfflineCache.readThrough("contacts", async () => {
-      const { data, error } = await sbClient.from("contacts").select("*").order("name");
-      if (error) throw error;
-      return data;
-    }));
+    return cached("contacts", () => OfflineCache.readThrough("contacts", () => this._allRows("contacts")));
   },
 
   // One organisation's people. Ordered because the Contacts screen lists them;
