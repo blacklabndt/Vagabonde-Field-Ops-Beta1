@@ -310,7 +310,7 @@ export const Db = {
     if (error) throw error;
     const rows = (data || []).map(o => ({
       key: o.org_type + ":" + o.org_id, type: o.org_type, id: o.org_id,
-      name: o.name, agreement: o.agreement_ref, contactCount: Number(o.contact_count)
+      name: o.name, contactCount: Number(o.contact_count)
     }));
     const total = data && data.length ? Number(data[0].total_count) : 0;
     return { rows, total };
@@ -635,9 +635,9 @@ export const Db = {
   },
 
   // Contractors are created inline when a job names a new one (see
-  // createJob), but clients are deliberate: they carry an agreement and a
-  // rate schedule, so adding one is its own act rather than a side effect.
-  async createClient({ name, agreementRef, minimumCallout, effectiveFrom }) {
+  // createJob), but clients are deliberate: they carry a rate schedule, so
+  // adding one is its own act rather than a side effect.
+  async createClient({ name, minimumCallout, effectiveFrom }) {
     const clean = (name || "").trim();
     if (!clean) throw new Error("Give the client a name.");
 
@@ -649,7 +649,6 @@ export const Db = {
 
     const { data, error } = await sbClient.from("clients").insert({
       name: clean,
-      agreement_ref: (agreementRef || "").trim() || "No agreement on file",
       minimum_callout: (minimumCallout || "").trim() || null,
       effective_from: effectiveFrom || todayLocal()
     }).select().single();

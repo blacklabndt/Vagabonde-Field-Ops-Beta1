@@ -430,7 +430,7 @@ export function RateAdminScreen() {
           search={text => {
             const q = text.trim().toLowerCase();
             const matched = q
-              ? clients.filter(c => (c.name || "").toLowerCase().includes(q) || (c.agreement_ref || "").toLowerCase().includes(q))
+              ? clients.filter(c => (c.name || "").toLowerCase().includes(q))
               : clients;
             // The house card leads the list whenever it fits what was typed
             // — an empty box always shows it first.
@@ -460,10 +460,11 @@ export function RateAdminScreen() {
             return (
               <>
                 <div style={{ fontSize: 15 }}>{c.name}</div>
-                <div style={{ display: "flex", alignItems: "center", gap: 8, fontSize: 11, color: "color-mix(in srgb, var(--color-text) 55%, transparent)" }}>
-                  <span>{c.agreement_ref}</span>
-                  {n > 0 && <TagX variant="outline">{n} override{n > 1 ? "s" : ""}</TagX>}
-                </div>
+                {n > 0 && (
+                  <div style={{ display: "flex", alignItems: "center", gap: 8, fontSize: 11, color: "color-mix(in srgb, var(--color-text) 55%, transparent)" }}>
+                    <TagX variant="outline">{n} override{n > 1 ? "s" : ""}</TagX>
+                  </div>
+                )}
               </>
             );
           }}
@@ -480,9 +481,7 @@ export function RateAdminScreen() {
             <Blueprint style={{ padding: "18px 20px" }}>
               <div style={{ display: "flex", alignItems: "center", gap: 10, marginBottom: 4, flexWrap: "wrap" }}>
                 <h4 style={{ margin: 0, fontSize: 19 }}>{isDefault ? "Default rates" : client.name}</h4>
-                {isDefault
-                  ? <TagX variant="accent">House rate card</TagX>
-                  : <TagX variant="neutral">{client.agreement_ref}</TagX>}
+                {isDefault && <TagX variant="accent">House rate card</TagX>}
                 {!isDefault && client.effective_from && <span style={{ fontSize: 12, color: "color-mix(in srgb, var(--color-text) 55%, transparent)" }}>effective {client.effective_from}</span>}
                 {!isDefault && (
                   <div style={{ marginLeft: "auto", display: "flex", alignItems: "center", gap: 8, opacity: switching ? 0.6 : 1 }}>
@@ -806,7 +805,7 @@ function NewOverrideDialog({ onClose, onCreated }) {
 }
 
 function NewClientDialog({ onClose, onCreated }) {
-  const [form, setForm] = useState({ name: "", agreementRef: "", minimumCallout: "" });
+  const [form, setForm] = useState({ name: "", minimumCallout: "" });
   const [error, setError] = useState("");
   const [saving, setSaving] = useState(false);
   const set = (k, v) => setForm(p => ({ ...p, [k]: v }));
@@ -831,14 +830,11 @@ function NewClientDialog({ onClose, onCreated }) {
         <input className="input" autoFocus value={form.name} onChange={e => set("name", e.target.value)}
           onKeyDown={e => { if (e.key === "Enter") submit(); }} placeholder="Peace River Midstream" />
       </Field>
-      <Field label="Agreement reference">
-        <input className="input" value={form.agreementRef} onChange={e => set("agreementRef", e.target.value)} placeholder="MSA-118 rev 4" />
-      </Field>
       <Field label="Minimum call-out">
         <input className="input" value={form.minimumCallout} onChange={e => set("minimumCallout", e.target.value)} placeholder="4 h + mobilization" />
       </Field>
       <div style={{ fontSize: 12, color: "color-mix(in srgb, var(--color-text) 60%, transparent)" }}>
-        The client is added with an empty rate schedule — fill in their per-weld and time &amp; expense rates here, then publish. A ticket can't be raised against them until a schedule is published.
+        The client starts on the house card — their tickets price at Default rates until the switch on their rate card is turned off to give them their own.
       </div>
     </Dialog>
   );

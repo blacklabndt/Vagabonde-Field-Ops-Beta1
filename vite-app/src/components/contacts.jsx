@@ -133,7 +133,7 @@ export function ContactsScreen({ currentUser }) {
               </div>
               <div style={{ fontSize: 12, color: "color-mix(in srgb, var(--color-text) 60%, transparent)", marginBottom: 16 }}>
                 {org.type === "client"
-                  ? (org.agreement || "No agreement on file")
+                  ? "Who the work is billed to — their rates live on the Rate admin screen"
                   : "Subcontracted crews and prime contractors on site"}
               </div>
 
