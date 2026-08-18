@@ -56,6 +56,12 @@ Cloudflare Worker `solitary-snowflake-ee22` (assets + `/approve` proxy in
   Message bodies are immutable by column grant — only pin columns are
   updatable, Admin-only. GIF search is KLIPY (Tenor's API is dead);
   the key is the KLIPY_API_KEY secret, handed out by gif-search.
+- Chat push: an insert trigger fires the chat-push function via pg_net;
+  it sends Web Push (VAPID_* secrets) to push_subscriptions minus the
+  sender and prunes endpoints answering 404/410. The handlers live in
+  public/push-sw.js, importScripts'd by the generated sw.js. A push
+  endpoint belongs to the DEVICE: claim_push_subscription (definer RPC)
+  is how the next tech on a shared tablet takes it over.
 
 ## Verification habits that caught real bugs
 

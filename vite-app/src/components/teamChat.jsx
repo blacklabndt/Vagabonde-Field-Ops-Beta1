@@ -1,6 +1,6 @@
 import React, { useState, useEffect, useLayoutEffect, useRef } from "react";
 import { Db } from "../db.js";
-import { Blueprint, Btn, Dialog, ErrorBox, Loading } from "./common.jsx";
+import { Blueprint, Btn, Dialog, ErrorBox, Loading, Switch } from "./common.jsx";
 
 // Team chat — one room for the whole crew.
 //
@@ -251,6 +251,9 @@ export function TeamChatScreen({ currentUser }) {
   const [feedLive, setFeedLive] = useState(false);
   // The full-screen viewer: the URL it shows, or null when closed.
   const [lightbox, setLightbox] = useState(null);
+  // "unsupported" hides the switch; "blocked"/"off"/"on" render it.
+  const [pushState, setPushState] = useState("unsupported");
+  const [pushBusy, setPushBusy] = useState(false);
 
   const listRef = useRef(null);
   const fileRef = useRef(null);
@@ -502,6 +505,35 @@ export function TeamChatScreen({ currentUser }) {
     }
   };
 
+  // Once, on arrival: where this device stands on notifications.
+  useEffect(() => {
+    let live = true;
+    Db.getChatPushState()
+      .then(s => { if (live) setPushState(s); })
+      .catch(() => { if (live) setPushState("off"); });
+    return () => { live = false; };
+  }, []);
+
+  const togglePush = async () => {
+    if (pushBusy) return;
+    setPushBusy(true);
+    setSendError("");
+    try {
+      if (pushState === "on") {
+        await Db.disableChatPush();
+        setPushState("off");
+      } else {
+        await Db.enableChatPush();
+        setPushState("on");
+      }
+    } catch (e) {
+      setSendError(e.message || "Couldn't change notifications.");
+      // Permission may have just been denied for good — re-read reality.
+      Db.getChatPushState().then(setPushState).catch(() => {});
+    }
+    setPushBusy(false);
+  };
+
   // Full screen for any message's picture or GIF. A stored picture gets
   // a fresh signed URL at tap time — the one its thumbnail was minted
   // with may be minutes old, and an expired link at full screen is a
@@ -645,6 +677,11 @@ export function TeamChatScreen({ currentUser }) {
 
         <div style={{ borderTop: "1px solid var(--color-divider)", padding: 12, flex: "none" }}>
           {sendError && <div style={{ marginBottom: 8 }}><ErrorBox>{sendError}</ErrorBox></div>}
+          {pushState !== "unsupported" && (
+            <div style={{ display: "flex", justifyContent: "flex-end", marginBottom: 8, opacity: pushBusy ? 0.6 : 1 }}>
+              <Switch on={pushState === "on"} onClick={togglePush} label="Notify me about new messages" />
+            </div>
+          )}
           {attach && (
             <div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 8 }}>
               <img src={attach.url} alt="Ready to send" style={{ height: 56, maxWidth: 120, objectFit: "cover", border: "1px solid var(--color-divider)" }} />

@@ -6,6 +6,11 @@ import { createClient } from "@supabase/supabase-js";
 export const SUPABASE_URL = import.meta.env.VITE_SUPABASE_URL || "https://eielmvxzdwwprmmfamlq.supabase.co";
 export const SUPABASE_ANON_KEY = import.meta.env.VITE_SUPABASE_ANON_KEY || "sb_publishable_iRMrq2AOLFWQvx4UxiCjmw_B_kSw1zg";
 
+// The public half of the Web Push keypair — it's what a browser shows the
+// push service when subscribing, and it is meant to be public. Its private
+// twin lives only as the VAPID_PRIVATE_KEY Supabase secret.
+export const VAPID_PUBLIC_KEY = "BCnt_FGpoYIxJsp4q2YCK6xfKMazrrCYVmfkRDRpLoLIak2c98B9UNlMmNE2CVkj6E-13PNEdYdvgSlYwVtJBeQ";
+
 // Every request gets a ceiling.
 //
 // Without one, a request made after the access token has expired can hang

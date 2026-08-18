@@ -57,7 +57,11 @@ class EggBoundary extends React.Component {
 export function App() {
   const [currentUser, setCurrentUser] = useState(null);
   const [checkingSession, setCheckingSession] = useState(true);
-  const [screen, setScreen] = useState("board");
+  // A push notification's click lands on /?goto=chat — honoured here so
+  // tapping "Kyle — Team chat" opens the room, not the board.
+  const [screen, setScreen] = useState(() =>
+    new URLSearchParams(window.location.search).get("goto") === "chat" ? "chat" : "board"
+  );
   const [menuOpen, setMenuOpen] = useState(false);
   const [theme, setTheme] = useState(() => Store.load("theme", "light"));
 

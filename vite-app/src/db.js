@@ -1,5 +1,5 @@
 import { createClient } from "@supabase/supabase-js";
-import { sbClient, SUPABASE_URL, SUPABASE_ANON_KEY } from "./config.js";
+import { sbClient, SUPABASE_URL, SUPABASE_ANON_KEY, VAPID_PUBLIC_KEY } from "./config.js";
 import { todayLocal, localDate, dayMonth, ticketDateStamp, primaryContact, ageInDays, storageKeySafe, STANDARD_RATE_LINES, nonNegative, lineTotal } from "./data.js";
 import { OfflineCache } from "./offlineCache.js";
 import { Toasts } from "./toastBus.js";
@@ -38,6 +38,14 @@ function stamp(ts) {
 function fullName(p) {
   const joined = [p.first_name, p.last_name].filter(Boolean).join(" ").trim();
   return joined || p.name || "";
+}
+
+// pushManager.subscribe wants the VAPID public key as raw bytes, not the
+// base64url string everything else passes around.
+function vapidKeyBytes() {
+  const b64 = VAPID_PUBLIC_KEY.replace(/-/g, "+").replace(/_/g, "/");
+  const pad = "=".repeat((4 - (b64.length % 4)) % 4);
+  return Uint8Array.from(atob(b64 + pad), c => c.charCodeAt(0));
 }
 
 // What the chat screen renders, from a chat_messages row with its profiles
@@ -2494,6 +2502,66 @@ export const Db = {
         p => onDelete(p.old.id))
       .subscribe(status => { if (onStatus) onStatus(status); });
     return () => { sbClient.removeChannel(channel); };
+  },
+
+  // ── Chat push notifications ──────────────────────────────────────────
+  // The subscription lives in two places that must agree: the browser's
+  // push manager (which mints the endpoint) and push_subscriptions (which
+  // is what chat-push actually sends to). "On" means both exist and the
+  // row is yours — on a shared tablet the browser may hold a subscription
+  // that belongs to the last person, and that reads as "off" until you
+  // claim it.
+  chatPushSupported() {
+    return "serviceWorker" in navigator && "PushManager" in window && "Notification" in window;
+  },
+
+  async getChatPushState() {
+    if (!this.chatPushSupported()) return "unsupported";
+    if (Notification.permission === "denied") return "blocked";
+    const reg = await navigator.serviceWorker.getRegistration();
+    if (!reg) return "off"; // dev server, or a first load the worker hasn't claimed yet
+    const sub = await reg.pushManager.getSubscription();
+    if (!sub) return "off";
+    const { data, error } = await sbClient
+      .from("push_subscriptions").select("id").eq("endpoint", sub.endpoint).maybeSingle();
+    if (error) throw error;
+    return data ? "on" : "off";
+  },
+
+  async enableChatPush() {
+    if (!this.chatPushSupported()) {
+      throw new Error("This device can't do notifications — on an iPhone, install the app first (Share → Add to Home Screen), then try from the installed app.");
+    }
+    const perm = await Notification.requestPermission();
+    if (perm !== "granted") {
+      throw new Error("Notifications are blocked for this app — allow them in the phone's settings and try again.");
+    }
+    const reg = await navigator.serviceWorker.getRegistration();
+    if (!reg) throw new Error("The app's service worker isn't ready — reload the app once and try again.");
+    const sub = await reg.pushManager.subscribe({
+      userVisibleOnly: true,
+      applicationServerKey: vapidKeyBytes()
+    });
+    const j = sub.toJSON();
+    // The definer RPC, not a plain insert: on a shared tablet this
+    // endpoint may still belong to the last person who used it, and
+    // claiming it is exactly what flipping the switch means.
+    const { error } = await sbClient.rpc("claim_push_subscription", {
+      _endpoint: sub.endpoint, _p256dh: j.keys.p256dh, _auth: j.keys.auth
+    });
+    if (error) throw error;
+  },
+
+  async disableChatPush() {
+    const reg = await navigator.serviceWorker.getRegistration();
+    const sub = reg ? await reg.pushManager.getSubscription() : null;
+    if (!sub) return;
+    const { error } = await sbClient
+      .from("push_subscriptions").delete().eq("endpoint", sub.endpoint);
+    if (error) throw error;
+    // The browser side goes second: if the row delete failed we'd rather
+    // still hold the subscription than have the server push at a corpse.
+    try { await sub.unsubscribe(); } catch (_) { /* the row is gone; sends to it now prune themselves */ }
   }
 };
 
@@ -2573,7 +2641,9 @@ const SAVE_MESSAGES = {
   // Team chat
   deleteChatMessage: "Message removed",
   pinChatMessage: "Message pinned",
-  unpinChatMessage: "Pin taken down"
+  unpinChatMessage: "Pin taken down",
+  enableChatPush: "Notifications on — this device will hear about new messages",
+  disableChatPush: "Notifications off"
 };
 
 // Left deliberately silent, because nobody did them on purpose:

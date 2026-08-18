@@ -38,6 +38,10 @@ export default defineConfig({
         ]
       },
       workbox: {
+        // The push handlers ride inside the generated worker — generateSW
+        // writes sw.js itself, and importScripts is the seam it leaves
+        // for hand-written worker code (public/push-sw.js).
+        importScripts: ["push-sw.js"],
         // Every built asset, which matters here because the office screens are
         // lazy chunks: an import() that has never been fetched cannot resolve
         // offline, so a precache that covered only the entry would still leave
