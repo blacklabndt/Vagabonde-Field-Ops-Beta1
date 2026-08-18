@@ -1,5 +1,6 @@
 import React, { useState, useEffect, useRef, useCallback } from "react";
 import { Db } from "../db.js";
+import { nonNegative } from "../data.js";
 
 // Re-exported from data.js, which is where they live now — the sign-in path
 // needs them and cannot import a file that pulls in React. Kept here so the
@@ -51,27 +52,6 @@ export function CheckBox({ on, onChange, label, size = 24, disabled }) {
         if (e.key === "Enter" || e.key === " ") { e.preventDefault(); onChange(); }
       }}
     >{on ? "✓" : ""}</div>
-  );
-}
-
-// A row in one of the left-hand pickers (clients, crew, accounts). Same
-// reason as CheckBox: these were <div onClick>, so the selection lists were
-// mouse-only.
-export function PickerRow({ selected, onSelect, children, style }) {
-  return (
-    <div
-      role="button"
-      tabIndex={0}
-      aria-current={selected || undefined}
-      onClick={onSelect}
-      onKeyDown={e => { if (e.key === "Enter" || e.key === " ") { e.preventDefault(); onSelect(); } }}
-      style={{
-        cursor: "pointer",
-        borderLeft: `3px solid ${selected ? "var(--color-accent)" : "transparent"}`,
-        background: selected ? "color-mix(in srgb, var(--color-accent) 8%, transparent)" : "transparent",
-        ...style
-      }}
-    >{children}</div>
   );
 }
 
@@ -463,10 +443,6 @@ export function Switch({ on, onClick, label }) {
   );
 }
 
-// Two decimal places. Used to split billed hours evenly across a crew
-// without leaving a trail of floating-point pennies behind.
-export function round1(n) { return Math.round(n * 100) / 100; }
-
 // A short confirmation that something reached the database, for screens that
 // save without a save button. It floats above the page and takes itself away
 // — nothing here is worth a click to dismiss.
@@ -540,18 +516,8 @@ export function Toast({ message, tone = "ok", onDone, duration = 2600 }) {
   );
 }
 
-// Floors a figure at zero, for anything that feeds a bill. A negative rate,
-// quantity or hour count prices a line below zero and quietly credits the
-// client — the ticket totals up short with nothing anywhere reporting an
-// error, which is the worst way for a number to be wrong.
-export function nonNegative(value) {
-  // A comma decimal is a decimal: "1,5" is how half the world's keyboards
-  // type one and a half, and parseFloat would silently read it as 1.
-  const n = typeof value === "number" ? value : parseFloat(String(value).replace(",", "."));
-  return Number.isFinite(n) && n > 0 ? n : 0;
-}
-
-// The number box that goes with it. Zero stays typeable — it is a real value
+// The number box for anything that feeds a bill; its figures are floored at
+// zero by nonNegative (see data.js). Zero stays typeable — it is a real value
 // everywhere this is used ("not priced yet", "no hours today").
 //
 // The box keeps its own text while it is being edited, which is the fix for a

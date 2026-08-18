@@ -172,7 +172,11 @@ export function ageInDays(ts) {
   return Math.max(0, Math.round((b - a) / 86400000));
 }
 
-export const SIZE_LABELS = ['2" NPS', '4" NPS', '6" NPS', '8" NPS', '12" NPS'];
+// Only STANDARD_RATE_LINES below reads these two now — the ticket screen's
+// menus come from the client's card itself, and the rate admin's rows come
+// from the lines. They seed fresh schedules and order legacy position-less
+// lines, nothing more.
+const SIZE_LABELS = ['2" NPS', '4" NPS', '6" NPS', '8" NPS', '12" NPS'];
 
 // An empty job record. `App` holds one of these until a job is actually
 // opened. It used to hold a hard-coded sample record for a real job — which
@@ -209,6 +213,21 @@ export const TECH_LEVELS = [
   { code: "T",  label: "Trainee" },
   { code: "A",  label: "Administrative" }
 ];
+
+// Floors a figure at zero, for anything that feeds a bill. A negative rate,
+// quantity or hour count prices a line below zero and quietly credits the
+// client — the ticket totals up short with nothing anywhere reporting an
+// error, which is the worst way for a number to be wrong. Zero stays a real
+// value ("not priced yet", "no hours today"), so this floors, not rejects.
+//
+// One copy, here, because it used to live twice — in db.js and in the
+// NumField — and only one of the two knew that a comma decimal is a decimal:
+// "1,5" is how half the world's keyboards type one and a half, and a bare
+// parseFloat silently reads it as 1.
+export const nonNegative = value => {
+  const n = typeof value === "number" ? value : parseFloat(String(value).replace(",", "."));
+  return Number.isFinite(n) && n > 0 ? n : 0;
+};
 
 export const GST_RATE = 0.05;
 
@@ -322,7 +341,7 @@ export const SEED_HAZARDS = [
 // The methods every schedule starts with. What a ticket can bill comes from
 // the client's card itself now (Db catalog), not from this list — it exists
 // to seed new schedules and order old, position-less lines.
-export const METHODS = [
+const METHODS = [
   { key: "mt", label: "MT / MPI" }, { key: "pt", label: "PT" },
   { key: "vt", label: "VT" }, { key: "ht", label: "Hardness test" },
   { key: "ut", label: "UT" }

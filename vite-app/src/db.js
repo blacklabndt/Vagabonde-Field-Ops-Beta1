@@ -1,6 +1,6 @@
 import { createClient } from "@supabase/supabase-js";
 import { sbClient, SUPABASE_URL, SUPABASE_ANON_KEY } from "./config.js";
-import { todayLocal, localDate, dayMonth, ticketDateStamp, primaryContact, ageInDays, storageKeySafe, STANDARD_RATE_LINES } from "./data.js";
+import { todayLocal, localDate, dayMonth, ticketDateStamp, primaryContact, ageInDays, storageKeySafe, STANDARD_RATE_LINES, nonNegative } from "./data.js";
 import { OfflineCache } from "./offlineCache.js";
 import { Toasts } from "./toastBus.js";
 import { OfflineQueue, isNetworkError } from "./offlineQueue.js";
@@ -81,18 +81,6 @@ async function cached(key, fetcher) {
   return value;
 }
 // Floors anything that feeds a bill — rates, quantities, hours. A negative
-// prices a line below zero and silently credits the client, so the ticket
-// totals up short with no error raised anywhere.
-//
-// Zero is a real value everywhere this is used ("not priced yet", "no hours
-// today"), so this floors rather than rejects. The database enforces the same
-// rule; clamping here means a stray minus is quietly dropped instead of
-// surfacing a constraint violation to someone standing in a field.
-function nonNegative(value) {
-  const n = typeof value === "number" ? value : parseFloat(value);
-  return Number.isFinite(n) && n > 0 ? n : 0;
-}
-
 // Rates and quantities both come off the ticket screen, so they are floored
 // together on the way in — and the total is recomputed from the floored
 // figures, never from what the caller worked out.

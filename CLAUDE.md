@@ -29,6 +29,18 @@ Cloudflare Worker `solitary-snowflake-ee22` (assets + `/approve` proxy in
 - Rates come from the Rate admin screen, never hardcoded. Billing is per
   truck, not per technician. PO = AFE. Hotel = subsistence. solo/soloOt
   are timesheet-only and never billed.
+- The rate card IS the billing menu: the ticket screen's dropdowns, their
+  order, and the invoice's line order all come from the client's published
+  schedule (`getPublishedRatesForClient` → catalog). A client whose
+  schedule has `follows_default` on prices from the house card, live.
+  Publishing matters exactly once per card — after that, edits go live as
+  they save — which is why the Publish button hides once pressed.
+- Crew hours are private: the ticket_crew read policy is own rows, Admin/
+  Coordinator, or crewmates on a shared ticket (private.shares_ticket).
+  Never widen it back to a tab check.
+- PostgREST silently caps responses at 1,000 rows. Anything that means
+  "all of them" goes through fetchAllPages (the reference lists and the
+  exports already do).
 - The offline queue is for work only — scores, telemetry and other
   nice-to-haves call the API directly and fail soft.
 - Tabs are PERMISSION; drawer visibility is code. The contextual screens
@@ -48,6 +60,13 @@ Cloudflare Worker `solitary-snowflake-ee22` (assets + `/approve` proxy in
   Spy-count before trusting a negative result.
 - The browser pane suspends rAF when hidden: game/animation testing needs
   the preview panel visibly open.
+
+## Live data
+
+The live project carries deliberate load-test seed data alongside Kyle's
+real records: jobs `S-1%`, staff accounts `@seed.vagabonde.ca` (id_code
+24400+), and generated orgs/contacts/tickets from 2026-08-18. It is all
+identifiable by those markers when a cleanup is wanted.
 
 ## People
 
