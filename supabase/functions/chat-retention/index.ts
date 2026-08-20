@@ -40,14 +40,16 @@ Deno.serve(async (req) => {
     for (let pass = 0; pass < MAX_PASSES; pass++) {
       const { data: expired, error } = await admin
         .from("chat_messages")
-        .select("id, image_key")
+        .select("id, image_key, audio_key")
         .is("pinned_at", null)
         .lt("created_at", cutoff)
         .limit(PAGE);
       if (error) throw error;
       if (!expired || expired.length === 0) break;
 
-      const keys = expired.map((r) => r.image_key).filter(Boolean) as string[];
+      const keys = expired
+        .flatMap((r) => [r.image_key, r.audio_key])
+        .filter(Boolean) as string[];
       for (let i = 0; i < keys.length; i += 100) {
         const batch = keys.slice(i, i + 100);
         const { error: rmErr } = await admin.storage.from("chat-media").remove(batch);

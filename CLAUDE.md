@@ -62,6 +62,12 @@ Cloudflare Worker `solitary-snowflake-ee22` (assets + `/approve` proxy in
   public/push-sw.js, importScripts'd by the generated sw.js. A push
   endpoint belongs to the DEVICE: claim_push_subscription (definer RPC)
   is how the next tech on a shared tablet takes it over.
+- Chat extras: chat_reads + the chat_unread_count RPC power the drawer
+  badge and the "new messages" line; replies are reply_to (quote goes
+  null if the quoted message dies — the reply stands on its own words);
+  voice notes are audio_key in chat-media, cleaned up by delete and
+  retention like pictures; job numbers in message text linkify by
+  MEMBERSHIP against listJobNumbers, never by pattern — they're freeform.
 
 ## Verification habits that caught real bugs
 

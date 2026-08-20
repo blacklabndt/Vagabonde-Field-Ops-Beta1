@@ -1,5 +1,6 @@
 import React, { useState, useEffect, useLayoutEffect, useMemo, useRef } from "react";
 import { Db } from "../db.js";
+import { initialsOf } from "../data.js";
 import { Blueprint, Btn, Dialog, ErrorBox, Loading, Switch } from "./common.jsx";
 
 // Team chat — one room for the whole crew.
@@ -72,13 +73,55 @@ function mergeIn(prev, incoming) {
   for (const m of incoming) {
     const cur = by.get(m.id);
     if (!cur) { by.set(m.id, m); changed = true; continue; }
-    const merged = { ...m, name: m.name || cur.name };
-    if (merged.name !== cur.name || merged.pinnedAt !== cur.pinnedAt) {
+    // A realtime copy arrives without the joins — keep whatever name and
+    // quote the row already resolved rather than blanking them.
+    const merged = { ...m, name: m.name || cur.name, quoted: m.quoted || cur.quoted };
+    if (merged.name !== cur.name || merged.pinnedAt !== cur.pinnedAt || !!merged.quoted !== !!cur.quoted) {
       by.set(m.id, merged);
       changed = true;
     }
   }
   return changed ? [...by.values()].sort(inOrder) : prev;
+}
+
+// One tint per person, picked by hashing their id — stable across
+// devices with no table behind it. Muted hues that sit on both themes.
+const CHIP_HUES = ["#5980a6", "#6a8f5f", "#a67a59", "#8a6a9e", "#a05f6d", "#5f9a94"];
+function chipHue(id) {
+  let h = 0;
+  for (let i = 0; i < id.length; i++) h = (h * 31 + id.charCodeAt(i)) >>> 0;
+  return CHIP_HUES[h % CHIP_HUES.length];
+}
+
+// A voice note in a bubble. Same signed-URL life as the pictures; a link
+// that expires before the first play gets minted once more, then gives up
+// honestly.
+function ChatAudio({ audioKey }) {
+  const [url, setUrl] = useState("");
+  const [failed, setFailed] = useState(false);
+  const retried = useRef(false);
+  useEffect(() => {
+    let live = true;
+    retried.current = false;
+    setUrl("");
+    setFailed(false);
+    Db.signedUrl("chat-media", audioKey)
+      .then(u => { if (live) setUrl(u); })
+      .catch(() => { if (live) setFailed(true); });
+    return () => { live = false; };
+  }, [audioKey]);
+  const onError = () => {
+    if (retried.current) { setFailed(true); return; }
+    retried.current = true;
+    Db.signedUrl("chat-media", audioKey).then(setUrl).catch(() => setFailed(true));
+  };
+  if (failed) {
+    return <div style={{ fontSize: 12, color: "color-mix(in srgb, var(--color-text) 55%, transparent)", padding: "6px 0" }}>Couldn't load the voice note.</div>;
+  }
+  if (!url) {
+    return <div style={{ width: 230, height: 40, background: "color-mix(in srgb, var(--color-text) 6%, transparent)" }} />;
+  }
+  return <audio controls preload="metadata" src={url} onError={onError} style={{ display: "block", width: 230, maxWidth: "100%" }} />;
 }
 
 // The GIF search. Opens on what's trending, then searches as you type —
@@ -233,7 +276,7 @@ function Lightbox({ src, onClose }) {
   );
 }
 
-export function TeamChatScreen({ currentUser }) {
+export function TeamChatScreen({ currentUser, onOpenJob, onRead }) {
   const [messages, setMessages] = useState([]);
   const [pins, setPins] = useState([]);
   const [hasMore, setHasMore] = useState(false);
@@ -256,6 +299,20 @@ export function TeamChatScreen({ currentUser }) {
   // "unsupported" hides the switch; "blocked"/"off"/"on" render it.
   const [pushState, setPushState] = useState("unsupported");
   const [pushBusy, setPushBusy] = useState(false);
+  // The message being answered — its quote rides the next send.
+  const [replyTarget, setReplyTarget] = useState(null);
+  // Which message's ⋯ menu is open, if any.
+  const [menuFor, setMenuFor] = useState(null);
+  // Where this person had read up to when they walked in — the "new
+  // messages" line sits there and stays put while they catch up.
+  const [entryMark, setEntryMark] = useState(null);
+  // Every job number, uppercased, so a word in a message can be looked up.
+  const [jobNums, setJobNums] = useState(null);
+  // A voice note in progress: { startedAt } while the mic is hot.
+  const [recording, setRecording] = useState(null);
+  const [recElapsed, setRecElapsed] = useState(0);
+  // "↓ new messages" — shown when something lands while scrolled up.
+  const [jumpChip, setJumpChip] = useState(false);
 
   const listRef = useRef(null);
   const fileRef = useRef(null);
@@ -272,6 +329,41 @@ export function TeamChatScreen({ currentUser }) {
   // initial load and the "Show earlier" pages bring in. A message not in
   // this set is one that arrived while you were watching — those rise in.
   const quietIds = useRef(new Set());
+  // The recorder, its stream and its chunks while the mic is hot.
+  const recRef = useRef(null);
+  // The last message's id as of the previous render — how an arrival
+  // while scrolled up is told apart from a prepend or a pin change.
+  const prevTail = useRef(null);
+  // onRead is an inline prop from App; the ref keeps the mount-time
+  // closures below pointing at the current one.
+  const onReadRef = useRef(onRead);
+  onReadRef.current = onRead;
+
+  // Reading the room settles the drawer badge: note where the person had
+  // read up to (the divider's anchor), then move their bookmark to now.
+  useEffect(() => {
+    let live = true;
+    Db.getChatLastRead(currentUser.id)
+      .then(t => { if (live) setEntryMark(t); })
+      .catch(() => {})
+      .finally(() => {
+        Db.markChatRead(currentUser.id)
+          .then(() => { if (onReadRef.current) onReadRef.current(); })
+          .catch(() => {});
+      });
+    return () => { live = false; };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
+  // The linkifier's dictionary. Nothing to do until it arrives — messages
+  // render as plain text and upgrade when the list lands.
+  useEffect(() => {
+    let live = true;
+    Db.listJobNumbers()
+      .then(nums => { if (live) setJobNums(new Set(nums.map(n => String(n).toUpperCase()))); })
+      .catch(() => {});
+    return () => { live = false; };
+  }, []);
 
   const named = m => m.name ? m : { ...m, name: nameOf.current.get(m.profileId) || "" };
 
@@ -336,12 +428,33 @@ export function TeamChatScreen({ currentUser }) {
         onInsert: m => {
           if (!live) return;
           const withName = named(m);
-          setMessages(prev => mergeIn(prev, [withName]));
-          // A sender the directory doesn't know yet — an account created
-          // since sign-in. Fetch the row with its join and patch the name.
-          if (!withName.name) {
+          setMessages(prev => {
+            // A realtime row carries the reply pointer but not the quoted
+            // join — the quoted message is almost always already on screen.
+            let inc = withName;
+            if (inc.replyTo && !inc.quoted) {
+              const q = prev.find(x => x.id === inc.replyTo);
+              if (q) {
+                inc = { ...inc, quoted: {
+                  id: q.id, name: q.name, body: q.body,
+                  label: q.imageKey ? "(picture)" : q.gifUrl ? "(GIF)" : q.audioKey ? "(voice note)" : ""
+                } };
+              }
+            }
+            return mergeIn(prev, [inc]);
+          });
+          // A sender the directory doesn't know, or a quote of something
+          // beyond the loaded page — one fetch fills either gap.
+          if (!withName.name || (withName.replyTo && !withName.quoted)) {
             Db.getChatMessage(m.id)
-              .then(full => { if (live && full && full.name) setMessages(prev => mergeIn(prev, [full])); })
+              .then(full => { if (live && full) setMessages(prev => mergeIn(prev, [full])); })
+              .catch(() => {});
+          }
+          // Reading the room as it happens keeps the badge honest on the
+          // person's other devices.
+          if (document.visibilityState === "visible") {
+            Db.markChatRead(currentUser.id)
+              .then(() => { if (onReadRef.current) onReadRef.current(); })
               .catch(() => {});
           }
         },
@@ -421,16 +534,22 @@ export function TeamChatScreen({ currentUser }) {
   useEffect(() => () => { if (attach) URL.revokeObjectURL(attach.url); }, [attach]);
 
   // One scroll rule for every way the list changes: restore the reader's
-  // place after a prepend, otherwise follow the bottom if they were there.
+  // place after a prepend, follow the bottom if they were there — and if
+  // they were up reading history when something new landed at the tail,
+  // offer the way down instead of yanking them there.
   useLayoutEffect(() => {
     const el = listRef.current;
     if (!el) return;
+    const tail = messages.length ? messages[messages.length - 1].id : null;
     if (restoreHeight.current != null) {
       el.scrollTop += el.scrollHeight - restoreHeight.current;
       restoreHeight.current = null;
     } else if (stickToBottom.current) {
       el.scrollTop = el.scrollHeight;
+    } else if (tail && prevTail.current && tail !== prevTail.current) {
+      setJumpChip(true);
     }
+    prevTail.current = tail;
   }, [messages, loading]);
 
   // Pictures finish loading after the scroll rule has run and push the
@@ -442,7 +561,11 @@ export function TeamChatScreen({ currentUser }) {
 
   const onScroll = () => {
     const el = listRef.current;
-    if (el) stickToBottom.current = el.scrollHeight - el.scrollTop - el.clientHeight < 120;
+    if (!el) return;
+    stickToBottom.current = el.scrollHeight - el.scrollTop - el.clientHeight < 120;
+    // Reaching the bottom retires the chip; setting an already-false
+    // state is free, so no guard needed.
+    if (stickToBottom.current) setJumpChip(false);
   };
 
   const loadOlder = async () => {
@@ -486,9 +609,12 @@ export function TeamChatScreen({ currentUser }) {
     setSendError("");
     try {
       const imageFile = attach ? await shrinkForChat(attach.file) : null;
-      const sent = await Db.sendChatMessage(currentUser.id, text, { imageFile });
+      const sent = await Db.sendChatMessage(currentUser.id, text, {
+        imageFile, replyTo: replyTarget ? replyTarget.id : null
+      });
       setDraft("");
       dropAttachment();
+      setReplyTarget(null);
       stickToBottom.current = true;
       setMessages(prev => mergeIn(prev, [sent]));
     } catch (e) {
@@ -506,8 +632,11 @@ export function TeamChatScreen({ currentUser }) {
     setSending(true);
     setSendError("");
     try {
-      const sent = await Db.sendChatMessage(currentUser.id, "", { gifUrl });
+      const sent = await Db.sendChatMessage(currentUser.id, "", {
+        gifUrl, replyTo: replyTarget ? replyTarget.id : null
+      });
       setGifOpen(false);
+      setReplyTarget(null);
       stickToBottom.current = true;
       setMessages(prev => mergeIn(prev, [sent]));
     } catch (e) {
@@ -554,6 +683,96 @@ export function TeamChatScreen({ currentUser }) {
     }
   };
 
+  // ── Voice notes ───────────────────────────────────────────────────────
+  // Typing with gloves on is miserable; talking isn't. Tap Mic, talk,
+  // send — capped at two minutes, which is a radio call, not a podcast.
+  const canRecord = typeof MediaRecorder !== "undefined" &&
+    !!(navigator.mediaDevices && navigator.mediaDevices.getUserMedia);
+
+  const startRecording = async () => {
+    if (recording || sending) return;
+    setSendError("");
+    try {
+      const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+      const mime = ["audio/webm;codecs=opus", "audio/webm", "audio/mp4"]
+        .find(t => MediaRecorder.isTypeSupported(t)) || "";
+      const rec = new MediaRecorder(stream, mime ? { mimeType: mime } : undefined);
+      const chunks = [];
+      rec.ondataavailable = e => { if (e.data && e.data.size) chunks.push(e.data); };
+      recRef.current = { rec, stream, chunks, discard: false };
+      rec.start();
+      setRecording({ startedAt: Date.now() });
+      setRecElapsed(0);
+    } catch (_) {
+      setSendError("Couldn't start recording — allow microphone access for the app and try again.");
+    }
+  };
+
+  const stopRecording = keep => {
+    const r = recRef.current;
+    if (!r) return;
+    r.discard = !keep;
+    r.rec.onstop = async () => {
+      r.stream.getTracks().forEach(t => t.stop());
+      setRecording(null);
+      recRef.current = null;
+      if (r.discard || !r.chunks.length) return;
+      const type = (r.rec.mimeType || "audio/webm").split(";")[0];
+      const ext = { "audio/webm": "webm", "audio/mp4": "m4a", "audio/mpeg": "mp3", "audio/ogg": "ogg" }[type] || "webm";
+      const file = new File([new Blob(r.chunks, { type })], "voice-note." + ext, { type });
+      setSending(true);
+      setSendError("");
+      try {
+        const sent = await Db.sendChatMessage(currentUser.id, "", {
+          audioFile: file, replyTo: replyTarget ? replyTarget.id : null
+        });
+        setReplyTarget(null);
+        stickToBottom.current = true;
+        setMessages(prev => mergeIn(prev, [sent]));
+      } catch (e) {
+        setSendError(e.message || "Couldn't send the voice note — check the connection and try again.");
+      }
+      setSending(false);
+    };
+    try { r.rec.stop(); } catch (_) { setRecording(null); recRef.current = null; }
+  };
+
+  // The elapsed readout, and the two-minute ceiling.
+  useEffect(() => {
+    if (!recording) return;
+    const t = setInterval(() => {
+      const s = Math.floor((Date.now() - recording.startedAt) / 1000);
+      setRecElapsed(s);
+      if (s >= 120) stopRecording(true);
+    }, 500);
+    return () => clearInterval(t);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [recording]);
+
+  // Leaving the screen mid-recording releases the microphone.
+  useEffect(() => () => {
+    const r = recRef.current;
+    if (r) {
+      r.discard = true;
+      try { r.rec.stop(); } catch (_) { /* already stopped */ }
+      r.stream.getTracks().forEach(t => t.stop());
+    }
+  }, []);
+
+  // ── Job links ─────────────────────────────────────────────────────────
+  // A word in a message that matches a real job number opens that job.
+  // Membership, not pattern: job numbers here are freeform ("6969",
+  // "J-5001"), so the only reliable test is "is it actually one".
+  const openJobNumber = async num => {
+    try {
+      const job = await Db.getJobByNumber(num);
+      if (job && onOpenJob) onOpenJob(job);
+      else setSendError("No job by that number any more.");
+    } catch (_) {
+      setSendError("No job by that number any more.");
+    }
+  };
+
   // Full screen for any message's picture or GIF. A stored picture gets
   // a fresh signed URL at tap time — the one its thumbnail was minted
   // with may be minutes old, and an expired link at full screen is a
@@ -583,71 +802,173 @@ export function TeamChatScreen({ currentUser }) {
   const muted = "color-mix(in srgb, var(--color-text) 55%, transparent)";
   const tinyBtn = { background: "transparent", border: "none", cursor: "pointer", color: muted, padding: 2, lineHeight: 1 };
 
-  // The rows rebuild only when the messages do. Without this, every
-  // keystroke in the composer re-rendered a hundred bubbles — per-letter
-  // work a cold phone can feel. The handlers captured here only touch
-  // refs, functional setState and Db, so a captured copy never goes
-  // stale in any way that matters.
-  const messageRows = useMemo(() => messages.map((m, i) => {
-    const mine = m.profileId === currentUser.id;
-    const prev = messages[i - 1];
-    // A name-and-time line starts each run of messages: a new
-    // sender, or the same one back after half an hour away.
-    const newRun = !prev || prev.profileId !== m.profileId ||
-      new Date(m.createdAt) - new Date(prev.createdAt) > 30 * 60000;
-    return (
-      <div key={m.id}
-        className={quietIds.current.has(m.id) ? undefined : "chat-msg-in"}
-        style={{ display: "flex", flexDirection: "column", alignItems: mine ? "flex-end" : "flex-start", marginTop: newRun ? 14 : 3 }}>
-        {newRun && (
-          <div style={{ fontSize: 11, color: muted, padding: "0 2px", marginBottom: 3 }}>
-            {mine ? "You" : (m.name || "Someone")} · {m.at}
-          </div>
-        )}
-        <div style={{ display: "flex", alignItems: "center", gap: 6, flexDirection: mine ? "row-reverse" : "row", maxWidth: "86%" }}>
-          <div style={{
-            padding: "8px 12px", fontSize: 14, lineHeight: 1.45,
-            whiteSpace: "pre-wrap", overflowWrap: "anywhere",
-            background: mine
-              ? "color-mix(in srgb, var(--color-accent) 16%, transparent)"
-              : "color-mix(in srgb, var(--color-text) 7%, transparent)",
-            border: "1px solid " + (mine
-              ? "color-mix(in srgb, var(--color-accent) 35%, transparent)"
-              : "var(--color-divider)")
-          }}>
-            {m.gifUrl && (
-              // Straight off KLIPY's CDN — the constraint on the
-              // column is what keeps this an image host, not a
-              // tracking pixel.
-              <img src={m.gifUrl} alt="GIF" loading="lazy" onLoad={restick}
-                onClick={() => openImage(m)}
-                style={{ display: "block", maxWidth: "100%", maxHeight: 320, cursor: "zoom-in" }} />
-            )}
-            {m.imageKey && <ChatImage imageKey={m.imageKey} onSized={restick} onOpen={() => openImage(m)} />}
-            {m.body && <div style={m.imageKey || m.gifUrl ? { marginTop: 6 } : null}>{m.body}</div>}
-          </div>
-          {/* Moderation is an Admin's job — pin and delete
-              both. A tech's own messages stand as sent until
-              the 30-day sweep takes them. */}
-          {isAdmin && (
-            <span style={{ display: "flex", gap: 2, flexDirection: mine ? "row-reverse" : "row", flex: "none" }}>
-              <button onClick={() => togglePin(m)}
-                aria-label={m.pinnedAt ? "Unpin this message" : "Pin this message"}
-                title={m.pinnedAt ? "Unpin this message" : "Pin this message"}
-                style={{ ...tinyBtn, fontSize: 11, fontWeight: 600 }}>
-                {m.pinnedAt ? "Unpin" : "Pin"}
-              </button>
-              <button onClick={() => remove(m.id)} aria-label="Remove this message" title="Remove this message"
-                style={{ ...tinyBtn, fontSize: 15 }}>
-                ×
-              </button>
-            </span>
-          )}
-        </div>
-      </div>
+  // Body text with any real job number turned into a tap-through to the
+  // job. Split on word-shaped tokens; odd indexes are the candidates.
+  const renderBody = text => {
+    if (!jobNums || !jobNums.size) return text;
+    const parts = String(text).split(/([A-Za-z0-9][A-Za-z0-9-]{2,19})/g);
+    if (parts.length === 1) return text;
+    return parts.map((part, idx) =>
+      idx % 2 === 1 && /\d/.test(part) && jobNums.has(part.toUpperCase()) ? (
+        <button key={idx} onClick={() => openJobNumber(part)}
+          style={{ background: "transparent", border: "none", padding: 0, font: "inherit", cursor: "pointer", color: "var(--color-accent)", textDecoration: "underline" }}>
+          {part}
+        </button>
+      ) : part
     );
+  };
+
+  // The rows rebuild only when the room does — messages, the unread mark,
+  // the job dictionary, or an open ⋯ menu. Without this, every keystroke
+  // in the composer re-rendered a hundred bubbles — per-letter work a
+  // cold phone can feel. The handlers captured here only touch refs,
+  // functional setState and Db, so a captured copy never goes stale in
+  // any way that matters.
+  const messageRows = useMemo(() => {
+    const rows = [];
+    let prevMsg = null;
+    let prevDayKey = "";
+    let markPlaced = false;
+    const today = new Date().toDateString();
+    for (const m of messages) {
+      const d = new Date(m.createdAt);
+      const dayKey = d.toDateString();
+      if (dayKey !== prevDayKey) {
+        rows.push(
+          <div key={"day-" + dayKey} style={{ display: "flex", alignItems: "center", gap: 10, margin: "16px 0 4px", fontSize: 11, color: muted }}>
+            <span style={{ flex: 1, borderTop: "1px solid var(--color-divider)" }} />
+            {dayKey === today ? "Today" : d.toLocaleDateString("en-CA", { weekday: "long", day: "numeric", month: "short" })}
+            <span style={{ flex: 1, borderTop: "1px solid var(--color-divider)" }} />
+          </div>
+        );
+        prevDayKey = dayKey;
+        prevMsg = null;
+      }
+      if (!markPlaced && entryMark && m.createdAt > entryMark && m.profileId !== currentUser.id) {
+        rows.push(
+          <div key="new-mark" style={{ display: "flex", alignItems: "center", gap: 10, margin: "10px 0 4px", fontSize: 11, letterSpacing: ".08em", textTransform: "uppercase", color: "var(--color-accent)" }}>
+            <span style={{ flex: 1, borderTop: "1px solid color-mix(in srgb, var(--color-accent) 45%, transparent)" }} />
+            New messages
+            <span style={{ flex: 1, borderTop: "1px solid color-mix(in srgb, var(--color-accent) 45%, transparent)" }} />
+          </div>
+        );
+        markPlaced = true;
+        prevMsg = null;
+      }
+
+      const mine = m.profileId === currentUser.id;
+      // A chip-and-time line starts each run of messages: a new sender,
+      // or the same one back after half an hour away.
+      const newRun = !prevMsg || prevMsg.profileId !== m.profileId ||
+        new Date(m.createdAt) - new Date(prevMsg.createdAt) > 30 * 60000;
+      const hue = chipHue(m.profileId);
+      const hasMedia = !!(m.imageKey || m.gifUrl);
+      rows.push(
+        <div key={m.id}
+          className={quietIds.current.has(m.id) ? undefined : "chat-msg-in"}
+          style={{ display: "flex", flexDirection: "column", alignItems: mine ? "flex-end" : "flex-start", marginTop: newRun ? 12 : 3 }}>
+          {newRun && (
+            <div style={{ display: "flex", alignItems: "center", gap: 6, flexDirection: mine ? "row-reverse" : "row", marginBottom: 3 }}>
+              <span aria-hidden="true" style={{
+                width: 22, height: 22, display: "grid", placeItems: "center", flex: "none",
+                fontSize: 10, fontWeight: 700, letterSpacing: ".03em",
+                color: hue,
+                background: `color-mix(in srgb, ${hue} 20%, transparent)`,
+                border: `1px solid color-mix(in srgb, ${hue} 45%, transparent)`
+              }}>
+                {initialsOf(m.name || "").slice(0, 2) || "•"}
+              </span>
+              <span style={{ fontSize: 11, color: muted }}>
+                {mine ? "You" : (m.name || "Someone")} · {new Date(m.createdAt).toLocaleTimeString("en-CA", { hour: "2-digit", minute: "2-digit", hour12: false })}
+              </span>
+            </div>
+          )}
+          <div style={{ display: "flex", alignItems: "center", gap: 6, flexDirection: mine ? "row-reverse" : "row", maxWidth: "86%" }}>
+            <div style={{
+              padding: 0, overflow: "hidden", fontSize: 14, lineHeight: 1.45,
+              background: mine
+                ? "color-mix(in srgb, var(--color-accent) 16%, transparent)"
+                : "color-mix(in srgb, var(--color-text) 7%, transparent)",
+              border: "1px solid " + (mine
+                ? "color-mix(in srgb, var(--color-accent) 35%, transparent)"
+                : "var(--color-divider)")
+            }}>
+              {m.quoted && (
+                <div style={{
+                  margin: "8px 12px 0", padding: "4px 8px", fontSize: 12,
+                  borderLeft: "2px solid color-mix(in srgb, var(--color-accent) 55%, transparent)",
+                  background: "color-mix(in srgb, var(--color-text) 5%, transparent)",
+                  overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap", maxWidth: 320
+                }}>
+                  <span style={{ color: "var(--color-accent)", fontWeight: 600 }}>{m.quoted.name || "Someone"}</span>
+                  <span style={{ color: muted }}> — {m.quoted.body || m.quoted.label}</span>
+                </div>
+              )}
+              {m.gifUrl && (
+                // Straight off KLIPY's CDN — the constraint on the column
+                // is what keeps this an image host, not a tracking pixel.
+                // Media runs to the bubble's edges; only words get padding.
+                <img src={m.gifUrl} alt="GIF" loading="lazy" onLoad={restick}
+                  onClick={() => openImage(m)}
+                  style={{ display: "block", maxWidth: "100%", maxHeight: 320, cursor: "zoom-in", marginTop: m.quoted ? 8 : 0 }} />
+              )}
+              {m.imageKey && (
+                <div style={{ marginTop: m.quoted ? 8 : 0 }}>
+                  <ChatImage imageKey={m.imageKey} onSized={restick} onOpen={() => openImage(m)} />
+                </div>
+              )}
+              {m.audioKey && (
+                <div style={{ padding: "8px 10px" }}>
+                  <ChatAudio audioKey={m.audioKey} />
+                </div>
+              )}
+              {m.body && (
+                <div style={{ padding: hasMedia ? "6px 12px 8px" : "8px 12px", whiteSpace: "pre-wrap", overflowWrap: "anywhere" }}>
+                  {renderBody(m.body)}
+                </div>
+              )}
+            </div>
+            <span style={{ display: "flex", gap: 2, alignItems: "center", flexDirection: mine ? "row-reverse" : "row", flex: "none" }}>
+              {/* One quiet ⋯ instead of a row of controls. Reply is for
+                  everyone; moderation — pin and delete — is an Admin's
+                  job. A tech's own messages stand as sent until the
+                  30-day sweep takes them. */}
+              <button onClick={() => setMenuFor(menuFor === m.id ? null : m.id)}
+                aria-label="Message actions" title="Message actions"
+                aria-expanded={menuFor === m.id}
+                style={{ ...tinyBtn, fontSize: 14, fontWeight: 700 }}>
+                ⋯
+              </button>
+              {menuFor === m.id && (
+                <>
+                  <button onClick={() => { setMenuFor(null); setReplyTarget(m); }}
+                    style={{ ...tinyBtn, fontSize: 11, fontWeight: 600 }}>
+                    Reply
+                  </button>
+                  {isAdmin && (
+                    <button onClick={() => { setMenuFor(null); togglePin(m); }}
+                      style={{ ...tinyBtn, fontSize: 11, fontWeight: 600 }}>
+                      {m.pinnedAt ? "Unpin" : "Pin"}
+                    </button>
+                  )}
+                  {isAdmin && (
+                    <button onClick={() => { setMenuFor(null); remove(m.id); }}
+                      aria-label="Remove this message" title="Remove this message"
+                      style={{ ...tinyBtn, fontSize: 15 }}>
+                      ×
+                    </button>
+                  )}
+                </>
+              )}
+            </span>
+          </div>
+        </div>
+      );
+      prevMsg = m;
+    }
+    return rows;
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }), [messages, isAdmin, currentUser.id]);
+  }, [messages, isAdmin, currentUser.id, jobNums, entryMark, menuFor]);
 
   return (
     <div className="page" style={{ maxWidth: 760 }}>
@@ -667,7 +988,7 @@ export function TeamChatScreen({ currentUser }) {
                   title={p.body}
                   style={{ flex: 1, minWidth: 0, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}
                 >
-                  {p.body}
+                  {p.body || (p.audioKey ? "(voice note)" : "")}
                 </span>
                 {isAdmin && (
                   <button onClick={() => togglePin(p)} aria-label="Take this pin down" title="Take this pin down"
@@ -696,10 +1017,36 @@ export function TeamChatScreen({ currentUser }) {
               )}
               {messages.length === 0 && (
                 <div style={{ color: muted, textAlign: "center", padding: "40px 0" }}>
+                  <div aria-hidden="true" style={{
+                    width: 150, height: 32, margin: "0 auto 12px",
+                    background: "currentColor", opacity: 0.45,
+                    WebkitMaskImage: "url(/brand/wordmark.svg)", maskImage: "url(/brand/wordmark.svg)",
+                    WebkitMaskRepeat: "no-repeat", maskRepeat: "no-repeat",
+                    WebkitMaskPosition: "center", maskPosition: "center",
+                    WebkitMaskSize: "contain", maskSize: "contain"
+                  }} />
                   Nothing here yet — say hello.
                 </div>
               )}
               {messageRows}
+              {jumpChip && (
+                <div style={{ position: "sticky", bottom: 4, textAlign: "center", marginTop: 8 }}>
+                  <button
+                    onClick={() => {
+                      const el = listRef.current;
+                      if (el) el.scrollTop = el.scrollHeight;
+                      stickToBottom.current = true;
+                      setJumpChip(false);
+                    }}
+                    style={{
+                      fontSize: 12, fontWeight: 600, cursor: "pointer",
+                      padding: "6px 14px", border: "1px solid var(--color-accent)",
+                      background: "var(--color-bg)", color: "var(--color-accent)"
+                    }}>
+                    ↓ New messages
+                  </button>
+                </div>
+              )}
             </>
           )}
         </div>
@@ -715,31 +1062,56 @@ export function TeamChatScreen({ currentUser }) {
               <button onClick={dropAttachment} aria-label="Remove the picture" title="Remove the picture" style={{ ...tinyBtn, fontSize: 15 }}>×</button>
             </div>
           )}
-          <div style={{ display: "flex", gap: 8, alignItems: "flex-end" }}>
-            <input ref={fileRef} type="file" accept="image/*" onChange={pickFile} style={{ display: "none" }} />
-            <Btn variant="secondary" onClick={() => fileRef.current && fileRef.current.click()} disabled={sending} title="Attach a picture">
-              Photo
-            </Btn>
-            <Btn variant="secondary" onClick={() => setGifOpen(true)} disabled={sending} title="Search and send a GIF">
-              GIF
-            </Btn>
-            <textarea
-              value={draft}
-              onChange={e => setDraft(e.target.value)}
-              onKeyDown={e => {
-                // Enter sends; Shift+Enter makes a line break.
-                if (e.key === "Enter" && !e.shiftKey) { e.preventDefault(); send(); }
-              }}
-              placeholder="Message the crew…"
-              rows={2}
-              maxLength={4000}
-              className="input"
-              style={{ flex: 1, resize: "none", minHeight: 46, lineHeight: 1.45 }}
-            />
-            <Btn variant="primary" onClick={send} disabled={sending || (!draft.trim() && !attach)}>
-              {sending ? "Sending…" : "Send"}
-            </Btn>
-          </div>
+          {replyTarget && (
+            <div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 8, fontSize: 12, borderLeft: "2px solid color-mix(in srgb, var(--color-accent) 55%, transparent)", paddingLeft: 8 }}>
+              <span style={{ flex: 1, minWidth: 0, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
+                Replying to <span style={{ color: "var(--color-accent)", fontWeight: 600 }}>{replyTarget.name || "Someone"}</span>
+                <span style={{ color: muted }}> — {replyTarget.body || (replyTarget.imageKey ? "(picture)" : replyTarget.gifUrl ? "(GIF)" : replyTarget.audioKey ? "(voice note)" : "")}</span>
+              </span>
+              <button onClick={() => setReplyTarget(null)} aria-label="Cancel the reply" title="Cancel the reply" style={{ ...tinyBtn, fontSize: 15 }}>×</button>
+            </div>
+          )}
+          {recording ? (
+            <div style={{ display: "flex", gap: 8, alignItems: "center" }}>
+              <span style={{ color: "var(--color-accent)", fontWeight: 600, fontVariantNumeric: "tabular-nums", flex: "none" }}>
+                ● {Math.floor(recElapsed / 60)}:{String(recElapsed % 60).padStart(2, "0")}
+              </span>
+              <span style={{ fontSize: 12, color: muted, flex: 1 }}>Recording — up to two minutes.</span>
+              <Btn variant="secondary" onClick={() => stopRecording(false)}>Cancel</Btn>
+              <Btn variant="primary" onClick={() => stopRecording(true)}>Send</Btn>
+            </div>
+          ) : (
+            <div style={{ display: "flex", gap: 8, alignItems: "flex-end", flexWrap: "wrap" }}>
+              <input ref={fileRef} type="file" accept="image/*" onChange={pickFile} style={{ display: "none" }} />
+              <Btn variant="secondary" onClick={() => fileRef.current && fileRef.current.click()} disabled={sending} title="Attach a picture">
+                Photo
+              </Btn>
+              <Btn variant="secondary" onClick={() => setGifOpen(true)} disabled={sending} title="Search and send a GIF">
+                GIF
+              </Btn>
+              {canRecord && (
+                <Btn variant="secondary" onClick={startRecording} disabled={sending} title="Record a voice note">
+                  Mic
+                </Btn>
+              )}
+              <textarea
+                value={draft}
+                onChange={e => setDraft(e.target.value)}
+                onKeyDown={e => {
+                  // Enter sends; Shift+Enter makes a line break.
+                  if (e.key === "Enter" && !e.shiftKey) { e.preventDefault(); send(); }
+                }}
+                placeholder="Message the crew…"
+                rows={2}
+                maxLength={4000}
+                className="input"
+                style={{ flex: 1, minWidth: 160, resize: "none", minHeight: 46, lineHeight: 1.45 }}
+              />
+              <Btn variant="primary" onClick={send} disabled={sending || (!draft.trim() && !attach)}>
+                {sending ? "Sending…" : "Send"}
+              </Btn>
+            </div>
+          )}
           {/* Said here because history quietly ending mid-scroll would
               otherwise read as a bug, not a policy — and likewise a live
               feed that is down reconnecting should say so, not just go

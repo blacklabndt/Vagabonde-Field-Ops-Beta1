@@ -36,7 +36,7 @@ Deno.serve(async (req) => {
 
     const { data: msg, error } = await admin
       .from("chat_messages")
-      .select("id, profile_id, body, image_key, gif_url, created_at, profiles!profile_id(name, first_name, last_name)")
+      .select("id, profile_id, body, image_key, gif_url, audio_key, created_at, profiles!profile_id(name, first_name, last_name)")
       .eq("id", messageId)
       .maybeSingle();
     if (error) throw error;
@@ -50,7 +50,9 @@ Deno.serve(async (req) => {
     const text = (msg.body || "").trim();
     const body = text
       ? (text.length > 120 ? text.slice(0, 117) + "…" : text)
-      : msg.gif_url ? "sent a GIF" : "sent a picture";
+      : msg.gif_url ? "sent a GIF"
+      : msg.audio_key ? "sent a voice note"
+      : "sent a picture";
 
     const { data: subs, error: sErr } = await admin
       .from("push_subscriptions")

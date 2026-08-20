@@ -253,6 +253,21 @@ export function App() {
     Db.lastHazardRatings(currentUser.id).catch(() => {});
   }, [currentUser]);
 
+  // The chat badge: how many messages arrived since this person last had
+  // the room open, counted by one indexed RPC. Refreshed on sign-in, on
+  // returning to the app, and once a minute while it is visible; the chat
+  // screen zeroes it directly (onRead) the moment the room is read.
+  const [chatUnread, setChatUnread] = useState(0);
+  useEffect(() => {
+    if (!currentUser) return;
+    const refresh = () => { Db.chatUnreadCount().then(setChatUnread).catch(() => {}); };
+    refresh();
+    const timer = setInterval(() => { if (document.visibilityState === "visible") refresh(); }, 60000);
+    const onVisible = () => { if (document.visibilityState === "visible") refresh(); };
+    document.addEventListener("visibilitychange", onVisible);
+    return () => { clearInterval(timer); document.removeEventListener("visibilitychange", onVisible); };
+  }, [currentUser]);
+
   const loadMyTickets = async () => {
     setMyTicketsLoading(true);
     try { setMyTickets(await Db.listMyTickets(currentUser.id)); }
@@ -439,7 +454,7 @@ export function App() {
       body = <UsersAccessScreen currentUser={currentUser} />;
       break;
     case "chat":
-      body = <TeamChatScreen currentUser={currentUser} />;
+      body = <TeamChatScreen currentUser={currentUser} onOpenJob={openJob} onRead={() => setChatUnread(0)} />;
       break;
     default:
       body = (
@@ -503,6 +518,9 @@ export function App() {
                 {t.label}
                 {t.key === "mytickets" && openMyTicketsCount > 0 && (
                   <TagX variant="accent" style={{ marginLeft: 8 }}>{openMyTicketsCount}</TagX>
+                )}
+                {t.key === "chat" && chatUnread > 0 && (
+                  <TagX variant="accent" style={{ marginLeft: 8 }}>{chatUnread}</TagX>
                 )}
               </button>
             ))}

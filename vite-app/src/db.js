@@ -22,8 +22,13 @@ const FOLDER_MARKER = ".keep";
 const CHAT_PAGE = 100;
 // The sender join is spelled with its column hint: chat_messages points at
 // profiles twice (profile_id and pinned_by), and a bare `profiles(...)` made
-// PostgREST refuse the whole read as ambiguous.
-const CHAT_COLUMNS = "id, profile_id, body, image_key, gif_url, pinned_at, created_at, profiles!profile_id(name, first_name, last_name)";
+// PostgREST refuse the whole read as ambiguous. The quoted self-join gets
+// the same treatment for the same reason — reply_to points back at this
+// very table.
+const CHAT_COLUMNS =
+  "id, profile_id, body, image_key, gif_url, audio_key, reply_to, pinned_at, created_at, " +
+  "profiles!profile_id(name, first_name, last_name), " +
+  "quoted:chat_messages!reply_to(id, body, image_key, gif_url, audio_key, profiles!profile_id(name, first_name, last_name))";
 
 // One place that turns a timestamp into the "12 Feb 06:31" the tables use, and
 // returns "" rather than "Invalid Date" for a null column.
@@ -59,6 +64,17 @@ function shapeChatMessage(m) {
     body: m.body,
     imageKey: m.image_key || null,
     gifUrl: m.gif_url || null,
+    audioKey: m.audio_key || null,
+    replyTo: m.reply_to || null,
+    // The message this one answers, flattened to what the quote block
+    // shows. Realtime rows arrive without the join — the screen resolves
+    // those from messages it already holds.
+    quoted: m.quoted ? {
+      id: m.quoted.id,
+      name: m.quoted.profiles ? fullName(m.quoted.profiles) : "",
+      body: m.quoted.body || "",
+      label: m.quoted.image_key ? "(picture)" : m.quoted.gif_url ? "(GIF)" : m.quoted.audio_key ? "(voice note)" : ""
+    } : null,
     pinnedAt: m.pinned_at || null,
     createdAt: m.created_at,
     at: stamp(m.created_at)
@@ -2308,34 +2324,85 @@ export const Db = {
   // replaying it hours later would say it out of turn. Online-only,
   // fail soft — like the arcade.
   async listChatMessages(before) {
-    let q = sbClient
-      .from("chat_messages")
-      .select(CHAT_COLUMNS)
-      .order("created_at", { ascending: false })
-      .order("id", { ascending: false })
-      .limit(CHAT_PAGE);
-    if (before) q = q.lt("created_at", before);
-    const { data, error } = await q;
-    if (error) throw error;
-    // Fetched newest-first so the limit takes the right end, shown
-    // oldest-first because that is how a conversation reads.
-    return {
-      messages: (data || []).map(shapeChatMessage).reverse(),
-      hasMore: (data || []).length === CHAT_PAGE
+    const fetchPage = async () => {
+      let q = sbClient
+        .from("chat_messages")
+        .select(CHAT_COLUMNS)
+        .order("created_at", { ascending: false })
+        .order("id", { ascending: false })
+        .limit(CHAT_PAGE);
+      if (before) q = q.lt("created_at", before);
+      const { data, error } = await q;
+      if (error) throw error;
+      // Fetched newest-first so the limit takes the right end, shown
+      // oldest-first because that is how a conversation reads.
+      return {
+        messages: (data || []).map(shapeChatMessage).reverse(),
+        hasMore: (data || []).length === CHAT_PAGE
+      };
     };
+    // The latest page is kept for a dead zone: opening the chat with no
+    // signal shows the last conversation this device saw rather than an
+    // error. Reading only — sending stays online-only, on purpose.
+    return before ? fetchPage() : OfflineCache.readThrough("chat_room", fetchPage);
   },
 
   // The strip at the top of the room. Newest pin first, and capped — if
   // twenty things are pinned at once, the strip is no longer a strip.
   async listPinnedChatMessages() {
-    const { data, error } = await sbClient
-      .from("chat_messages")
-      .select(CHAT_COLUMNS)
-      .not("pinned_at", "is", null)
-      .order("pinned_at", { ascending: false })
-      .limit(20);
+    return OfflineCache.readThrough("chat_pins", async () => {
+      const { data, error } = await sbClient
+        .from("chat_messages")
+        .select(CHAT_COLUMNS)
+        .not("pinned_at", "is", null)
+        .order("pinned_at", { ascending: false })
+        .limit(20);
+      if (error) throw error;
+      return (data || []).map(shapeChatMessage);
+    });
+  },
+
+  // ── Unread bookkeeping ──────────────────────────────────────────────
+  // One bookmark per person; the badge is what arrived since, minus your
+  // own words. Counting is a single indexed RPC, cheap enough for the
+  // drawer to ask on a timer.
+  async chatUnreadCount() {
+    const { data, error } = await sbClient.rpc("chat_unread_count");
     if (error) throw error;
-    return (data || []).map(shapeChatMessage);
+    return data || 0;
+  },
+
+  async getChatLastRead(profileId) {
+    const { data, error } = await sbClient
+      .from("chat_reads").select("last_read_at").eq("profile_id", profileId).maybeSingle();
+    if (error) throw error;
+    return data ? data.last_read_at : null;
+  },
+
+  // Silent by design: reading a room is not a save anyone needs announced.
+  async markChatRead(profileId) {
+    const { error } = await sbClient
+      .from("chat_reads")
+      .upsert({ profile_id: profileId, last_read_at: new Date().toISOString() }, { onConflict: "profile_id" });
+    if (error) throw error;
+  },
+
+  // Every job number, for the chat's linkifier: a word in a message that
+  // matches one becomes a tap-through to the job. Paged because "all of
+  // them" always is, cached because the set barely moves.
+  async listJobNumbers() {
+    return cached("job_numbers", () =>
+      fetchAllPages(async page => {
+        const { data, error, count } = await sbClient
+          .from("jobs")
+          .select("job_number", { count: "exact" })
+          .order("job_number", { ascending: true })
+          .order("id", { ascending: true })
+          .range(page * 1000, page * 1000 + 999);
+        if (error) throw error;
+        return { rows: (data || []).map(j => j.job_number), total: count || 0 };
+      })
+    );
   },
 
   // One row with its sender's name — for a realtime arrival from somebody
@@ -2406,35 +2473,56 @@ export const Db = {
       .filter(Boolean);
   },
 
-  // Text, a picture, a GIF, or text with one of the two. The picture goes
-  // up first, under the sender's own folder (the storage policy holds
-  // everyone to theirs); if the message row is then refused, the upload
-  // is taken back down rather than stranded. A GIF is only ever a Tenor
-  // CDN URL — nothing of ours is uploaded for it.
-  async sendChatMessage(profileId, body, { imageFile, gifUrl } = {}) {
+  // Text, a picture, a GIF, or a voice note — with a reply pointer if it
+  // answers something. Media goes up first, under the sender's own folder
+  // (the storage policy holds everyone to theirs); if the message row is
+  // then refused, the upload is taken back down rather than stranded. A
+  // GIF is only ever a KLIPY CDN URL — nothing of ours is uploaded for it.
+  async sendChatMessage(profileId, body, { imageFile, gifUrl, audioFile, replyTo } = {}) {
     const text = String(body || "").trim();
-    if (!text && !imageFile && !gifUrl) throw new Error("Nothing to send.");
-    let imageKey = null;
-    if (imageFile) {
-      const ext = { "image/jpeg": "jpg", "image/png": "png", "image/webp": "webp", "image/gif": "gif" }[imageFile.type];
-      if (!ext) throw new Error("That file isn't a picture the chat can show — use a JPEG, PNG, WebP or GIF.");
-      imageKey = `${profileId}/${crypto.randomUUID()}.${ext}`;
+    if (!text && !imageFile && !gifUrl && !audioFile) throw new Error("Nothing to send.");
+    const uploaded = [];
+    const uploadMedia = async (file, extByType, refusal) => {
+      // MediaRecorder reports "audio/webm;codecs=opus" — the bucket and
+      // the extension both key on the base type.
+      const baseType = (file.type || "").split(";")[0];
+      const ext = extByType[baseType];
+      if (!ext) throw new Error(refusal);
+      const key = `${profileId}/${crypto.randomUUID()}.${ext}`;
       const { error: upErr } = await sbClient.storage
         .from("chat-media")
-        .upload(imageKey, imageFile, { contentType: imageFile.type });
+        .upload(key, file, { contentType: baseType });
       if (upErr) {
         throw /exceeded|maximum|too large|413/i.test(upErr.message || "")
-          ? new Error("That picture is too big to send — keep it under 8 MB.")
+          ? new Error("That file is too big to send — keep it under 8 MB.")
           : upErr;
       }
-    }
+      uploaded.push(key);
+      return key;
+    };
+
+    const imageKey = imageFile
+      ? await uploadMedia(imageFile,
+          { "image/jpeg": "jpg", "image/png": "png", "image/webp": "webp", "image/gif": "gif" },
+          "That file isn't a picture the chat can show — use a JPEG, PNG, WebP or GIF.")
+      : null;
+    const audioKey = audioFile
+      ? await uploadMedia(audioFile,
+          { "audio/webm": "webm", "audio/mp4": "m4a", "audio/mpeg": "mp3", "audio/ogg": "ogg" },
+          "That recording isn't a format the chat can play.")
+      : null;
+
     const { data, error } = await sbClient
       .from("chat_messages")
-      .insert({ profile_id: profileId, body: text.slice(0, 4000), image_key: imageKey, gif_url: gifUrl || null })
+      .insert({
+        profile_id: profileId, body: text.slice(0, 4000),
+        image_key: imageKey, gif_url: gifUrl || null, audio_key: audioKey,
+        reply_to: replyTo || null
+      })
       .select(CHAT_COLUMNS)
       .single();
     if (error) {
-      if (imageKey) sbClient.storage.from("chat-media").remove([imageKey]).then(() => {}, () => {});
+      if (uploaded.length) sbClient.storage.from("chat-media").remove(uploaded).then(() => {}, () => {});
       throw error;
     }
     return shapeChatMessage(data);
@@ -2464,21 +2552,21 @@ export const Db = {
   // to Admins only. (The RLS policy also lets an author delete their own
   // row — capability of the schema, deliberately wider than the UI.)
   async deleteChatMessage(id) {
-    // The picture's key has to be read before the row disappears — same
+    // The media keys have to be read before the row disappears — same
     // shape as deleteJha. No rows means already gone, which is the goal
     // state; a zero-row delete after that is a policy refusal.
     const { data: rows, error: readErr } = await sbClient
-      .from("chat_messages").select("image_key").eq("id", id);
+      .from("chat_messages").select("image_key, audio_key").eq("id", id);
     if (readErr) throw readErr;
     if (!rows || !rows.length) return;
-    const imageKey = rows[0].image_key;
+    const keys = [rows[0].image_key, rows[0].audio_key].filter(Boolean);
     const { data: gone, error } = await sbClient
       .from("chat_messages").delete().eq("id", id).select("id");
     if (error) throw error;
     if (!gone || !gone.length) throw new Error("Only an Admin can remove a message.");
-    if (imageKey) {
-      try { await sbClient.storage.from("chat-media").remove([imageKey]); }
-      catch (_) { /* the message is gone; an orphaned picture is invisible */ }
+    if (keys.length) {
+      try { await sbClient.storage.from("chat-media").remove(keys); }
+      catch (_) { /* the message is gone; orphaned media is invisible */ }
     }
   },
 
