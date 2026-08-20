@@ -1242,7 +1242,7 @@ export function TeamChatScreen({ currentUser, onOpenJob, onRead }) {
   }, [messages, isAdmin, currentUser.id, jobNums, entryMark, menuFor]);
 
   return (
-    <div className="page" style={{ maxWidth: 760 }}>
+    <div className="page chat-page" style={{ maxWidth: 760 }}>
       <Blueprint className="chat-card">
         {others.length > 0 && (
           <div style={{ borderBottom: "1px solid var(--color-divider)", padding: "6px 16px", display: "flex", alignItems: "center", gap: 6, flex: "none", fontSize: 11, color: muted }}>

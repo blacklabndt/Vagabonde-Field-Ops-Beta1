@@ -495,6 +495,19 @@ label.field-label-missing {
   height: min(72vh, 640px);
   height: min(72svh, 640px);
 }
+/* On a phone the room takes the whole screen below the bar — a chat that
+   stops at 72% reads as a widget, not a place. The subtraction is the
+   topbar (~47px) plus the page's top trim; the page keeps only a sliver
+   of bottom padding here, so the composer sits at the screen's edge.
+   svh keeps it still while the browser bar and keyboard come and go;
+   the env() term keeps it above an iPhone's home indicator. */
+@media (max-width: 760px) {
+  .chat-page { padding-bottom: 10px; }
+  .chat-card {
+    height: calc(100vh - 80px);
+    height: calc(100svh - 80px - env(safe-area-inset-bottom, 0px));
+  }
+}
 /* A new message rises into place, with a slight overshoot so the
    motion registers. The class is only ever put on rows that arrive
    while you watch: history mounts still, because eighty bubbles
