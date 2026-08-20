@@ -22,13 +22,15 @@ const FOLDER_MARKER = ".keep";
 const CHAT_PAGE = 100;
 // The sender join is spelled with its column hint: chat_messages points at
 // profiles twice (profile_id and pinned_by), and a bare `profiles(...)` made
-// PostgREST refuse the whole read as ambiguous. The quoted self-join gets
-// the same treatment for the same reason — reply_to points back at this
-// very table.
+// PostgREST refuse the whole read as ambiguous. The quoted self-join embeds
+// through the COLUMN name (`reply_to(...)`), which is PostgREST's way of
+// saying "the row this one points at" — the table-with-hint spelling read
+// the same relationship backwards and returned the row's CHILDREN as an
+// array, which rendered as the empty "Someone —" quote box.
 const CHAT_COLUMNS =
   "id, profile_id, body, image_key, gif_url, audio_key, file_key, file_name, reply_to, pinned_at, created_at, " +
   "profiles!profile_id(name, first_name, last_name), " +
-  "quoted:chat_messages!reply_to(id, body, image_key, gif_url, audio_key, file_name, profiles!profile_id(name, first_name, last_name)), " +
+  "quoted:reply_to(id, body, image_key, gif_url, audio_key, file_name, profiles!profile_id(name, first_name, last_name)), " +
   "reactions:chat_reactions(emoji, profile_id)";
 
 // One place that turns a timestamp into the "12 Feb 06:31" the tables use, and
@@ -75,8 +77,10 @@ function shapeChatMessage(m) {
     reactions: m.reactions ? m.reactions.map(r => ({ emoji: r.emoji, profileId: r.profile_id })) : null,
     // The message this one answers, flattened to what the quote block
     // shows. Realtime rows arrive without the join — the screen resolves
-    // those from messages it already holds.
-    quoted: m.quoted ? {
+    // those from messages it already holds. The Array guard is armour
+    // against the backwards self-embed ever coming back: children-as-
+    // array must never render as an empty quote.
+    quoted: m.quoted && !Array.isArray(m.quoted) ? {
       id: m.quoted.id,
       name: m.quoted.profiles ? fullName(m.quoted.profiles) : "",
       body: m.quoted.body || "",
