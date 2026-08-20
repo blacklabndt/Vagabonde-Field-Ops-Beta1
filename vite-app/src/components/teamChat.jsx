@@ -68,6 +68,11 @@ const inOrder = (a, b) =>
 // take the incoming pin state. Returning `prev` untouched when nothing
 // changed keeps the timer's refresh from re-rendering a quiet room.
 const reactionsKey = arr => (arr || []).map(r => r.emoji + r.profileId).sort().join("|");
+// Quotes compare by what they say, not whether they exist: the realtime
+// path builds a provisional quote (sometimes before the sender's name is
+// resolvable) and the follow-up fetch corrects it — a presence-only diff
+// was throwing that correction away, leaving "Someone" on screen.
+const quotedKey = q => q ? `${q.name}|${q.body || q.label || ""}` : "";
 
 function mergeIn(prev, incoming) {
   const by = new Map(prev.map(m => [m.id, m]));
@@ -82,11 +87,13 @@ function mergeIn(prev, incoming) {
     const merged = {
       ...m,
       name: m.name || cur.name,
-      quoted: m.quoted || cur.quoted,
+      // A quote with a name beats one without: the incoming copy wins
+      // unless it's the nameless provisional and we already have better.
+      quoted: m.quoted && (m.quoted.name || !cur.quoted || !cur.quoted.name) ? m.quoted : cur.quoted,
       reactions: m.reactions != null ? m.reactions : cur.reactions
     };
     if (merged.name !== cur.name || merged.pinnedAt !== cur.pinnedAt ||
-        !!merged.quoted !== !!cur.quoted ||
+        quotedKey(merged.quoted) !== quotedKey(cur.quoted) ||
         reactionsKey(merged.reactions) !== reactionsKey(cur.reactions)) {
       by.set(m.id, merged);
       changed = true;
