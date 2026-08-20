@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useLayoutEffect, useRef } from "react";
+import React, { useState, useEffect, useLayoutEffect, useMemo, useRef } from "react";
 import { Db } from "../db.js";
 import { Blueprint, Btn, Dialog, ErrorBox, Loading, Switch } from "./common.jsx";
 
@@ -246,9 +246,11 @@ export function TeamChatScreen({ currentUser }) {
   const [sending, setSending] = useState(false);
   const [sendError, setSendError] = useState("");
   // Whether the realtime feed is actually delivering. False is not an
-  // error state — the 30-second refresh still carries the room — but it
-  // is said out loud below the composer instead of being invisible.
+  // error state — the poll still carries the room — but it is said out
+  // loud below the composer instead of being invisible. The ref mirrors
+  // it for the interval, whose closure only ever saw the first render.
   const [feedLive, setFeedLive] = useState(false);
+  const feedLiveRef = useRef(false);
   // The full-screen viewer: the URL it shows, or null when closed.
   const [lightbox, setLightbox] = useState(null);
   // "unsupported" hides the switch; "blocked"/"off"/"on" render it.
@@ -355,11 +357,12 @@ export function TeamChatScreen({ currentUser }) {
         },
         onStatus: status => {
           if (!live || mine !== feedSeq) return;
-          setFeedLive(status === "SUBSCRIBED");
+          feedLiveRef.current = status === "SUBSCRIBED";
+          setFeedLive(feedLiveRef.current);
           if (status === "SUBSCRIBED") {
             // Whatever was said while the feed was down arrived nowhere —
             // pull it now rather than waiting out the poll interval.
-            loadLatest(false);
+            politeRefresh();
             return;
           }
           if ((status === "CHANNEL_ERROR" || status === "TIMED_OUT" || status === "CLOSED") && !resubTimer) {
@@ -375,13 +378,32 @@ export function TeamChatScreen({ currentUser }) {
     };
     startFeed();
 
+    // One refresh, however many things ask for it at once: a phone
+    // waking up fires focus AND visibilitychange, and the feed usually
+    // reports SUBSCRIBED moments later — without the window that was
+    // three identical fetches for one unlock.
+    let lastPoll = 0;
+    function politeRefresh() {
+      const now = Date.now();
+      if (now - lastPoll < 5000) return;
+      lastPoll = now;
+      loadLatest(false);
+    }
+
+    // While realtime is delivering, the poll is only a safety sweep and
+    // runs every fourth tick; the moment the feed is down it is the
+    // room's only pulse, and every tick counts again.
+    let tick = 0;
     const timer = setInterval(() => {
-      if (document.visibilityState === "visible") loadLatest(false);
+      if (document.visibilityState !== "visible") return;
+      tick++;
+      if (feedLiveRef.current && tick % 4 !== 0) return;
+      politeRefresh();
     }, REFRESH_MS);
-    const onFocus = () => loadLatest(false);
+    const onFocus = () => politeRefresh();
     // Phones coming back from sleep fire visibilitychange, not focus —
     // and that return is exactly when the socket is most likely dead.
-    const onVisible = () => { if (document.visibilityState === "visible") loadLatest(false); };
+    const onVisible = () => { if (document.visibilityState === "visible") politeRefresh(); };
     window.addEventListener("focus", onFocus);
     document.addEventListener("visibilitychange", onVisible);
 
@@ -561,6 +583,72 @@ export function TeamChatScreen({ currentUser }) {
   const muted = "color-mix(in srgb, var(--color-text) 55%, transparent)";
   const tinyBtn = { background: "transparent", border: "none", cursor: "pointer", color: muted, padding: 2, lineHeight: 1 };
 
+  // The rows rebuild only when the messages do. Without this, every
+  // keystroke in the composer re-rendered a hundred bubbles — per-letter
+  // work a cold phone can feel. The handlers captured here only touch
+  // refs, functional setState and Db, so a captured copy never goes
+  // stale in any way that matters.
+  const messageRows = useMemo(() => messages.map((m, i) => {
+    const mine = m.profileId === currentUser.id;
+    const prev = messages[i - 1];
+    // A name-and-time line starts each run of messages: a new
+    // sender, or the same one back after half an hour away.
+    const newRun = !prev || prev.profileId !== m.profileId ||
+      new Date(m.createdAt) - new Date(prev.createdAt) > 30 * 60000;
+    return (
+      <div key={m.id}
+        className={quietIds.current.has(m.id) ? undefined : "chat-msg-in"}
+        style={{ display: "flex", flexDirection: "column", alignItems: mine ? "flex-end" : "flex-start", marginTop: newRun ? 14 : 3 }}>
+        {newRun && (
+          <div style={{ fontSize: 11, color: muted, padding: "0 2px", marginBottom: 3 }}>
+            {mine ? "You" : (m.name || "Someone")} · {m.at}
+          </div>
+        )}
+        <div style={{ display: "flex", alignItems: "center", gap: 6, flexDirection: mine ? "row-reverse" : "row", maxWidth: "86%" }}>
+          <div style={{
+            padding: "8px 12px", fontSize: 14, lineHeight: 1.45,
+            whiteSpace: "pre-wrap", overflowWrap: "anywhere",
+            background: mine
+              ? "color-mix(in srgb, var(--color-accent) 16%, transparent)"
+              : "color-mix(in srgb, var(--color-text) 7%, transparent)",
+            border: "1px solid " + (mine
+              ? "color-mix(in srgb, var(--color-accent) 35%, transparent)"
+              : "var(--color-divider)")
+          }}>
+            {m.gifUrl && (
+              // Straight off KLIPY's CDN — the constraint on the
+              // column is what keeps this an image host, not a
+              // tracking pixel.
+              <img src={m.gifUrl} alt="GIF" loading="lazy" onLoad={restick}
+                onClick={() => openImage(m)}
+                style={{ display: "block", maxWidth: "100%", maxHeight: 320, cursor: "zoom-in" }} />
+            )}
+            {m.imageKey && <ChatImage imageKey={m.imageKey} onSized={restick} onOpen={() => openImage(m)} />}
+            {m.body && <div style={m.imageKey || m.gifUrl ? { marginTop: 6 } : null}>{m.body}</div>}
+          </div>
+          {/* Moderation is an Admin's job — pin and delete
+              both. A tech's own messages stand as sent until
+              the 30-day sweep takes them. */}
+          {isAdmin && (
+            <span style={{ display: "flex", gap: 2, flexDirection: mine ? "row-reverse" : "row", flex: "none" }}>
+              <button onClick={() => togglePin(m)}
+                aria-label={m.pinnedAt ? "Unpin this message" : "Pin this message"}
+                title={m.pinnedAt ? "Unpin this message" : "Pin this message"}
+                style={{ ...tinyBtn, fontSize: 11, fontWeight: 600 }}>
+                {m.pinnedAt ? "Unpin" : "Pin"}
+              </button>
+              <button onClick={() => remove(m.id)} aria-label="Remove this message" title="Remove this message"
+                style={{ ...tinyBtn, fontSize: 15 }}>
+                ×
+              </button>
+            </span>
+          )}
+        </div>
+      </div>
+    );
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }), [messages, isAdmin, currentUser.id]);
+
   return (
     <div className="page" style={{ maxWidth: 760 }}>
       <Blueprint className="chat-card">
@@ -611,65 +699,7 @@ export function TeamChatScreen({ currentUser }) {
                   Nothing here yet — say hello.
                 </div>
               )}
-              {messages.map((m, i) => {
-                const mine = m.profileId === currentUser.id;
-                const prev = messages[i - 1];
-                // A name-and-time line starts each run of messages: a new
-                // sender, or the same one back after half an hour away.
-                const newRun = !prev || prev.profileId !== m.profileId ||
-                  new Date(m.createdAt) - new Date(prev.createdAt) > 30 * 60000;
-                return (
-                  <div key={m.id}
-                    className={quietIds.current.has(m.id) ? undefined : "chat-msg-in"}
-                    style={{ display: "flex", flexDirection: "column", alignItems: mine ? "flex-end" : "flex-start", marginTop: newRun ? 14 : 3 }}>
-                    {newRun && (
-                      <div style={{ fontSize: 11, color: muted, padding: "0 2px", marginBottom: 3 }}>
-                        {mine ? "You" : (m.name || "Someone")} · {m.at}
-                      </div>
-                    )}
-                    <div style={{ display: "flex", alignItems: "center", gap: 6, flexDirection: mine ? "row-reverse" : "row", maxWidth: "86%" }}>
-                      <div style={{
-                        padding: "8px 12px", fontSize: 14, lineHeight: 1.45,
-                        whiteSpace: "pre-wrap", overflowWrap: "anywhere",
-                        background: mine
-                          ? "color-mix(in srgb, var(--color-accent) 16%, transparent)"
-                          : "color-mix(in srgb, var(--color-text) 7%, transparent)",
-                        border: "1px solid " + (mine
-                          ? "color-mix(in srgb, var(--color-accent) 35%, transparent)"
-                          : "var(--color-divider)")
-                      }}>
-                        {m.gifUrl && (
-                          // Straight off KLIPY's CDN — the constraint on the
-                          // column is what keeps this an image host, not a
-                          // tracking pixel.
-                          <img src={m.gifUrl} alt="GIF" loading="lazy" onLoad={restick}
-                            onClick={() => openImage(m)}
-                            style={{ display: "block", maxWidth: "100%", maxHeight: 320, cursor: "zoom-in" }} />
-                        )}
-                        {m.imageKey && <ChatImage imageKey={m.imageKey} onSized={restick} onOpen={() => openImage(m)} />}
-                        {m.body && <div style={m.imageKey || m.gifUrl ? { marginTop: 6 } : null}>{m.body}</div>}
-                      </div>
-                      {/* Moderation is an Admin's job — pin and delete
-                          both. A tech's own messages stand as sent until
-                          the 30-day sweep takes them. */}
-                      {isAdmin && (
-                        <span style={{ display: "flex", gap: 2, flexDirection: mine ? "row-reverse" : "row", flex: "none" }}>
-                          <button onClick={() => togglePin(m)}
-                            aria-label={m.pinnedAt ? "Unpin this message" : "Pin this message"}
-                            title={m.pinnedAt ? "Unpin this message" : "Pin this message"}
-                            style={{ ...tinyBtn, fontSize: 11, fontWeight: 600 }}>
-                            {m.pinnedAt ? "Unpin" : "Pin"}
-                          </button>
-                          <button onClick={() => remove(m.id)} aria-label="Remove this message" title="Remove this message"
-                            style={{ ...tinyBtn, fontSize: 15 }}>
-                            ×
-                          </button>
-                        </span>
-                      )}
-                    </div>
-                  </div>
-                );
-              })}
+              {messageRows}
             </>
           )}
         </div>
