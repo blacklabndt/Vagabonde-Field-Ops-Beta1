@@ -454,6 +454,9 @@ export function TeamChatScreen({ currentUser, onOpenJob, onRead }) {
   const [others, setOthers] = useState([]);
   // The Files-page picker, and its browse position.
   const [fileOpen, setFileOpen] = useState(false);
+  // A pinned message opened whole — the strip shows headlines, this
+  // shows the story.
+  const [pinView, setPinView] = useState(null);
 
   const listRef = useRef(null);
   const fileRef = useRef(null);
@@ -1305,14 +1308,22 @@ export function TeamChatScreen({ currentUser, onOpenJob, onRead }) {
             <div className="kicker" style={{ marginBottom: 6 }}>Pinned</div>
             {pins.map(p => (
               <div key={p.id} style={{ display: "flex", gap: 8, alignItems: "center", fontSize: 13, marginTop: 4 }}>
-                <span style={{ color: muted, flex: "none" }}>{p.name || "Someone"}:</span>
-                {(p.imageKey || p.gifUrl) && <PinThumb pin={p} onOpen={() => openImage(p)} />}
-                <span
-                  title={p.body}
-                  style={{ flex: 1, minWidth: 0, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}
+                {/* The whole row opens the full post — a strip line is a
+                    headline, not the story. Only the unpin × stays its
+                    own control. */}
+                <button
+                  onClick={() => setPinView(p)}
+                  title="Open the full message"
+                  style={{ display: "flex", gap: 8, alignItems: "center", flex: 1, minWidth: 0, padding: 0, background: "transparent", border: "none", cursor: "pointer", font: "inherit", color: "inherit", textAlign: "left" }}
                 >
-                  {p.body || (p.audioKey ? "(voice note)" : "")}
-                </span>
+                  <span style={{ color: muted, flex: "none" }}>{p.name || "Someone"}:</span>
+                  {(p.imageKey || p.gifUrl) && <PinThumb pin={p} onOpen={() => setPinView(p)} />}
+                  <span
+                    style={{ flex: 1, minWidth: 0, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}
+                  >
+                    {p.body || (p.audioKey ? "(voice note)" : "")}
+                  </span>
+                </button>
                 {isAdmin && (
                   <button onClick={() => togglePin(p)} aria-label="Take this pin down" title="Take this pin down"
                     style={{ ...tinyBtn, fontSize: 15, flex: "none" }}>
@@ -1481,6 +1492,76 @@ export function TeamChatScreen({ currentUser, onOpenJob, onRead }) {
       )}
       {gifOpen && <GifPicker onPick={sendGif} onClose={() => setGifOpen(false)} busy={sending} />}
       {fileOpen && <FilePickerDialog onPick={sendFile} onClose={() => setFileOpen(false)} busy={sending} />}
+      {pinView && (
+        <Dialog
+          title="Pinned message"
+          maxWidth={520}
+          onClose={() => setPinView(null)}
+          actions={<>
+            {isAdmin && (
+              <Btn variant="secondary" onClick={() => { setPinView(null); togglePin(pinView); }}>
+                Unpin
+              </Btn>
+            )}
+            <Btn variant="primary" onClick={() => setPinView(null)}>Close</Btn>
+          </>}
+        >
+          <div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 12 }}>
+            <span aria-hidden="true" style={{
+              width: 24, height: 24, display: "grid", placeItems: "center", flex: "none",
+              fontSize: 10, fontWeight: 700,
+              color: chipHue(pinView.profileId),
+              background: `color-mix(in srgb, ${chipHue(pinView.profileId)} 20%, transparent)`,
+              border: `1px solid color-mix(in srgb, ${chipHue(pinView.profileId)} 45%, transparent)`
+            }}>
+              {initialsOf(pinView.name || "").slice(0, 2) || "•"}
+            </span>
+            <span style={{ fontWeight: 600 }}>{pinView.name || "Someone"}</span>
+            <span style={{ fontSize: 12, color: muted }}>{pinView.at}</span>
+          </div>
+          {pinView.quoted && (
+            <div style={{
+              marginBottom: 10, padding: "4px 8px", fontSize: 12,
+              borderLeft: "2px solid color-mix(in srgb, var(--color-accent) 55%, transparent)",
+              background: "color-mix(in srgb, var(--color-text) 5%, transparent)"
+            }}>
+              <span style={{ color: "var(--color-accent)", fontWeight: 600 }}>{pinView.quoted.name || "Someone"}</span>
+              <span style={{ color: muted }}> — {pinView.quoted.body || pinView.quoted.label}</span>
+            </div>
+          )}
+          {pinView.gifUrl && (
+            <img src={pinView.gifUrl} alt="GIF" onClick={() => openImage(pinView)}
+              style={{ display: "block", maxWidth: "100%", maxHeight: 320, cursor: "zoom-in", marginBottom: 10 }} />
+          )}
+          {pinView.imageKey && (
+            <div style={{ marginBottom: 10 }}>
+              <ChatImage imageKey={pinView.imageKey} onOpen={() => openImage(pinView)} />
+            </div>
+          )}
+          {pinView.audioKey && (
+            <div style={{ marginBottom: 10 }}>
+              <ChatAudio audioKey={pinView.audioKey} />
+            </div>
+          )}
+          {pinView.fileKey && (
+            <button onClick={() => openSharedFile(pinView)}
+              title="Open this file from the Files page"
+              style={{ display: "flex", alignItems: "center", gap: 8, padding: 0, marginBottom: 10, background: "transparent", border: "none", cursor: "pointer", font: "inherit", color: "inherit", textAlign: "left", maxWidth: "100%" }}>
+              <span style={{ flex: "none", fontSize: 9, fontWeight: 700, letterSpacing: ".06em", padding: "3px 5px", border: "1px solid color-mix(in srgb, var(--color-accent) 55%, transparent)", color: "var(--color-accent)" }}>
+                {(pinView.fileName.split(".").pop() || "file").toUpperCase().slice(0, 4)}
+              </span>
+              <span style={{ textDecoration: "underline", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
+                {pinView.fileName}
+              </span>
+            </button>
+          )}
+          {pinView.body && (
+            <div style={{ fontSize: 14, lineHeight: 1.5, whiteSpace: "pre-wrap", overflowWrap: "anywhere" }}>
+              {renderBody(pinView.body)}
+            </div>
+          )}
+        </Dialog>
+      )}
       {lightbox && <Lightbox src={lightbox} onClose={() => setLightbox(null)} />}
     </div>
   );
