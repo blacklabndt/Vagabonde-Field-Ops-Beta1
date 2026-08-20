@@ -474,8 +474,9 @@ export const Db = {
     });
     if (error) throw error;
     // The board, the job itself and its history are all now wrong on this
-    // device, and the deleted job must not come back from the cache.
-    invalidate("jobs.recent");
+    // device, and the deleted job must not come back from the cache — nor
+    // should the chat keep linkifying its number.
+    invalidate("jobs.recent", "job_numbers");
     await OfflineCache.remove("job." + jobId);
     await OfflineCache.remove("jhas." + jobId);
     await OfflineCache.remove("reports." + jobId);
@@ -762,6 +763,9 @@ export const Db = {
       if (isDuplicateJobNumber(error)) throw new Error(jobNumberTakenMessage(jobNumber));
       throw error;
     }
+    // The chat's linkifier caches the number list; a just-created job
+    // should linkify on the next chat visit, not after a TTL.
+    invalidate("job_numbers");
 
     // Write contacts back to the directory — persisted server-side now,
     // not localStorage, so the next job for this client/contractor is

@@ -1,17 +1,21 @@
 import React, { useState, useEffect, useLayoutEffect, useMemo, useRef } from "react";
 import { Db } from "../db.js";
 import { initialsOf } from "../data.js";
+// The merge every message path funnels through — see chatMerge.js,
+// where the regression tests hold the door on the "Someone" bug.
+import { mergeIn } from "../chatMerge.js";
 import { Blueprint, Btn, Dialog, ErrorBox, Loading, Switch } from "./common.jsx";
 
 // Team chat — one room for the whole crew.
 //
 // Three feeds keep the room current, cheapest first: the realtime
-// subscription carries messages (and pin changes) as they land; a
-// 30-second merge-refresh catches anything a silently dropped websocket
-// missed, which on a lease with one bar of signal is a when, not an if;
-// and regaining focus refreshes immediately, because that is the moment
-// somebody is looking. Everything funnels through one id-keyed merge, so
-// no path can double a message another path already delivered.
+// subscription carries messages (and pin and reaction changes) as they
+// land; a polling sweep catches anything a silently dropped websocket
+// missed — every 30 seconds while the feed is down, every two minutes
+// as a safety net while it is delivering; and regaining focus refreshes
+// immediately, because that is the moment somebody is looking.
+// Everything funnels through one id-keyed merge, so no path can double
+// a message another path already delivered.
 //
 // Admins can pin a message to a strip at the top of the room. A message
 // can also carry a picture — photos and GIFs — which big phone cameras
@@ -58,49 +62,6 @@ async function shrinkForChat(file) {
   }
 }
 
-// Messages sorted as the room reads them: oldest first, ties on the id so
-// the order is stable however they arrived.
-const inOrder = (a, b) =>
-  a.createdAt < b.createdAt ? -1 : a.createdAt > b.createdAt ? 1 : a.id < b.id ? -1 : 1;
-
-// Every path into the list goes through here. New ids are added in order;
-// known ids keep their name when the incoming copy lacks the join, and
-// take the incoming pin state. Returning `prev` untouched when nothing
-// changed keeps the timer's refresh from re-rendering a quiet room.
-const reactionsKey = arr => (arr || []).map(r => r.emoji + r.profileId).sort().join("|");
-// Quotes compare by what they say, not whether they exist: the realtime
-// path builds a provisional quote (sometimes before the sender's name is
-// resolvable) and the follow-up fetch corrects it — a presence-only diff
-// was throwing that correction away, leaving "Someone" on screen.
-const quotedKey = q => q ? `${q.name}|${q.body || q.label || ""}` : "";
-
-function mergeIn(prev, incoming) {
-  const by = new Map(prev.map(m => [m.id, m]));
-  let changed = false;
-  for (const m of incoming) {
-    const cur = by.get(m.id);
-    if (!cur) { by.set(m.id, m); changed = true; continue; }
-    // A realtime copy arrives without the joins — keep whatever name,
-    // quote and reactions the row already resolved rather than blanking
-    // them. Reactions: null means "this copy didn't carry them"; an
-    // actual array (a poll row) is authoritative either way.
-    const merged = {
-      ...m,
-      name: m.name || cur.name,
-      // A quote with a name beats one without: the incoming copy wins
-      // unless it's the nameless provisional and we already have better.
-      quoted: m.quoted && (m.quoted.name || !cur.quoted || !cur.quoted.name) ? m.quoted : cur.quoted,
-      reactions: m.reactions != null ? m.reactions : cur.reactions
-    };
-    if (merged.name !== cur.name || merged.pinnedAt !== cur.pinnedAt ||
-        quotedKey(merged.quoted) !== quotedKey(cur.quoted) ||
-        reactionsKey(merged.reactions) !== reactionsKey(cur.reactions)) {
-      by.set(m.id, merged);
-      changed = true;
-    }
-  }
-  return changed ? [...by.values()].sort(inOrder) : prev;
-}
 
 // Whether this device asked for stillness — checked once; the smooth
 // scrolls fall back to instant jumps for it.
@@ -1321,7 +1282,7 @@ export function TeamChatScreen({ currentUser, onOpenJob, onRead }) {
                   <span
                     style={{ flex: 1, minWidth: 0, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}
                   >
-                    {p.body || (p.audioKey ? "(voice note)" : "")}
+                    {p.body || (p.audioKey ? "(voice note)" : "") || p.fileName || ""}
                   </span>
                 </button>
                 {isAdmin && (

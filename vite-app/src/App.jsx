@@ -64,6 +64,13 @@ export function App() {
   const [screen, setScreen] = useState(() =>
     new URLSearchParams(window.location.search).get("goto") === "chat" ? "chat" : "board"
   );
+  // The goto parameter is a one-time instruction, consumed above — left
+  // in the URL it would re-route every later manual reload to the chat.
+  useEffect(() => {
+    if (window.location.search.includes("goto=")) {
+      window.history.replaceState({}, "", window.location.pathname);
+    }
+  }, []);
   const [menuOpen, setMenuOpen] = useState(false);
   const [theme, setTheme] = useState(() => Store.load("theme", "light"));
 
