@@ -103,27 +103,27 @@ export function HomeScreen({ onCreateJob, onOpenJob, onStartTicket, currentUser,
 
   return (
     <div className="page">
-      <div style={{ display: "flex", alignItems: "flex-end", marginBottom: 20, gap: 16, flexWrap: "wrap" }}>
-        <div>
-          <h2 style={{ fontSize: 34, margin: 0 }}>{today}</h2>
-        </div>
-        <div style={{ marginLeft: "auto", display: "flex", gap: 8 }}>
-          {/* Raising a ticket used to mean finding the job on the board and
-              opening it first. From here it is two choices — whose job, and
-              which one — which is how a technician thinks about it at the end
-              of a day. */}
-          <Btn variant="secondary" style={{ whiteSpace: "nowrap" }} onClick={() => setShowNewTicket(true)}>+ New ticket</Btn>
-          <Btn variant="primary" style={{ whiteSpace: "nowrap" }} onClick={() => setShowNew(true)}>+ New job</Btn>
-        </div>
+      <div style={{ marginBottom: 20 }}>
+        <h2 style={{ fontSize: 34, margin: 0 }}>{today}</h2>
       </div>
 
-      {/* Filters, search and the count are one row: they are all the same
-          question — which of these jobs am I looking at. */}
+      {/* Filters, the new-work buttons, search and the count are one row:
+          on a phone the buttons sit right beside the pills instead of
+          stranded above them. Labels and padding are kept compact so the
+          five of them share a phone's width. */}
       <div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 14, flexWrap: "wrap" }}>
         <div style={{ display: "flex", gap: 6, flex: "none" }}>
           {FILTERS.map(f => (
             <button key={f} className={`pill${filter === f ? " active" : ""}`} onClick={() => setFilter(f)}>{f}</button>
           ))}
+        </div>
+        <div style={{ display: "flex", gap: 6, flex: "none" }}>
+          {/* Raising a ticket used to mean finding the job on the board and
+              opening it first. From here it is two choices — whose job, and
+              which one — which is how a technician thinks about it at the end
+              of a day. */}
+          <Btn variant="secondary" style={{ whiteSpace: "nowrap", fontSize: 14, padding: "8px 10px" }} onClick={() => setShowNewTicket(true)}>+ Ticket</Btn>
+          <Btn variant="primary" style={{ whiteSpace: "nowrap", fontSize: 14, padding: "8px 10px" }} onClick={() => setShowNew(true)}>+ Job</Btn>
         </div>
         <div style={{ position: "relative", flex: "1 1 260px", minWidth: 200 }}>
           <input
