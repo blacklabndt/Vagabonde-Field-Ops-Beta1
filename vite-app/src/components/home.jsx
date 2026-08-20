@@ -117,13 +117,16 @@ export function HomeScreen({ onCreateJob, onOpenJob, onStartTicket, currentUser,
             <button key={f} className={`pill${filter === f ? " active" : ""}`} onClick={() => setFilter(f)}>{f}</button>
           ))}
         </div>
-        <div style={{ display: "flex", gap: 6, flex: "none" }}>
+        {/* Pushed to the right edge; the pills hold the left. With the row
+            split that way there is width to spare, so the buttons keep
+            their full size. */}
+        <div style={{ display: "flex", gap: 6, flex: "none", marginLeft: "auto" }}>
           {/* Raising a ticket used to mean finding the job on the board and
               opening it first. From here it is two choices — whose job, and
               which one — which is how a technician thinks about it at the end
               of a day. */}
-          <Btn variant="secondary" style={{ whiteSpace: "nowrap", fontSize: 14, padding: "8px 10px" }} onClick={() => setShowNewTicket(true)}>+ Ticket</Btn>
-          <Btn variant="primary" style={{ whiteSpace: "nowrap", fontSize: 14, padding: "8px 10px" }} onClick={() => setShowNew(true)}>+ Job</Btn>
+          <Btn variant="secondary" style={{ whiteSpace: "nowrap" }} onClick={() => setShowNewTicket(true)}>+ Ticket</Btn>
+          <Btn variant="primary" style={{ whiteSpace: "nowrap" }} onClick={() => setShowNew(true)}>+ Job</Btn>
         </div>
         <div style={{ position: "relative", flex: "1 1 260px", minWidth: 200 }}>
           <input
