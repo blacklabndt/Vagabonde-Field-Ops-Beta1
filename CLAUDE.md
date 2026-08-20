@@ -81,6 +81,10 @@ Cloudflare Worker `solitary-snowflake-ee22` (assets + `/approve` proxy in
 - Verifying a deploy by fetching `/` can HIT Cloudflare's edge cache and
   show the previous index.html (query-string cache-busters don't help).
   Confirm instead that the newly hashed chunk files answer 200.
+- Never round-trip a source file through PowerShell 5.1 Get-Content/
+  Set-Content: BOM-less UTF-8 reads as ANSI and every em-dash, `·`, `…`
+  and emoji ships as mojibake (it cost teamChat.jsx 71 characters once).
+  Edit tool or a node script only.
 
 ## Live data
 

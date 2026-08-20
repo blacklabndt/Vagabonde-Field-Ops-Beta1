@@ -1,9 +1,9 @@
-﻿import React, { useState, useEffect, useLayoutEffect, useMemo, useRef } from "react";
+import React, { useState, useEffect, useLayoutEffect, useMemo, useRef } from "react";
 import { Db } from "../db.js";
 import { initialsOf } from "../data.js";
 import { Blueprint, Btn, Dialog, ErrorBox, Loading, Switch } from "./common.jsx";
 
-// Team chat â€” one room for the whole crew.
+// Team chat — one room for the whole crew.
 //
 // Three feeds keep the room current, cheapest first: the realtime
 // subscription carries messages (and pin changes) as they land; a
@@ -14,7 +14,7 @@ import { Blueprint, Btn, Dialog, ErrorBox, Loading, Switch } from "./common.jsx"
 // no path can double a message another path already delivered.
 //
 // Admins can pin a message to a strip at the top of the room. A message
-// can also carry a picture â€” photos and GIFs â€” which big phone cameras
+// can also carry a picture — photos and GIFs — which big phone cameras
 // make worth shrinking before they cross a field connection.
 //
 // Deliberately online-only (see Db.listChatMessages): a message that
@@ -30,7 +30,7 @@ const MAX_EDGE_PX = 1600;
 const KEEP_AS_IS_BYTES = 1.5 * 1024 * 1024;
 
 // A phone photo is 10MB+ of pixels nobody needs at chat size. Shrink to
-// 1600px JPEG before upload â€” except GIFs, whose animation a canvas
+// 1600px JPEG before upload — except GIFs, whose animation a canvas
 // would freeze, so they go up as they are (the bucket caps them at 8MB).
 async function shrinkForChat(file) {
   if (file.type === "image/gif") return file;
@@ -52,7 +52,7 @@ async function shrinkForChat(file) {
     const stem = (file.name || "photo").replace(/\.[^.]*$/, "");
     return new File([blob], stem + ".jpg", { type: "image/jpeg" });
   } catch (_) {
-    // A format this browser can't decode â€” send as-is and let the bucket
+    // A format this browser can't decode — send as-is and let the bucket
     // rules give the real answer.
     return file;
   }
@@ -70,7 +70,7 @@ const inOrder = (a, b) =>
 const reactionsKey = arr => (arr || []).map(r => r.emoji + r.profileId).sort().join("|");
 // Quotes compare by what they say, not whether they exist: the realtime
 // path builds a provisional quote (sometimes before the sender's name is
-// resolvable) and the follow-up fetch corrects it â€” a presence-only diff
+// resolvable) and the follow-up fetch corrects it — a presence-only diff
 // was throwing that correction away, leaving "Someone" on screen.
 const quotedKey = q => q ? `${q.name}|${q.body || q.label || ""}` : "";
 
@@ -80,7 +80,7 @@ function mergeIn(prev, incoming) {
   for (const m of incoming) {
     const cur = by.get(m.id);
     if (!cur) { by.set(m.id, m); changed = true; continue; }
-    // A realtime copy arrives without the joins â€” keep whatever name,
+    // A realtime copy arrives without the joins — keep whatever name,
     // quote and reactions the row already resolved rather than blanking
     // them. Reactions: null means "this copy didn't carry them"; an
     // actual array (a poll row) is authoritative either way.
@@ -102,15 +102,15 @@ function mergeIn(prev, incoming) {
   return changed ? [...by.values()].sort(inOrder) : prev;
 }
 
-// Whether this device asked for stillness â€” checked once; the smooth
+// Whether this device asked for stillness — checked once; the smooth
 // scrolls fall back to instant jumps for it.
 const REDUCED_MOTION = typeof matchMedia !== "undefined" &&
   matchMedia("(prefers-reduced-motion: reduce)").matches;
 
-// The curated reaction set â€” must match the chat_reactions check.
-const REACTION_SET = ["ðŸ‘", "â¤ï¸", "ðŸ˜‚", "ðŸ˜®", "ðŸ”¥", "ðŸ‘Œ"];
+// The curated reaction set — must match the chat_reactions check.
+const REACTION_SET = ["👍", "❤️", "😂", "😮", "🔥", "👌"];
 
-// The composer's icons â€” inline strokes that inherit the button's colour.
+// The composer's icons — inline strokes that inherit the button's colour.
 // GIF stays a word on purpose: no pictogram says "GIF" better than it
 // says itself.
 const iconProps = {
@@ -144,7 +144,7 @@ const IconSend = () => (
   </svg>
 );
 
-// One tint per person, picked by hashing their id â€” stable across
+// One tint per person, picked by hashing their id — stable across
 // devices with no table behind it. Muted hues that sit on both themes.
 const CHIP_HUES = ["#5980a6", "#6a8f5f", "#a67a59", "#8a6a9e", "#a05f6d", "#5f9a94"];
 function chipHue(id) {
@@ -184,7 +184,7 @@ function ChatAudio({ audioKey }) {
   return <audio controls preload="metadata" src={url} onError={onError} style={{ display: "block", width: 230, maxWidth: "100%" }} />;
 }
 
-// The GIF search. Opens on what's trending, then searches as you type â€”
+// The GIF search. Opens on what's trending, then searches as you type —
 // straight against KLIPY from this browser, as their terms require; the
 // Edge Function only hands over the app key (see Db.searchGifs). Tapping
 // a GIF sends it on its own; whatever is typed in the composer stays
@@ -215,17 +215,17 @@ function GifPicker({ onPick, onClose, busy }) {
         className="input"
         value={term}
         onChange={e => setTerm(e.target.value)}
-        placeholder="Search GIFsâ€¦"
+        placeholder="Search GIFs…"
         autoFocus
         style={{ marginBottom: 10 }}
       />
       {error ? (
         <ErrorBox>{error}</ErrorBox>
       ) : searching && gifs.length === 0 ? (
-        <Loading label="Finding GIFsâ€¦" />
+        <Loading label="Finding GIFs…" />
       ) : gifs.length === 0 ? (
         <div style={{ color: "color-mix(in srgb, var(--color-text) 55%, transparent)", padding: "16px 0" }}>
-          Nothing for that â€” try another word.
+          Nothing for that — try another word.
         </div>
       ) : (
         <div style={{
@@ -263,7 +263,7 @@ function GifPicker({ onPick, onClose, busy }) {
 }
 
 // Browse the Files page's shared bucket and pick one file to link into
-// the room. The chat only ever references these files â€” the Files page
+// the room. The chat only ever references these files — the Files page
 // keeps custody, so nothing here uploads, moves or deletes anything.
 function FilePickerDialog({ onPick, onClose, busy }) {
   const [prefix, setPrefix] = useState("");
@@ -303,7 +303,7 @@ function FilePickerDialog({ onPick, onClose, busy }) {
       {error ? (
         <ErrorBox>{error}</ErrorBox>
       ) : loading ? (
-        <Loading label="Listing filesâ€¦" />
+        <Loading label="Listing files…" />
       ) : listing.folders.length === 0 && listing.files.length === 0 ? (
         <div style={{ color: "color-mix(in srgb, var(--color-text) 55%, transparent)", padding: "14px 0" }}>
           Nothing in this folder.
@@ -331,7 +331,7 @@ function FilePickerDialog({ onPick, onClose, busy }) {
 }
 
 // A picture in a bubble. The bucket is private, so viewing means a signed
-// URL â€” minted on mount for the inline copy; opening it big goes through
+// URL — minted on mount for the inline copy; opening it big goes through
 // onOpen, which mints its own fresh link (see openImage below).
 function ChatImage({ imageKey, onSized, onOpen }) {
   const [url, setUrl] = useState("");
@@ -360,8 +360,8 @@ function ChatImage({ imageKey, onSized, onOpen }) {
   );
 }
 
-// The pinned strip's thumbnail. While the signed URL is on its way â€” or
-// if it never arrives â€” the old "(picture)" label stands in, so the row
+// The pinned strip's thumbnail. While the signed URL is on its way — or
+// if it never arrives — the old "(picture)" label stands in, so the row
 // always says what it holds.
 function PinThumb({ pin, onOpen }) {
   const [url, setUrl] = useState(pin.gifUrl || "");
@@ -387,7 +387,7 @@ function PinThumb({ pin, onOpen }) {
   );
 }
 
-// Any picture or GIF, the full screen. Tapping anywhere â€” or Escape â€”
+// Any picture or GIF, the full screen. Tapping anywhere — or Escape —
 // puts the room back.
 function Lightbox({ src, onClose }) {
   useEffect(() => {
@@ -407,7 +407,7 @@ function Lightbox({ src, onClose }) {
         aria-label="Close the picture"
         style={{ position: "absolute", top: 10, right: 14, background: "transparent", border: "none", color: "#f2f2f3", fontSize: 30, lineHeight: 1, cursor: "pointer", padding: 6 }}
       >
-        Ã—
+        ×
       </button>
     </div>
   );
@@ -426,7 +426,7 @@ export function TeamChatScreen({ currentUser, onOpenJob, onRead }) {
   const [sending, setSending] = useState(false);
   const [sendError, setSendError] = useState("");
   // Whether the realtime feed is actually delivering. False is not an
-  // error state â€” the poll still carries the room â€” but it is said out
+  // error state — the poll still carries the room — but it is said out
   // loud below the composer instead of being invisible. The ref mirrors
   // it for the interval, whose closure only ever saw the first render.
   const [feedLive, setFeedLive] = useState(false);
@@ -436,11 +436,11 @@ export function TeamChatScreen({ currentUser, onOpenJob, onRead }) {
   // "unsupported" hides the switch; "blocked"/"off"/"on" render it.
   const [pushState, setPushState] = useState("unsupported");
   const [pushBusy, setPushBusy] = useState(false);
-  // The message being answered â€” its quote rides the next send.
+  // The message being answered — its quote rides the next send.
   const [replyTarget, setReplyTarget] = useState(null);
-  // Which message's â‹¯ menu is open, if any.
+  // Which message's ⋯ menu is open, if any.
   const [menuFor, setMenuFor] = useState(null);
-  // Where this person had read up to when they walked in â€” the "new
+  // Where this person had read up to when they walked in — the "new
   // messages" line sits there and stays put while they catch up.
   const [entryMark, setEntryMark] = useState(null);
   // Every job number, uppercased, so a word in a message can be looked up.
@@ -448,7 +448,7 @@ export function TeamChatScreen({ currentUser, onOpenJob, onRead }) {
   // A voice note in progress: { startedAt } while the mic is hot.
   const [recording, setRecording] = useState(null);
   const [recElapsed, setRecElapsed] = useState(0);
-  // "â†“ new messages" â€” shown when something lands while scrolled up.
+  // "↓ new messages" — shown when something lands while scrolled up.
   const [jumpChip, setJumpChip] = useState(false);
   // Crewmates with the room open right now (never includes yourself).
   const [others, setOthers] = useState([]);
@@ -462,17 +462,17 @@ export function TeamChatScreen({ currentUser, onOpenJob, onRead }) {
   // cannot yank the history out from under them.
   const stickToBottom = useRef(true);
   // Set to the list's previous scrollHeight just before older messages are
-  // prepended â€” the layout effect uses it to hold the reader's place.
+  // prepended — the layout effect uses it to hold the reader's place.
   const restoreHeight = useRef(null);
   // Sender names for realtime arrivals, whose rows come without the join.
   const nameOf = useRef(new Map());
   // Rows that must mount without the entrance animation: everything the
   // initial load and the "Show earlier" pages bring in. A message not in
-  // this set is one that arrived while you were watching â€” those rise in.
+  // this set is one that arrived while you were watching — those rise in.
   const quietIds = useRef(new Set());
   // The recorder, its stream and its chunks while the mic is hot.
   const recRef = useRef(null);
-  // The last message's id as of the previous render â€” how an arrival
+  // The last message's id as of the previous render — how an arrival
   // while scrolled up is told apart from a prepend or a pin change.
   const prevTail = useRef(null);
   // onRead is an inline prop from App; the ref keeps the mount-time
@@ -496,7 +496,7 @@ export function TeamChatScreen({ currentUser, onOpenJob, onRead }) {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
-  // The linkifier's dictionary. Nothing to do until it arrives â€” messages
+  // The linkifier's dictionary. Nothing to do until it arrives — messages
   // render as plain text and upgrade when the list lands.
   useEffect(() => {
     let live = true;
@@ -509,7 +509,7 @@ export function TeamChatScreen({ currentUser, onOpenJob, onRead }) {
   const named = m => m.name ? m : { ...m, name: nameOf.current.get(m.profileId) || "" };
 
   // Pin state changes arrive as updates; the strip mirrors them. The list
-  // is rebuilt rather than patched â€” it is at most twenty rows.
+  // is rebuilt rather than patched — it is at most twenty rows.
   const applyPinChange = m => {
     setPins(prev => {
       const rest = prev.filter(p => p.id !== m.id);
@@ -554,7 +554,7 @@ export function TeamChatScreen({ currentUser, onOpenJob, onRead }) {
 
     loadLatest(true);
 
-    // The feed is rebuilt whenever its channel reports failure â€” the
+    // The feed is rebuilt whenever its channel reports failure — the
     // socket reconnects itself after a network drop or a realtime
     // service restart, but a channel that errored stays errored, and a
     // dead channel is indistinguishable from a quiet room. Each rebuild
@@ -591,7 +591,7 @@ export function TeamChatScreen({ currentUser, onOpenJob, onRead }) {
           const withName = named(m);
           setMessages(prev => {
             // A realtime row carries the reply pointer but not the quoted
-            // join â€” the quoted message is almost always already on screen.
+            // join — the quoted message is almost always already on screen.
             let inc = withName;
             if (inc.replyTo && !inc.quoted) {
               const q = prev.find(x => x.id === inc.replyTo);
@@ -605,7 +605,7 @@ export function TeamChatScreen({ currentUser, onOpenJob, onRead }) {
             return mergeIn(prev, [inc]);
           });
           // A sender the directory doesn't know, or a quote of something
-          // beyond the loaded page â€” one fetch fills either gap.
+          // beyond the loaded page — one fetch fills either gap.
           if (!withName.name || (withName.replyTo && !withName.quoted)) {
             Db.getChatMessage(m.id)
               .then(full => { if (live && full) setMessages(prev => mergeIn(prev, [full])); })
@@ -634,7 +634,7 @@ export function TeamChatScreen({ currentUser, onOpenJob, onRead }) {
           feedLiveRef.current = status === "SUBSCRIBED";
           setFeedLive(feedLiveRef.current);
           if (status === "SUBSCRIBED") {
-            // Whatever was said while the feed was down arrived nowhere â€”
+            // Whatever was said while the feed was down arrived nowhere —
             // pull it now rather than waiting out the poll interval.
             politeRefresh();
             return;
@@ -654,7 +654,7 @@ export function TeamChatScreen({ currentUser, onOpenJob, onRead }) {
 
     // One refresh, however many things ask for it at once: a phone
     // waking up fires focus AND visibilitychange, and the feed usually
-    // reports SUBSCRIBED moments later â€” without the window that was
+    // reports SUBSCRIBED moments later — without the window that was
     // three identical fetches for one unlock.
     let lastPoll = 0;
     function politeRefresh() {
@@ -675,7 +675,7 @@ export function TeamChatScreen({ currentUser, onOpenJob, onRead }) {
       politeRefresh();
     }, REFRESH_MS);
     const onFocus = () => politeRefresh();
-    // Phones coming back from sleep fire visibilitychange, not focus â€”
+    // Phones coming back from sleep fire visibilitychange, not focus —
     // and that return is exactly when the socket is most likely dead.
     const onVisible = () => { if (document.visibilityState === "visible") politeRefresh(); };
     window.addEventListener("focus", onFocus);
@@ -695,7 +695,7 @@ export function TeamChatScreen({ currentUser, onOpenJob, onRead }) {
   useEffect(() => () => { if (attach) URL.revokeObjectURL(attach.url); }, [attach]);
 
   // Instant for the room you walk into, eased for what arrives while
-  // you watch â€” unless the device asked for stillness.
+  // you watch — unless the device asked for stillness.
   const settled = useRef(false);
   const scrollBottom = smooth => {
     const el = listRef.current;
@@ -705,7 +705,7 @@ export function TeamChatScreen({ currentUser, onOpenJob, onRead }) {
   };
 
   // One scroll rule for every way the list changes: restore the reader's
-  // place after a prepend, follow the bottom if they were there â€” and if
+  // place after a prepend, follow the bottom if they were there — and if
   // they were up reading history when something new landed at the tail,
   // offer the way down instead of yanking them there.
   useLayoutEffect(() => {
@@ -726,7 +726,7 @@ export function TeamChatScreen({ currentUser, onOpenJob, onRead }) {
   }, [messages, loading]);
 
   // Pictures finish loading after the scroll rule has run and push the
-  // list taller â€” follow them down if the reader was at the bottom.
+  // list taller — follow them down if the reader was at the bottom.
   const restick = () => {
     const el = listRef.current;
     if (el && stickToBottom.current) el.scrollTop = el.scrollHeight;
@@ -792,9 +792,9 @@ export function TeamChatScreen({ currentUser, onOpenJob, onRead }) {
       setMessages(prev => mergeIn(prev, [sent]));
       buzz();
     } catch (e) {
-      // The draft and the picture stay in the composer â€” nothing was
+      // The draft and the picture stay in the composer — nothing was
       // said, nothing is lost.
-      setSendError(e.message || "Couldn't send that â€” check the connection and try again.");
+      setSendError(e.message || "Couldn't send that — check the connection and try again.");
     }
     setSending(false);
   };
@@ -816,7 +816,7 @@ export function TeamChatScreen({ currentUser, onOpenJob, onRead }) {
       buzz();
     } catch (e) {
       setGifOpen(false);
-      setSendError(e.message || "Couldn't send that GIF â€” check the connection and try again.");
+      setSendError(e.message || "Couldn't send that GIF — check the connection and try again.");
     }
     setSending(false);
   };
@@ -841,7 +841,7 @@ export function TeamChatScreen({ currentUser, onOpenJob, onRead }) {
       setPushState("on");
     } catch (e) {
       setSendError(e.message || "Couldn't turn notifications on.");
-      // Permission may have just been denied for good â€” re-read reality.
+      // Permission may have just been denied for good — re-read reality.
       Db.getChatPushState().then(setPushState).catch(() => {});
     }
     setPushBusy(false);
@@ -851,7 +851,7 @@ export function TeamChatScreen({ currentUser, onOpenJob, onRead }) {
   // iPhones ignore it silently, which is fine.
   const buzz = () => { if (navigator.vibrate) navigator.vibrate(10); };
 
-  // Place or take back a reaction. Optimistic â€” the realtime echo and
+  // Place or take back a reaction. Optimistic — the realtime echo and
   // the poll both agree with whatever the database settled on.
   const react = async (m, emoji) => {
     const had = (m.reactions || []).some(r => r.profileId === currentUser.id && r.emoji === emoji);
@@ -874,7 +874,7 @@ export function TeamChatScreen({ currentUser, onOpenJob, onRead }) {
   };
 
   // Share a file from the Files page: the message carries a reference,
-  // never the file â€” the Files page keeps sole custody.
+  // never the file — the Files page keeps sole custody.
   const sendFile = async f => {
     if (sending) return;
     setSending(true);
@@ -889,7 +889,7 @@ export function TeamChatScreen({ currentUser, onOpenJob, onRead }) {
       setMessages(prev => mergeIn(prev, [sent]));
       buzz();
     } catch (e) {
-      setSendError(e.message || "Couldn't share that file â€” check the connection and try again.");
+      setSendError(e.message || "Couldn't share that file — check the connection and try again.");
     }
     setSending(false);
   };
@@ -899,11 +899,11 @@ export function TeamChatScreen({ currentUser, onOpenJob, onRead }) {
     try {
       const url = await Db.sharedFileUrl(m.fileKey);
       // Opened after an await, so some browsers treat this as a non-user
-      // gesture and block it â€” fall back to same-tab navigation.
+      // gesture and block it — fall back to same-tab navigation.
       const win = window.open(url, "_blank", "noopener");
       if (!win) window.location.href = url;
     } catch (e) {
-      setSendError(e.message || "Couldn't open that file â€” it may have been deleted from Files.");
+      setSendError(e.message || "Couldn't open that file — it may have been deleted from Files.");
     }
   };
 
@@ -918,9 +918,9 @@ export function TeamChatScreen({ currentUser, onOpenJob, onRead }) {
     }
   };
 
-  // â”€â”€ Voice notes â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+  // ── Voice notes ───────────────────────────────────────────────────────
   // Typing with gloves on is miserable; talking isn't. Tap Mic, talk,
-  // send â€” capped at two minutes, which is a radio call, not a podcast.
+  // send — capped at two minutes, which is a radio call, not a podcast.
   const canRecord = typeof MediaRecorder !== "undefined" &&
     !!(navigator.mediaDevices && navigator.mediaDevices.getUserMedia);
 
@@ -939,7 +939,7 @@ export function TeamChatScreen({ currentUser, onOpenJob, onRead }) {
       setRecording({ startedAt: Date.now() });
       setRecElapsed(0);
     } catch (_) {
-      setSendError("Couldn't start recording â€” allow microphone access for the app and try again.");
+      setSendError("Couldn't start recording — allow microphone access for the app and try again.");
     }
   };
 
@@ -966,7 +966,7 @@ export function TeamChatScreen({ currentUser, onOpenJob, onRead }) {
         setMessages(prev => mergeIn(prev, [sent]));
         buzz();
       } catch (e) {
-        setSendError(e.message || "Couldn't send the voice note â€” check the connection and try again.");
+        setSendError(e.message || "Couldn't send the voice note — check the connection and try again.");
       }
       setSending(false);
     };
@@ -995,7 +995,7 @@ export function TeamChatScreen({ currentUser, onOpenJob, onRead }) {
     }
   }, []);
 
-  // â”€â”€ Job links â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+  // ── Job links ─────────────────────────────────────────────────────────
   // A word in a message that matches a real job number opens that job.
   // Membership, not pattern: job numbers here are freeform ("6969",
   // "J-5001"), so the only reliable test is "is it actually one".
@@ -1010,7 +1010,7 @@ export function TeamChatScreen({ currentUser, onOpenJob, onRead }) {
   };
 
   // Full screen for any message's picture or GIF. A stored picture gets
-  // a fresh signed URL at tap time â€” the one its thumbnail was minted
+  // a fresh signed URL at tap time — the one its thumbnail was minted
   // with may be minutes old, and an expired link at full screen is a
   // broken image, not a picture.
   const openImage = async m => {
@@ -1072,9 +1072,9 @@ export function TeamChatScreen({ currentUser, onOpenJob, onRead }) {
     return out;
   };
 
-  // The rows rebuild only when the room does â€” messages, the unread mark,
-  // the job dictionary, or an open â‹¯ menu. Without this, every keystroke
-  // in the composer re-rendered a hundred bubbles â€” per-letter work a
+  // The rows rebuild only when the room does — messages, the unread mark,
+  // the job dictionary, or an open ⋯ menu. Without this, every keystroke
+  // in the composer re-rendered a hundred bubbles — per-letter work a
   // cold phone can feel. The handlers captured here only touch refs,
   // functional setState and Db, so a captured copy never goes stale in
   // any way that matters.
@@ -1143,10 +1143,10 @@ export function TeamChatScreen({ currentUser, onOpenJob, onRead }) {
                 background: `color-mix(in srgb, ${hue} 20%, transparent)`,
                 border: `1px solid color-mix(in srgb, ${hue} 45%, transparent)`
               }}>
-                {initialsOf(m.name || "").slice(0, 2) || "â€¢"}
+                {initialsOf(m.name || "").slice(0, 2) || "•"}
               </span>
               <span style={{ fontSize: 11, color: muted }}>
-                {mine ? "You" : (m.name || "Someone")} Â· {new Date(m.createdAt).toLocaleTimeString("en-CA", { hour: "2-digit", minute: "2-digit", hour12: false })}
+                {mine ? "You" : (m.name || "Someone")} · {new Date(m.createdAt).toLocaleTimeString("en-CA", { hour: "2-digit", minute: "2-digit", hour12: false })}
               </span>
             </div>
           )}
@@ -1168,11 +1168,11 @@ export function TeamChatScreen({ currentUser, onOpenJob, onRead }) {
                   overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap", maxWidth: 320
                 }}>
                   <span style={{ color: "var(--color-accent)", fontWeight: 600 }}>{m.quoted.name || "Someone"}</span>
-                  <span style={{ color: muted }}> â€” {m.quoted.body || m.quoted.label}</span>
+                  <span style={{ color: muted }}> — {m.quoted.body || m.quoted.label}</span>
                 </div>
               )}
               {m.gifUrl && (
-                // Straight off KLIPY's CDN â€” the constraint on the column
+                // Straight off KLIPY's CDN — the constraint on the column
                 // is what keeps this an image host, not a tracking pixel.
                 // Media runs to the bubble's edges; only words get padding.
                 <img src={m.gifUrl} alt="GIF" loading="lazy" onLoad={restick}
@@ -1207,15 +1207,15 @@ export function TeamChatScreen({ currentUser, onOpenJob, onRead }) {
                 </div>
               )}
             </div>
-            {/* One quiet â‹¯ instead of a row of controls. Reply and the
-                reactions are for everyone; moderation â€” pin and delete â€”
+            {/* One quiet ⋯ instead of a row of controls. Reply and the
+                reactions are for everyone; moderation — pin and delete —
                 is an Admin's job. A tech's own messages stand as sent
                 until the 30-day sweep takes them. */}
             <button onClick={() => setMenuFor(menuFor === m.id ? null : m.id)}
               aria-label="Message actions" title="Message actions"
               aria-expanded={menuFor === m.id}
               style={{ ...tinyBtn, fontSize: 14, fontWeight: 700, flex: "none" }}>
-              â‹¯
+              ⋯
             </button>
           </div>
           {menuFor === m.id && (
@@ -1241,7 +1241,7 @@ export function TeamChatScreen({ currentUser, onOpenJob, onRead }) {
                 <button onClick={() => { setMenuFor(null); remove(m.id); }}
                   aria-label="Remove this message" title="Remove this message"
                   style={{ ...tinyBtn, fontSize: 15 }}>
-                  Ã—
+                  ×
                 </button>
               )}
             </div>
@@ -1250,7 +1250,7 @@ export function TeamChatScreen({ currentUser, onOpenJob, onRead }) {
             <div style={{ display: "flex", gap: 4, marginTop: 3, flexWrap: "wrap", justifyContent: mine ? "flex-end" : "flex-start" }}>
               {reactionGroups.map(g => (
                 <button key={g.emoji} onClick={() => react(m, g.emoji)}
-                  aria-label={g.emoji + " â€” " + g.count + (g.mine ? ", including you" : "")}
+                  aria-label={g.emoji + " — " + g.count + (g.mine ? ", including you" : "")}
                   title={g.mine ? "Tap to take yours back" : "Tap to react too"}
                   style={{
                     fontSize: 12, padding: "1px 7px", cursor: "pointer",
@@ -1290,7 +1290,7 @@ export function TeamChatScreen({ currentUser, onOpenJob, onRead }) {
                   background: `color-mix(in srgb, ${hue} 20%, transparent)`,
                   border: `1px solid color-mix(in srgb, ${hue} 45%, transparent)`
                 }}>
-                  {initialsOf(p.name || "").slice(0, 2) || "â€¢"}
+                  {initialsOf(p.name || "").slice(0, 2) || "•"}
                 </span>
               );
             })}
@@ -1316,7 +1316,7 @@ export function TeamChatScreen({ currentUser, onOpenJob, onRead }) {
                 {isAdmin && (
                   <button onClick={() => togglePin(p)} aria-label="Take this pin down" title="Take this pin down"
                     style={{ ...tinyBtn, fontSize: 15, flex: "none" }}>
-                    Ã—
+                    ×
                   </button>
                 )}
               </div>
@@ -1342,7 +1342,7 @@ export function TeamChatScreen({ currentUser, onOpenJob, onRead }) {
               {hasMore && (
                 <div style={{ textAlign: "center", marginBottom: 12 }}>
                   <Btn variant="secondary" onClick={loadOlder} disabled={loadingOlder}>
-                    {loadingOlder ? "Loadingâ€¦" : "Show earlier messages"}
+                    {loadingOlder ? "Loading…" : "Show earlier messages"}
                   </Btn>
                 </div>
               )}
@@ -1356,7 +1356,7 @@ export function TeamChatScreen({ currentUser, onOpenJob, onRead }) {
                     WebkitMaskPosition: "center", maskPosition: "center",
                     WebkitMaskSize: "contain", maskSize: "contain"
                   }} />
-                  Nothing here yet â€” say hello.
+                  Nothing here yet — say hello.
                 </div>
               )}
               {messageRows}
@@ -1373,7 +1373,7 @@ export function TeamChatScreen({ currentUser, onOpenJob, onRead }) {
                       padding: "6px 14px", border: "1px solid var(--color-accent)",
                       background: "var(--color-bg)", color: "var(--color-accent)"
                     }}>
-                    â†“ New messages
+                    ↓ New messages
                   </button>
                 </div>
               )}
@@ -1389,24 +1389,24 @@ export function TeamChatScreen({ currentUser, onOpenJob, onRead }) {
               <span style={{ fontSize: 12, color: muted, flex: 1, minWidth: 0, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
                 {attach.file.name}
               </span>
-              <button onClick={dropAttachment} aria-label="Remove the picture" title="Remove the picture" style={{ ...tinyBtn, fontSize: 15 }}>Ã—</button>
+              <button onClick={dropAttachment} aria-label="Remove the picture" title="Remove the picture" style={{ ...tinyBtn, fontSize: 15 }}>×</button>
             </div>
           )}
           {replyTarget && (
             <div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 8, fontSize: 12, borderLeft: "2px solid color-mix(in srgb, var(--color-accent) 55%, transparent)", paddingLeft: 8 }}>
               <span style={{ flex: 1, minWidth: 0, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
                 Replying to <span style={{ color: "var(--color-accent)", fontWeight: 600 }}>{replyTarget.name || "Someone"}</span>
-                <span style={{ color: muted }}> â€” {replyTarget.body || (replyTarget.imageKey ? "(picture)" : replyTarget.gifUrl ? "(GIF)" : replyTarget.audioKey ? "(voice note)" : "")}</span>
+                <span style={{ color: muted }}> — {replyTarget.body || (replyTarget.imageKey ? "(picture)" : replyTarget.gifUrl ? "(GIF)" : replyTarget.audioKey ? "(voice note)" : "")}</span>
               </span>
-              <button onClick={() => setReplyTarget(null)} aria-label="Cancel the reply" title="Cancel the reply" style={{ ...tinyBtn, fontSize: 15 }}>Ã—</button>
+              <button onClick={() => setReplyTarget(null)} aria-label="Cancel the reply" title="Cancel the reply" style={{ ...tinyBtn, fontSize: 15 }}>×</button>
             </div>
           )}
           {recording ? (
             <div style={{ display: "flex", gap: 8, alignItems: "center" }}>
               <span style={{ color: "var(--color-accent)", fontWeight: 600, fontVariantNumeric: "tabular-nums", flex: "none" }}>
-                â— {Math.floor(recElapsed / 60)}:{String(recElapsed % 60).padStart(2, "0")}
+                ● {Math.floor(recElapsed / 60)}:{String(recElapsed % 60).padStart(2, "0")}
               </span>
-              <span style={{ fontSize: 12, color: muted, flex: 1 }}>Recording â€” up to two minutes.</span>
+              <span style={{ fontSize: 12, color: muted, flex: 1 }}>Recording — up to two minutes.</span>
               <Btn variant="secondary" onClick={() => stopRecording(false)}>Cancel</Btn>
               <Btn variant="primary" onClick={() => stopRecording(true)}>Send</Btn>
             </div>
@@ -1438,7 +1438,7 @@ export function TeamChatScreen({ currentUser, onOpenJob, onRead }) {
                   // Enter sends; Shift+Enter makes a line break.
                   if (e.key === "Enter" && !e.shiftKey) { e.preventDefault(); send(); }
                 }}
-                placeholder="Message the crewâ€¦"
+                placeholder="Message the crew…"
                 rows={2}
                 maxLength={4000}
                 className="input"
@@ -1451,20 +1451,20 @@ export function TeamChatScreen({ currentUser, onOpenJob, onRead }) {
             </div>
           )}
           {/* Said here because history quietly ending mid-scroll would
-              otherwise read as a bug, not a policy â€” and likewise a live
+              otherwise read as a bug, not a policy — and likewise a live
               feed that is down reconnecting should say so, not just go
               quiet. One line, never wrapping: the text swapping was
               re-wrapping this line on phones, and the whole message pane
               pumped up and down with it. Truncation beats jitter. */}
           <div style={{ fontSize: 11, color: "color-mix(in srgb, var(--color-text) 45%, transparent)", marginTop: 6, whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>
             {loading || feedLive
-              ? "Messages clear after 30 days â€” pinned messages stay."
-              : "Live updates connecting â€” the room refreshes every 30 seconds meanwhile."}
+              ? "Messages clear after 30 days — pinned messages stay."
+              : "Live updates connecting — the room refreshes every 30 seconds meanwhile."}
           </div>
         </div>
       </Blueprint>
       {/* Below the room rather than in it: settings are not conversation.
-          Shown only while there is something to do â€” a device that can't
+          Shown only while there is something to do — a device that can't
           push (an iPhone not installed to the home screen) never sees it,
           and a device already subscribed is done with it. Turning
           notifications back off is the phone's own settings; a blocked
@@ -1474,7 +1474,7 @@ export function TeamChatScreen({ currentUser, onOpenJob, onRead }) {
         <div style={{ marginTop: 14, opacity: pushBusy ? 0.6 : 1 }}>
           <Switch on={false} onClick={enablePush} label="Notify me about new messages" />
           <div style={{ fontSize: 12, color: muted, marginTop: 4, maxWidth: 520 }}>
-            Sends a notification to this device when someone posts in the team chat â€” even with the
+            Sends a notification to this device when someone posts in the team chat — even with the
             app closed. The switch is per device: turn it on on every phone or tablet that should buzz.
           </div>
         </div>
