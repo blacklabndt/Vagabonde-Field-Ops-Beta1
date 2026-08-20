@@ -268,6 +268,15 @@ export function App() {
     return () => { clearInterval(timer); document.removeEventListener("visibilitychange", onVisible); };
   }, [currentUser]);
 
+  // The count on the installed app's own icon, where the OS shows it.
+  // Set alongside the drawer badge, cleared with it; browsers without
+  // the Badging API just never see this.
+  useEffect(() => {
+    if (!("setAppBadge" in navigator)) return;
+    if (chatUnread > 0) navigator.setAppBadge(chatUnread).catch(() => {});
+    else if ("clearAppBadge" in navigator) navigator.clearAppBadge().catch(() => {});
+  }, [chatUnread]);
+
   const loadMyTickets = async () => {
     setMyTicketsLoading(true);
     try { setMyTickets(await Db.listMyTickets(currentUser.id)); }

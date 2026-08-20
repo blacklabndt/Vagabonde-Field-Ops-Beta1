@@ -67,22 +67,41 @@ const inOrder = (a, b) =>
 // known ids keep their name when the incoming copy lacks the join, and
 // take the incoming pin state. Returning `prev` untouched when nothing
 // changed keeps the timer's refresh from re-rendering a quiet room.
+const reactionsKey = arr => (arr || []).map(r => r.emoji + r.profileId).sort().join("|");
+
 function mergeIn(prev, incoming) {
   const by = new Map(prev.map(m => [m.id, m]));
   let changed = false;
   for (const m of incoming) {
     const cur = by.get(m.id);
     if (!cur) { by.set(m.id, m); changed = true; continue; }
-    // A realtime copy arrives without the joins — keep whatever name and
-    // quote the row already resolved rather than blanking them.
-    const merged = { ...m, name: m.name || cur.name, quoted: m.quoted || cur.quoted };
-    if (merged.name !== cur.name || merged.pinnedAt !== cur.pinnedAt || !!merged.quoted !== !!cur.quoted) {
+    // A realtime copy arrives without the joins — keep whatever name,
+    // quote and reactions the row already resolved rather than blanking
+    // them. Reactions: null means "this copy didn't carry them"; an
+    // actual array (a poll row) is authoritative either way.
+    const merged = {
+      ...m,
+      name: m.name || cur.name,
+      quoted: m.quoted || cur.quoted,
+      reactions: m.reactions != null ? m.reactions : cur.reactions
+    };
+    if (merged.name !== cur.name || merged.pinnedAt !== cur.pinnedAt ||
+        !!merged.quoted !== !!cur.quoted ||
+        reactionsKey(merged.reactions) !== reactionsKey(cur.reactions)) {
       by.set(m.id, merged);
       changed = true;
     }
   }
   return changed ? [...by.values()].sort(inOrder) : prev;
 }
+
+// Whether this device asked for stillness — checked once; the smooth
+// scrolls fall back to instant jumps for it.
+const REDUCED_MOTION = typeof matchMedia !== "undefined" &&
+  matchMedia("(prefers-reduced-motion: reduce)").matches;
+
+// The curated reaction set — must match the chat_reactions check.
+const REACTION_SET = ["👍", "❤️", "😂", "😮", "🔥", "👌"];
 
 // One tint per person, picked by hashing their id — stable across
 // devices with no table behind it. Muted hues that sit on both themes.
@@ -180,8 +199,17 @@ function GifPicker({ onPick, onClose, busy }) {
               aria-label="Send this GIF"
               style={{ padding: 0, border: "1px solid var(--color-divider)", background: "transparent", cursor: "pointer" }}
             >
-              <img src={g.preview} alt="" loading="lazy"
-                style={{ display: "block", width: "100%", height: 110, objectFit: "cover" }} />
+              {/* KLIPY's blurred stand-in paints the cell instantly; the
+                  real frames fade in over it as they arrive. */}
+              <div style={{
+                position: "relative", width: "100%", height: 110,
+                backgroundImage: g.blur ? `url(${g.blur})` : undefined,
+                backgroundSize: "cover", backgroundPosition: "center"
+              }}>
+                <img src={g.preview} alt="" loading="lazy"
+                  onLoad={e => { e.currentTarget.style.opacity = "1"; }}
+                  style={{ position: "absolute", inset: 0, width: "100%", height: "100%", objectFit: "cover", opacity: 0, transition: "opacity .25s" }} />
+              </div>
             </button>
           ))}
         </div>
@@ -189,6 +217,74 @@ function GifPicker({ onPick, onClose, busy }) {
       <div style={{ fontSize: 11, color: "color-mix(in srgb, var(--color-text) 45%, transparent)", marginTop: 8 }}>
         Powered by KLIPY
       </div>
+    </Dialog>
+  );
+}
+
+// Browse the Files page's shared bucket and pick one file to link into
+// the room. The chat only ever references these files — the Files page
+// keeps custody, so nothing here uploads, moves or deletes anything.
+function FilePickerDialog({ onPick, onClose, busy }) {
+  const [prefix, setPrefix] = useState("");
+  const [listing, setListing] = useState({ folders: [], files: [] });
+  const [loading, setLoading] = useState(true);
+  const [error, setError] = useState("");
+
+  useEffect(() => {
+    let live = true;
+    setLoading(true);
+    Db.listFiles(prefix)
+      .then(l => { if (live) { setListing(l); setError(""); } })
+      .catch(e => { if (live) setError(e.message || "Couldn't list the files."); })
+      .finally(() => { if (live) setLoading(false); });
+    return () => { live = false; };
+  }, [prefix]);
+
+  const rowStyle = {
+    display: "flex", alignItems: "center", gap: 8, width: "100%",
+    padding: "9px 10px", background: "transparent", border: "none",
+    borderBottom: "1px solid var(--color-divider)", cursor: "pointer",
+    font: "inherit", color: "inherit", textAlign: "left"
+  };
+
+  return (
+    <Dialog title="Share a file" maxWidth={520} onClose={onClose}>
+      <div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 8, fontSize: 12, color: "color-mix(in srgb, var(--color-text) 55%, transparent)" }}>
+        {prefix ? (
+          <>
+            <Btn variant="secondary" onClick={() => setPrefix(prefix.split("/").slice(0, -1).join("/"))}>Back</Btn>
+            <span style={{ overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{prefix}</span>
+          </>
+        ) : (
+          "Everything from the Files page. Tap a file to share it."
+        )}
+      </div>
+      {error ? (
+        <ErrorBox>{error}</ErrorBox>
+      ) : loading ? (
+        <Loading label="Listing files…" />
+      ) : listing.folders.length === 0 && listing.files.length === 0 ? (
+        <div style={{ color: "color-mix(in srgb, var(--color-text) 55%, transparent)", padding: "14px 0" }}>
+          Nothing in this folder.
+        </div>
+      ) : (
+        <div style={{ maxHeight: "50vh", overflowY: "auto", borderTop: "1px solid var(--color-divider)" }}>
+          {listing.folders.map(f => (
+            <button key={f.path} onClick={() => setPrefix(f.path)} style={rowStyle}>
+              <span style={{ flex: "none", fontSize: 9, fontWeight: 700, letterSpacing: ".06em", padding: "3px 5px", border: "1px solid var(--color-divider)", color: "color-mix(in srgb, var(--color-text) 55%, transparent)" }}>DIR</span>
+              <span style={{ overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{f.name}</span>
+            </button>
+          ))}
+          {listing.files.map(f => (
+            <button key={f.path} onClick={() => onPick({ path: f.path, name: f.name })} disabled={busy} style={rowStyle}>
+              <span style={{ flex: "none", fontSize: 9, fontWeight: 700, letterSpacing: ".06em", padding: "3px 5px", border: "1px solid color-mix(in srgb, var(--color-accent) 55%, transparent)", color: "var(--color-accent)" }}>
+                {(f.name.split(".").pop() || "file").toUpperCase().slice(0, 4)}
+              </span>
+              <span style={{ flex: 1, minWidth: 0, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{f.name}</span>
+            </button>
+          ))}
+        </div>
+      )}
     </Dialog>
   );
 }
@@ -313,6 +409,10 @@ export function TeamChatScreen({ currentUser, onOpenJob, onRead }) {
   const [recElapsed, setRecElapsed] = useState(0);
   // "↓ new messages" — shown when something lands while scrolled up.
   const [jumpChip, setJumpChip] = useState(false);
+  // Crewmates with the room open right now (never includes yourself).
+  const [others, setOthers] = useState([]);
+  // The Files-page picker, and its browse position.
+  const [fileOpen, setFileOpen] = useState(false);
 
   const listRef = useRef(null);
   const fileRef = useRef(null);
@@ -425,6 +525,26 @@ export function TeamChatScreen({ currentUser, onOpenJob, onRead }) {
     const startFeed = () => {
       const mine = ++feedSeq;
       unsubscribe = Db.subscribeChatMessages({
+        me: { id: currentUser.id, name: currentUser.name },
+        onReaction: ({ messageId, profileId, emoji, on }) => {
+          if (!live) return;
+          setMessages(prev => prev.map(msg => {
+            if (msg.id !== messageId) return msg;
+            const cur = msg.reactions || [];
+            const has = cur.some(r => r.profileId === profileId && r.emoji === emoji);
+            if (on === has) return msg;
+            return {
+              ...msg,
+              reactions: on
+                ? [...cur, { emoji, profileId }]
+                : cur.filter(r => !(r.profileId === profileId && r.emoji === emoji))
+            };
+          }));
+        },
+        onPresence: people => {
+          if (!live) return;
+          setOthers(people.filter(p => p.profileId !== currentUser.id));
+        },
         onInsert: m => {
           if (!live) return;
           const withName = named(m);
@@ -533,6 +653,16 @@ export function TeamChatScreen({ currentUser, onOpenJob, onRead }) {
   // The preview URL belongs to the browser until it's given back.
   useEffect(() => () => { if (attach) URL.revokeObjectURL(attach.url); }, [attach]);
 
+  // Instant for the room you walk into, eased for what arrives while
+  // you watch — unless the device asked for stillness.
+  const settled = useRef(false);
+  const scrollBottom = smooth => {
+    const el = listRef.current;
+    if (!el) return;
+    if (smooth && !REDUCED_MOTION) el.scrollTo({ top: el.scrollHeight, behavior: "smooth" });
+    else el.scrollTop = el.scrollHeight;
+  };
+
   // One scroll rule for every way the list changes: restore the reader's
   // place after a prepend, follow the bottom if they were there — and if
   // they were up reading history when something new landed at the tail,
@@ -545,11 +675,13 @@ export function TeamChatScreen({ currentUser, onOpenJob, onRead }) {
       el.scrollTop += el.scrollHeight - restoreHeight.current;
       restoreHeight.current = null;
     } else if (stickToBottom.current) {
-      el.scrollTop = el.scrollHeight;
+      scrollBottom(settled.current);
+      if (!loading && messages.length) settled.current = true;
     } else if (tail && prevTail.current && tail !== prevTail.current) {
       setJumpChip(true);
     }
     prevTail.current = tail;
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [messages, loading]);
 
   // Pictures finish loading after the scroll rule has run and push the
@@ -617,6 +749,7 @@ export function TeamChatScreen({ currentUser, onOpenJob, onRead }) {
       setReplyTarget(null);
       stickToBottom.current = true;
       setMessages(prev => mergeIn(prev, [sent]));
+      buzz();
     } catch (e) {
       // The draft and the picture stay in the composer — nothing was
       // said, nothing is lost.
@@ -639,6 +772,7 @@ export function TeamChatScreen({ currentUser, onOpenJob, onRead }) {
       setReplyTarget(null);
       stickToBottom.current = true;
       setMessages(prev => mergeIn(prev, [sent]));
+      buzz();
     } catch (e) {
       setGifOpen(false);
       setSendError(e.message || "Couldn't send that GIF — check the connection and try again.");
@@ -670,6 +804,66 @@ export function TeamChatScreen({ currentUser, onOpenJob, onRead }) {
       Db.getChatPushState().then(setPushState).catch(() => {});
     }
     setPushBusy(false);
+  };
+
+  // A short tick under the thumb when something goes out. Androids buzz;
+  // iPhones ignore it silently, which is fine.
+  const buzz = () => { if (navigator.vibrate) navigator.vibrate(10); };
+
+  // Place or take back a reaction. Optimistic — the realtime echo and
+  // the poll both agree with whatever the database settled on.
+  const react = async (m, emoji) => {
+    const had = (m.reactions || []).some(r => r.profileId === currentUser.id && r.emoji === emoji);
+    setMessages(prev => prev.map(x => {
+      if (x.id !== m.id) return x;
+      const cur = x.reactions || [];
+      return {
+        ...x,
+        reactions: had
+          ? cur.filter(r => !(r.profileId === currentUser.id && r.emoji === emoji))
+          : [...cur, { emoji, profileId: currentUser.id }]
+      };
+    }));
+    buzz();
+    try {
+      await Db.setChatReaction(m.id, currentUser.id, emoji, !had);
+    } catch (e) {
+      setSendError(e.message || "Couldn't save that reaction.");
+    }
+  };
+
+  // Share a file from the Files page: the message carries a reference,
+  // never the file — the Files page keeps sole custody.
+  const sendFile = async f => {
+    if (sending) return;
+    setSending(true);
+    setSendError("");
+    try {
+      const sent = await Db.sendChatMessage(currentUser.id, "", {
+        file: f, replyTo: replyTarget ? replyTarget.id : null
+      });
+      setFileOpen(false);
+      setReplyTarget(null);
+      stickToBottom.current = true;
+      setMessages(prev => mergeIn(prev, [sent]));
+      buzz();
+    } catch (e) {
+      setSendError(e.message || "Couldn't share that file — check the connection and try again.");
+    }
+    setSending(false);
+  };
+
+  // Opening a shared file mints its link at tap time, like the PDFs do.
+  const openSharedFile = async m => {
+    try {
+      const url = await Db.sharedFileUrl(m.fileKey);
+      // Opened after an await, so some browsers treat this as a non-user
+      // gesture and block it — fall back to same-tab navigation.
+      const win = window.open(url, "_blank", "noopener");
+      if (!win) window.location.href = url;
+    } catch (e) {
+      setSendError(e.message || "Couldn't open that file — it may have been deleted from Files.");
+    }
   };
 
   // Admin moderation: take a message out of the room.
@@ -729,6 +923,7 @@ export function TeamChatScreen({ currentUser, onOpenJob, onRead }) {
         setReplyTarget(null);
         stickToBottom.current = true;
         setMessages(prev => mergeIn(prev, [sent]));
+        buzz();
       } catch (e) {
         setSendError(e.message || "Couldn't send the voice note — check the connection and try again.");
       }
@@ -802,20 +997,38 @@ export function TeamChatScreen({ currentUser, onOpenJob, onRead }) {
   const muted = "color-mix(in srgb, var(--color-text) 55%, transparent)";
   const tinyBtn = { background: "transparent", border: "none", cursor: "pointer", color: muted, padding: 2, lineHeight: 1 };
 
-  // Body text with any real job number turned into a tap-through to the
-  // job. Split on word-shaped tokens; odd indexes are the candidates.
+  // Body text with web addresses made tappable and any real job number
+  // turned into a tap-through to the job. URLs first; the job pass runs
+  // on what's left, split on word-shaped tokens (odd indexes are the
+  // candidates in both passes).
   const renderBody = text => {
-    if (!jobNums || !jobNums.size) return text;
-    const parts = String(text).split(/([A-Za-z0-9][A-Za-z0-9-]{2,19})/g);
-    if (parts.length === 1) return text;
-    return parts.map((part, idx) =>
-      idx % 2 === 1 && /\d/.test(part) && jobNums.has(part.toUpperCase()) ? (
-        <button key={idx} onClick={() => openJobNumber(part)}
-          style={{ background: "transparent", border: "none", padding: 0, font: "inherit", cursor: "pointer", color: "var(--color-accent)", textDecoration: "underline" }}>
-          {part}
-        </button>
-      ) : part
-    );
+    const out = [];
+    const urlParts = String(text).split(/(https?:\/\/[^\s<>"']+)/g);
+    urlParts.forEach((seg, i) => {
+      if (i % 2 === 1) {
+        out.push(
+          <a key={"u" + i} href={seg} target="_blank" rel="noopener noreferrer"
+            style={{ color: "var(--color-accent)", overflowWrap: "anywhere" }}>
+            {seg}
+          </a>
+        );
+        return;
+      }
+      if (!seg) return;
+      if (!jobNums || !jobNums.size) { out.push(seg); return; }
+      const parts = seg.split(/([A-Za-z0-9][A-Za-z0-9-]{2,19})/g);
+      parts.forEach((part, j) => {
+        if (j % 2 === 1 && /\d/.test(part) && jobNums.has(part.toUpperCase())) {
+          out.push(
+            <button key={`j${i}-${j}`} onClick={() => openJobNumber(part)}
+              style={{ background: "transparent", border: "none", padding: 0, font: "inherit", cursor: "pointer", color: "var(--color-accent)", textDecoration: "underline" }}>
+              {part}
+            </button>
+          );
+        } else if (part) out.push(part);
+      });
+    });
+    return out;
   };
 
   // The rows rebuild only when the room does — messages, the unread mark,
@@ -863,6 +1076,19 @@ export function TeamChatScreen({ currentUser, onOpenJob, onRead }) {
         new Date(m.createdAt) - new Date(prevMsg.createdAt) > 30 * 60000;
       const hue = chipHue(m.profileId);
       const hasMedia = !!(m.imageKey || m.gifUrl);
+      // Reactions grouped for the chips: one per emoji, count and
+      // whether one of them is yours.
+      const reactionGroups = [];
+      if (m.reactions && m.reactions.length) {
+        const byEmoji = new Map();
+        for (const r of m.reactions) {
+          const g = byEmoji.get(r.emoji) || { emoji: r.emoji, count: 0, mine: false };
+          g.count++;
+          if (r.profileId === currentUser.id) g.mine = true;
+          byEmoji.set(r.emoji, g);
+        }
+        reactionGroups.push(...byEmoji.values());
+      }
       rows.push(
         <div key={m.id}
           className={quietIds.current.has(m.id) ? undefined : "chat-msg-in"}
@@ -922,46 +1148,84 @@ export function TeamChatScreen({ currentUser, onOpenJob, onRead }) {
                   <ChatAudio audioKey={m.audioKey} />
                 </div>
               )}
+              {m.fileKey && (
+                <button onClick={() => openSharedFile(m)}
+                  title="Open this file from the Files page"
+                  style={{ display: "flex", alignItems: "center", gap: 8, padding: "10px 12px", background: "transparent", border: "none", cursor: "pointer", font: "inherit", color: "inherit", textAlign: "left", maxWidth: "100%" }}>
+                  <span style={{ flex: "none", fontSize: 9, fontWeight: 700, letterSpacing: ".06em", padding: "3px 5px", border: "1px solid color-mix(in srgb, var(--color-accent) 55%, transparent)", color: "var(--color-accent)" }}>
+                    {(m.fileName.split(".").pop() || "file").toUpperCase().slice(0, 4)}
+                  </span>
+                  <span style={{ textDecoration: "underline", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
+                    {m.fileName}
+                  </span>
+                </button>
+              )}
               {m.body && (
                 <div style={{ padding: hasMedia ? "6px 12px 8px" : "8px 12px", whiteSpace: "pre-wrap", overflowWrap: "anywhere" }}>
                   {renderBody(m.body)}
                 </div>
               )}
             </div>
-            <span style={{ display: "flex", gap: 2, alignItems: "center", flexDirection: mine ? "row-reverse" : "row", flex: "none" }}>
-              {/* One quiet ⋯ instead of a row of controls. Reply is for
-                  everyone; moderation — pin and delete — is an Admin's
-                  job. A tech's own messages stand as sent until the
-                  30-day sweep takes them. */}
-              <button onClick={() => setMenuFor(menuFor === m.id ? null : m.id)}
-                aria-label="Message actions" title="Message actions"
-                aria-expanded={menuFor === m.id}
-                style={{ ...tinyBtn, fontSize: 14, fontWeight: 700 }}>
-                ⋯
-              </button>
-              {menuFor === m.id && (
-                <>
-                  <button onClick={() => { setMenuFor(null); setReplyTarget(m); }}
-                    style={{ ...tinyBtn, fontSize: 11, fontWeight: 600 }}>
-                    Reply
-                  </button>
-                  {isAdmin && (
-                    <button onClick={() => { setMenuFor(null); togglePin(m); }}
-                      style={{ ...tinyBtn, fontSize: 11, fontWeight: 600 }}>
-                      {m.pinnedAt ? "Unpin" : "Pin"}
-                    </button>
-                  )}
-                  {isAdmin && (
-                    <button onClick={() => { setMenuFor(null); remove(m.id); }}
-                      aria-label="Remove this message" title="Remove this message"
-                      style={{ ...tinyBtn, fontSize: 15 }}>
-                      ×
-                    </button>
-                  )}
-                </>
-              )}
-            </span>
+            {/* One quiet ⋯ instead of a row of controls. Reply and the
+                reactions are for everyone; moderation — pin and delete —
+                is an Admin's job. A tech's own messages stand as sent
+                until the 30-day sweep takes them. */}
+            <button onClick={() => setMenuFor(menuFor === m.id ? null : m.id)}
+              aria-label="Message actions" title="Message actions"
+              aria-expanded={menuFor === m.id}
+              style={{ ...tinyBtn, fontSize: 14, fontWeight: 700, flex: "none" }}>
+              ⋯
+            </button>
           </div>
+          {menuFor === m.id && (
+            <div style={{ display: "flex", gap: 6, alignItems: "center", flexWrap: "wrap", marginTop: 4, justifyContent: mine ? "flex-end" : "flex-start" }}>
+              {REACTION_SET.map(e => (
+                <button key={e} onClick={() => { setMenuFor(null); react(m, e); }}
+                  aria-label={"React with " + e}
+                  style={{ ...tinyBtn, fontSize: 15, padding: "2px 4px" }}>
+                  {e}
+                </button>
+              ))}
+              <button onClick={() => { setMenuFor(null); setReplyTarget(m); }}
+                style={{ ...tinyBtn, fontSize: 11, fontWeight: 600 }}>
+                Reply
+              </button>
+              {isAdmin && (
+                <button onClick={() => { setMenuFor(null); togglePin(m); }}
+                  style={{ ...tinyBtn, fontSize: 11, fontWeight: 600 }}>
+                  {m.pinnedAt ? "Unpin" : "Pin"}
+                </button>
+              )}
+              {isAdmin && (
+                <button onClick={() => { setMenuFor(null); remove(m.id); }}
+                  aria-label="Remove this message" title="Remove this message"
+                  style={{ ...tinyBtn, fontSize: 15 }}>
+                  ×
+                </button>
+              )}
+            </div>
+          )}
+          {reactionGroups.length > 0 && (
+            <div style={{ display: "flex", gap: 4, marginTop: 3, flexWrap: "wrap", justifyContent: mine ? "flex-end" : "flex-start" }}>
+              {reactionGroups.map(g => (
+                <button key={g.emoji} onClick={() => react(m, g.emoji)}
+                  aria-label={g.emoji + " — " + g.count + (g.mine ? ", including you" : "")}
+                  title={g.mine ? "Tap to take yours back" : "Tap to react too"}
+                  style={{
+                    fontSize: 12, padding: "1px 7px", cursor: "pointer",
+                    background: g.mine
+                      ? "color-mix(in srgb, var(--color-accent) 14%, transparent)"
+                      : "color-mix(in srgb, var(--color-text) 5%, transparent)",
+                    border: "1px solid " + (g.mine
+                      ? "color-mix(in srgb, var(--color-accent) 55%, transparent)"
+                      : "var(--color-divider)"),
+                    color: "var(--color-text)"
+                  }}>
+                  {g.emoji} {g.count}
+                </button>
+              ))}
+            </div>
+          )}
         </div>
       );
       prevMsg = m;
@@ -973,6 +1237,24 @@ export function TeamChatScreen({ currentUser, onOpenJob, onRead }) {
   return (
     <div className="page" style={{ maxWidth: 760 }}>
       <Blueprint className="chat-card">
+        {others.length > 0 && (
+          <div style={{ borderBottom: "1px solid var(--color-divider)", padding: "6px 16px", display: "flex", alignItems: "center", gap: 6, flex: "none", fontSize: 11, color: muted }}>
+            Here now
+            {others.map(p => {
+              const hue = chipHue(p.profileId);
+              return (
+                <span key={p.profileId} title={p.name || "Someone"} style={{
+                  width: 20, height: 20, display: "grid", placeItems: "center",
+                  fontSize: 9, fontWeight: 700, color: hue,
+                  background: `color-mix(in srgb, ${hue} 20%, transparent)`,
+                  border: `1px solid color-mix(in srgb, ${hue} 45%, transparent)`
+                }}>
+                  {initialsOf(p.name || "").slice(0, 2) || "•"}
+                </span>
+              );
+            })}
+          </div>
+        )}
         {pins.length > 0 && (
           <div style={{
             borderBottom: "1px solid var(--color-divider)", padding: "10px 16px",
@@ -1001,9 +1283,17 @@ export function TeamChatScreen({ currentUser, onOpenJob, onRead }) {
           </div>
         )}
 
-        <div ref={listRef} onScroll={onScroll} style={{ flex: 1, overflowY: "auto", padding: "16px 16px 8px" }}>
+        <div ref={listRef} onScroll={onScroll} style={{ flex: 1, overflowY: "auto", overscrollBehavior: "contain", padding: "16px 16px 8px" }}>
           {loading ? (
-            <Loading label="Loading the chat…" />
+            // Ghost bubbles instead of a spinner: the room's shape,
+            // arriving before its words.
+            <div role="status" aria-label="Loading the chat">
+              {[0, 1, 2, 3, 4].map(i => (
+                <div key={i} style={{ display: "flex", justifyContent: i % 2 ? "flex-end" : "flex-start", marginTop: i ? 14 : 4 }}>
+                  <div className="chat-skel" style={{ width: 120 + ((i * 53) % 140), height: 38 }} />
+                </div>
+              ))}
+            </div>
           ) : loadError ? (
             <ErrorBox>{loadError}</ErrorBox>
           ) : (
@@ -1033,10 +1323,9 @@ export function TeamChatScreen({ currentUser, onOpenJob, onRead }) {
                 <div style={{ position: "sticky", bottom: 4, textAlign: "center", marginTop: 8 }}>
                   <button
                     onClick={() => {
-                      const el = listRef.current;
-                      if (el) el.scrollTop = el.scrollHeight;
                       stickToBottom.current = true;
                       setJumpChip(false);
+                      scrollBottom(true);
                     }}
                     style={{
                       fontSize: 12, fontWeight: 600, cursor: "pointer",
@@ -1088,6 +1377,9 @@ export function TeamChatScreen({ currentUser, onOpenJob, onRead }) {
               </Btn>
               <Btn variant="secondary" onClick={() => setGifOpen(true)} disabled={sending} title="Search and send a GIF">
                 GIF
+              </Btn>
+              <Btn variant="secondary" onClick={() => setFileOpen(true)} disabled={sending} title="Share a file from the Files page">
+                File
               </Btn>
               {canRecord && (
                 <Btn variant="secondary" onClick={startRecording} disabled={sending} title="Record a voice note">
@@ -1142,6 +1434,7 @@ export function TeamChatScreen({ currentUser, onOpenJob, onRead }) {
         </div>
       )}
       {gifOpen && <GifPicker onPick={sendGif} onClose={() => setGifOpen(false)} busy={sending} />}
+      {fileOpen && <FilePickerDialog onPick={sendFile} onClose={() => setFileOpen(false)} busy={sending} />}
       {lightbox && <Lightbox src={lightbox} onClose={() => setLightbox(null)} />}
     </div>
   );

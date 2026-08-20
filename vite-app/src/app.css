@@ -506,6 +506,20 @@ label.field-label-missing {
    its first frame, and a message that parks invisible until the tab
    is looked at again is worse than one that arrives a little pale. */
 .chat-msg-in { animation: chat-msg-in .45s cubic-bezier(.2, .85, .3, 1.15) both; }
+/* Ghost bubbles while the room loads — a sheen moving over quiet blocks.
+   The global reduced-motion rule above freezes the sheen to a still tint. */
+.chat-skel {
+  background: linear-gradient(100deg,
+    color-mix(in srgb, var(--color-text) 6%, transparent) 40%,
+    color-mix(in srgb, var(--color-text) 13%, transparent) 50%,
+    color-mix(in srgb, var(--color-text) 6%, transparent) 60%);
+  background-size: 200% 100%;
+  animation: chat-skel-sheen 1.2s linear infinite;
+}
+@keyframes chat-skel-sheen {
+  from { background-position: 120% 0; }
+  to { background-position: -80% 0; }
+}
 @keyframes chat-msg-in {
   from { opacity: .3; transform: translateY(16px) scale(.97); }
   to   { opacity: 1; transform: none; }

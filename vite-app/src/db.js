@@ -26,9 +26,10 @@ const CHAT_PAGE = 100;
 // the same treatment for the same reason — reply_to points back at this
 // very table.
 const CHAT_COLUMNS =
-  "id, profile_id, body, image_key, gif_url, audio_key, reply_to, pinned_at, created_at, " +
+  "id, profile_id, body, image_key, gif_url, audio_key, file_key, file_name, reply_to, pinned_at, created_at, " +
   "profiles!profile_id(name, first_name, last_name), " +
-  "quoted:chat_messages!reply_to(id, body, image_key, gif_url, audio_key, profiles!profile_id(name, first_name, last_name))";
+  "quoted:chat_messages!reply_to(id, body, image_key, gif_url, audio_key, file_name, profiles!profile_id(name, first_name, last_name)), " +
+  "reactions:chat_reactions(emoji, profile_id)";
 
 // One place that turns a timestamp into the "12 Feb 06:31" the tables use, and
 // returns "" rather than "Invalid Date" for a null column.
@@ -65,7 +66,13 @@ function shapeChatMessage(m) {
     imageKey: m.image_key || null,
     gifUrl: m.gif_url || null,
     audioKey: m.audio_key || null,
+    fileKey: m.file_key || null,
+    fileName: m.file_name || null,
     replyTo: m.reply_to || null,
+    // Reactions arrive as bare rows; the screen groups them per emoji.
+    // Null means "this copy didn't carry them" (realtime rows have no
+    // embed) — distinct from an empty array, which is authoritative.
+    reactions: m.reactions ? m.reactions.map(r => ({ emoji: r.emoji, profileId: r.profile_id })) : null,
     // The message this one answers, flattened to what the quote block
     // shows. Realtime rows arrive without the join — the screen resolves
     // those from messages it already holds.
@@ -73,7 +80,7 @@ function shapeChatMessage(m) {
       id: m.quoted.id,
       name: m.quoted.profiles ? fullName(m.quoted.profiles) : "",
       body: m.quoted.body || "",
-      label: m.quoted.image_key ? "(picture)" : m.quoted.gif_url ? "(GIF)" : m.quoted.audio_key ? "(voice note)" : ""
+      label: m.quoted.image_key ? "(picture)" : m.quoted.gif_url ? "(GIF)" : m.quoted.audio_key ? "(voice note)" : m.quoted.file_name ? "(file)" : ""
     } : null,
     pinnedAt: m.pinned_at || null,
     createdAt: m.created_at,
@@ -2466,6 +2473,9 @@ export const Db = {
           id: String(it.id || it.slug || full.url),
           full: full.url,
           preview: preview.url,
+          // KLIPY's tiny blurred stand-in, a data URI — the grid paints it
+          // instantly and the real frames fade in over it.
+          blur: it.blur_preview || "",
           width: preview.width || 0,
           height: preview.height || 0
         };
@@ -2478,9 +2488,9 @@ export const Db = {
   // (the storage policy holds everyone to theirs); if the message row is
   // then refused, the upload is taken back down rather than stranded. A
   // GIF is only ever a KLIPY CDN URL — nothing of ours is uploaded for it.
-  async sendChatMessage(profileId, body, { imageFile, gifUrl, audioFile, replyTo } = {}) {
+  async sendChatMessage(profileId, body, { imageFile, gifUrl, audioFile, replyTo, file } = {}) {
     const text = String(body || "").trim();
-    if (!text && !imageFile && !gifUrl && !audioFile) throw new Error("Nothing to send.");
+    if (!text && !imageFile && !gifUrl && !audioFile && !file) throw new Error("Nothing to send.");
     const uploaded = [];
     const uploadMedia = async (file, extByType, refusal) => {
       // MediaRecorder reports "audio/webm;codecs=opus" — the bucket and
@@ -2517,6 +2527,9 @@ export const Db = {
       .insert({
         profile_id: profileId, body: text.slice(0, 4000),
         image_key: imageKey, gif_url: gifUrl || null, audio_key: audioKey,
+        // A Files-page link: referenced, never owned — no cleanup path
+        // may ever touch the shared bucket through a chat message.
+        file_key: file ? file.path : null, file_name: file ? file.name : null,
         reply_to: replyTo || null
       })
       .select(CHAT_COLUMNS)
@@ -2570,10 +2583,28 @@ export const Db = {
     }
   },
 
+  // Placing is an insert, taking back is a delete — the composite pk
+  // makes a double-tap idempotent, so the caller just says which way.
+  async setChatReaction(messageId, profileId, emoji, on) {
+    if (on) {
+      const { error } = await sbClient
+        .from("chat_reactions")
+        .upsert({ message_id: messageId, profile_id: profileId, emoji }, { onConflict: "message_id,profile_id,emoji" });
+      if (error) throw error;
+    } else {
+      const { error } = await sbClient
+        .from("chat_reactions")
+        .delete().match({ message_id: messageId, profile_id: profileId, emoji });
+      if (error) throw error;
+    }
+  },
+
   // Live feed for the room. Returns the unsubscribe, for the screen's
   // cleanup. Updates are pin changes — bodies are immutable. Delete
   // events carry only the row's id — that is all the replicated key
-  // holds — which is also all the screen needs to drop it.
+  // holds — which is also all the screen needs to drop it. Reactions
+  // ride the same channel, as does presence: `me` is tracked once the
+  // channel is up, and onPresence hears the room's roster change.
   //
   // onStatus gets the channel's own state reports ("SUBSCRIBED",
   // "CHANNEL_ERROR", …). They matter because a dropped feed is silent:
@@ -2582,16 +2613,33 @@ export const Db = {
   // watches the status and rebuilds the feed — found the hard way, when
   // the realtime service restarted six times in an afternoon and every
   // open phone just stopped hearing the room.
-  subscribeChatMessages({ onInsert, onUpdate, onDelete, onStatus }) {
+  subscribeChatMessages({ me, onInsert, onUpdate, onDelete, onReaction, onPresence, onStatus }) {
     const channel = sbClient
-      .channel("team-chat")
+      .channel("team-chat", me ? { config: { presence: { key: me.id } } } : undefined)
       .on("postgres_changes", { event: "INSERT", schema: "public", table: "chat_messages" },
         p => onInsert(shapeChatMessage(p.new)))
       .on("postgres_changes", { event: "UPDATE", schema: "public", table: "chat_messages" },
         p => onUpdate(shapeChatMessage(p.new)))
       .on("postgres_changes", { event: "DELETE", schema: "public", table: "chat_messages" },
         p => onDelete(p.old.id))
-      .subscribe(status => { if (onStatus) onStatus(status); });
+      .on("postgres_changes", { event: "INSERT", schema: "public", table: "chat_reactions" },
+        p => { if (onReaction) onReaction({ messageId: p.new.message_id, profileId: p.new.profile_id, emoji: p.new.emoji, on: true }); })
+      .on("postgres_changes", { event: "DELETE", schema: "public", table: "chat_reactions" },
+        p => { if (onReaction) onReaction({ messageId: p.old.message_id, profileId: p.old.profile_id, emoji: p.old.emoji, on: false }); })
+      .on("presence", { event: "sync" }, () => {
+        if (!onPresence) return;
+        const state = channel.presenceState();
+        onPresence(Object.entries(state).map(([id, metas]) => ({
+          profileId: id,
+          name: (metas && metas[0] && metas[0].name) || ""
+        })));
+      })
+      .subscribe(status => {
+        if (status === "SUBSCRIBED" && me) {
+          channel.track({ name: me.name }).catch(() => {});
+        }
+        if (onStatus) onStatus(status);
+      });
     return () => { sbClient.removeChannel(channel); };
   },
 

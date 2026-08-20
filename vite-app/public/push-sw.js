@@ -6,6 +6,11 @@
 self.addEventListener("push", event => {
   let data = {};
   try { data = event.data ? event.data.json() : {}; } catch (_) { /* an unreadable payload still buzzes */ }
+  // A dot on the app's icon until the room is read — the app itself
+  // replaces it with the real count (or clears it) when opened.
+  if ("setAppBadge" in self.navigator) {
+    event.waitUntil(self.navigator.setAppBadge().catch(() => {}));
+  }
   event.waitUntil(self.registration.showNotification(data.title || "Team chat", {
     body: data.body || "New message",
     icon: "/icons/icon-192.png",
