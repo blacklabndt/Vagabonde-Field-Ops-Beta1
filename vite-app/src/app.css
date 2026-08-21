@@ -162,6 +162,14 @@ tbody tr.clickable { cursor: pointer; }
 /* The chat's full-screen picture viewer takes the same entrance. */
 .lightbox-in { animation: backdrop-in .2s ease both; }
 .lightbox-in img { animation: dialog-in .2s cubic-bezier(.2, .8, .3, 1.06) both; }
+
+/* Arriving on a section: a short settle rather than a cut. Kept brief
+   and ending at transform none — see the wrapper's comment in App.jsx. */
+.screen-in { animation: screen-in .18s ease-out both; }
+@keyframes screen-in {
+  from { opacity: 0; transform: translateY(6px); }
+  to { opacity: 1; transform: none; }
+}
 /* The Blueprint frame deliberately has no fill, but a dialog needs one —
    otherwise its dark body text sits directly on the dark scrim. */
 .dialog-backdrop .dialog { background: var(--color-bg); }

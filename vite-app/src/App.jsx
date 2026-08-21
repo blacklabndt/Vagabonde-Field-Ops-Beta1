@@ -589,7 +589,14 @@ export function App() {
         {/* Keyed on the screen so switching tabs clears a crash rather than
             leaving the app stuck on the boundary's fallback. */}
         <ErrorBoundary resetKey={screen}>
-          <Suspense fallback={<ScreenFallback />}>{body}</Suspense>
+          <Suspense fallback={<ScreenFallback />}>
+            {/* Keyed on the screen so arriving anywhere plays the same
+                short entrance. The keyframes end at transform: none, so
+                the wrapper stops being a containing block the moment the
+                entrance finishes — fixed-position dialogs inside are
+                unaffected by the time anyone can open one. */}
+            <div key={screen} className="screen-in">{body}</div>
+          </Suspense>
         </ErrorBoundary>
       </main>
       {/* The app's only save confirmation. It lives here rather than on each
