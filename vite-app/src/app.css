@@ -232,13 +232,24 @@ tbody tr.clickable { cursor: pointer; }
 .drawer-backdrop {
   position: fixed; inset: 0; z-index: 60;
   background: color-mix(in srgb, #000 55%, transparent);
+  animation: backdrop-in .26s ease both;
 }
 .drawer {
   position: absolute; inset: 0 auto 0 0; width: min(84vw, 320px);
   display: flex; flex-direction: column;
   background: var(--color-bg); border-right: 1px solid var(--color-divider);
   padding: 10px 0 14px; overflow-y: auto;
+  animation: drawer-in .26s cubic-bezier(.2, .8, .25, 1) both;
 }
+/* Closing plays the same pair backwards; the App unmounts the drawer on
+   animationend, so the slide finishes before the DOM goes. The global
+   reduced-motion rule flattens all four to an instant. */
+.drawer-backdrop.closing { animation: backdrop-out .2s ease both; }
+.drawer-backdrop.closing .drawer { animation: drawer-out .2s cubic-bezier(.5, 0, .75, .5) both; }
+@keyframes drawer-in { from { transform: translateX(-100%); } to { transform: none; } }
+@keyframes drawer-out { from { transform: none; } to { transform: translateX(-100%); } }
+@keyframes backdrop-in { from { opacity: 0; } to { opacity: 1; } }
+@keyframes backdrop-out { from { opacity: 1; } to { opacity: 0; } }
 
 .drawer > button {
   /* flex: none, because the drawer is a scrolling flex column: with ten tabs

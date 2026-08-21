@@ -72,6 +72,11 @@ export function App() {
     }
   }, []);
   const [menuOpen, setMenuOpen] = useState(false);
+  // The drawer outlives menuOpen by one exit animation: it stays mounted
+  // while it slides away, and animationend is what finally unmounts it.
+  // Every existing setMenuOpen(false) keeps working untouched.
+  const [menuVisible, setMenuVisible] = useState(false);
+  useEffect(() => { if (menuOpen) setMenuVisible(true); }, [menuOpen]);
   const [theme, setTheme] = useState(() => Store.load("theme", "light"));
 
   // The drawer is the only navigation now, at every width, so there is no
@@ -523,8 +528,12 @@ export function App() {
       {/* The drawer, phone only. Rendered outside the bar so it can cover the
           screen, and only when open so its buttons are not in the tab order
           on a desktop where it is invisible. */}
-      {menuOpen && (
-        <div className="drawer-backdrop" onClick={() => setMenuOpen(false)}>
+      {menuVisible && (
+        <div
+          className={menuOpen ? "drawer-backdrop" : "drawer-backdrop closing"}
+          onClick={() => setMenuOpen(false)}
+          onAnimationEnd={() => { if (!menuOpen) setMenuVisible(false); }}
+        >
           <nav className="drawer" aria-label="Sections" onClick={e => e.stopPropagation()}>
             <div className="topbar-brand" aria-hidden="true" style={{ margin: "18px auto 8px" }} />
             {allowedTabs.map(t => (
