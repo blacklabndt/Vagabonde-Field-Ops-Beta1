@@ -359,6 +359,7 @@ function Lightbox({ src, onClose }) {
   return (
     <div
       onClick={onClose}
+      className="lightbox-in"
       role="dialog" aria-label="Picture, full screen"
       style={{ position: "fixed", inset: 0, zIndex: 1000, background: "rgba(10, 11, 12, .9)", display: "grid", placeItems: "center", cursor: "zoom-out", padding: 14 }}
     >

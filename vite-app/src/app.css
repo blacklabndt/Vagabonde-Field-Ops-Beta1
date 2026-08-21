@@ -147,7 +147,21 @@ tbody tr.clickable { cursor: pointer; }
 .dialog-backdrop {
   background: color-mix(in srgb, var(--color-neutral-900) 82%, transparent);
   backdrop-filter: blur(2px);
+  animation: backdrop-in .22s ease both;
 }
+/* Every dialog arrives with a small zoom: the scrim fades up and the
+   panel scales in from 95% with a touch of rise. One rule here covers
+   every popup in the app; the global reduced-motion rule flattens it. */
+.dialog-backdrop .dialog {
+  animation: dialog-in .22s cubic-bezier(.2, .8, .3, 1.06) both;
+}
+@keyframes dialog-in {
+  from { opacity: 0; transform: scale(.95) translateY(10px); }
+  to { opacity: 1; transform: none; }
+}
+/* The chat's full-screen picture viewer takes the same entrance. */
+.lightbox-in { animation: backdrop-in .2s ease both; }
+.lightbox-in img { animation: dialog-in .2s cubic-bezier(.2, .8, .3, 1.06) both; }
 /* The Blueprint frame deliberately has no fill, but a dialog needs one —
    otherwise its dark body text sits directly on the dark scrim. */
 .dialog-backdrop .dialog { background: var(--color-bg); }
