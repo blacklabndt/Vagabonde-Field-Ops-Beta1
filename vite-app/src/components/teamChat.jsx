@@ -210,7 +210,7 @@ function GifPicker({ onPick, onClose, busy }) {
               }}>
                 <img src={g.preview} alt="" loading="lazy"
                   onLoad={e => { e.currentTarget.style.opacity = "1"; }}
-                  style={{ position: "absolute", inset: 0, width: "100%", height: "100%", objectFit: "cover", opacity: 0, transition: "opacity .25s" }} />
+                  style={{ position: "absolute", inset: 0, width: "100%", height: "100%", objectFit: "cover", opacity: 0, transition: "opacity .3s ease-out" }} />
               </div>
             </button>
           ))}

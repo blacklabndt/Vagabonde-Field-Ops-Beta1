@@ -24,6 +24,15 @@
   --shadow-md: 0 3px 10px rgba(0,0,0,0.55);
   --shadow-lg: 0 12px 32px rgba(0,0,0,0.6);
 }
+/* The app's two motion curves — every entrance decelerates on the same
+   ease, every exit accelerates on the same one, so the drawer, dialogs,
+   screens and bubbles all read as one hand. Durations sit on a small
+   scale (180–450ms) rather than each animation inventing its own. */
+:root {
+  --ease-enter: cubic-bezier(.22, .75, .28, 1);
+  --ease-exit: cubic-bezier(.55, .06, .68, .19);
+}
+
 html, body, #root { min-height: 100%; }
 *, *::before, *::after { box-sizing: border-box; }
 body {
@@ -147,27 +156,28 @@ tbody tr.clickable { cursor: pointer; }
 .dialog-backdrop {
   background: color-mix(in srgb, var(--color-neutral-900) 82%, transparent);
   backdrop-filter: blur(2px);
-  animation: backdrop-in .22s ease both;
+  animation: backdrop-in .26s ease both;
 }
 /* Every dialog arrives with a small zoom: the scrim fades up and the
    panel scales in from 95% with a touch of rise. One rule here covers
    every popup in the app; the global reduced-motion rule flattens it. */
 .dialog-backdrop .dialog {
-  animation: dialog-in .22s cubic-bezier(.2, .8, .3, 1.06) both;
+  animation: dialog-in .26s var(--ease-enter) both;
+  will-change: transform, opacity;
 }
 @keyframes dialog-in {
   from { opacity: 0; transform: scale(.95) translateY(10px); }
   to { opacity: 1; transform: none; }
 }
 /* The chat's full-screen picture viewer takes the same entrance. */
-.lightbox-in { animation: backdrop-in .2s ease both; }
-.lightbox-in img { animation: dialog-in .2s cubic-bezier(.2, .8, .3, 1.06) both; }
+.lightbox-in { animation: backdrop-in .24s ease both; }
+.lightbox-in img { animation: dialog-in .24s var(--ease-enter) both; }
 
 /* Arriving on a section: a short settle rather than a cut. Kept brief
    and ending at transform none — see the wrapper's comment in App.jsx. */
-.screen-in { animation: screen-in .18s ease-out both; }
+.screen-in { animation: screen-in .22s var(--ease-enter) both; }
 @keyframes screen-in {
-  from { opacity: 0; transform: translateY(6px); }
+  from { opacity: 0; transform: translateY(8px); }
   to { opacity: 1; transform: none; }
 }
 /* The Blueprint frame deliberately has no fill, but a dialog needs one —
@@ -254,20 +264,21 @@ tbody tr.clickable { cursor: pointer; }
 .drawer-backdrop {
   position: fixed; inset: 0; z-index: 60;
   background: color-mix(in srgb, #000 55%, transparent);
-  animation: backdrop-in .26s ease both;
+  animation: backdrop-in .3s ease both;
 }
 .drawer {
   position: absolute; inset: 0 auto 0 0; width: min(84vw, 320px);
   display: flex; flex-direction: column;
   background: var(--color-bg); border-right: 1px solid var(--color-divider);
   padding: 10px 0 14px; overflow-y: auto;
-  animation: drawer-in .26s cubic-bezier(.2, .8, .25, 1) both;
+  animation: drawer-in .3s var(--ease-enter) both;
+  will-change: transform;
 }
 /* Closing plays the same pair backwards; the App unmounts the drawer on
    animationend, so the slide finishes before the DOM goes. The global
    reduced-motion rule flattens all four to an instant. */
-.drawer-backdrop.closing { animation: backdrop-out .2s ease both; }
-.drawer-backdrop.closing .drawer { animation: drawer-out .2s cubic-bezier(.5, 0, .75, .5) both; }
+.drawer-backdrop.closing { animation: backdrop-out .24s ease both; }
+.drawer-backdrop.closing .drawer { animation: drawer-out .24s var(--ease-exit) both; }
 @keyframes drawer-in { from { transform: translateX(-100%); } to { transform: none; } }
 @keyframes drawer-out { from { transform: none; } to { transform: translateX(-100%); } }
 @keyframes backdrop-in { from { opacity: 0; } to { opacity: 1; } }
@@ -551,7 +562,9 @@ label.field-label-missing {
    Opacity starts at .3, not 0: a hidden tab holds a CSS animation on
    its first frame, and a message that parks invisible until the tab
    is looked at again is worse than one that arrives a little pale. */
-.chat-msg-in { animation: chat-msg-in .45s cubic-bezier(.2, .85, .3, 1.15) both; }
+/* The overshoot is softened from its first cut (1.15 → 1.06): enough
+   spring to register as arrival, not enough to read as a bounce. */
+.chat-msg-in { animation: chat-msg-in .45s cubic-bezier(.2, .78, .3, 1.06) both; }
 /* Ghost bubbles while the room loads — a sheen moving over quiet blocks.
    The global reduced-motion rule above freezes the sheen to a still tint. */
 .chat-skel {
