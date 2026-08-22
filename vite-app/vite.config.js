@@ -76,6 +76,22 @@ export default defineConfig({
               expiration: { maxEntries: 20, maxAgeSeconds: 60 * 60 * 24 * 365 },
               cacheableResponse: { statuses: [0, 200] }
             }
+          },
+          {
+            // KLIPY media is immutable — the URL names the exact file
+            // forever — and a GIF in the chat history was re-downloaded
+            // every visit. CacheFirst means each one crosses a field
+            // connection once per device. (Chat photos and voice notes
+            // can't join it: their signed URLs carry a fresh token every
+            // mint, so no cache key survives — an accepted trade for the
+            // private bucket.)
+            urlPattern: /^https:\/\/static\d*\.klipy\.com\//,
+            handler: "CacheFirst",
+            options: {
+              cacheName: "klipy-media",
+              expiration: { maxEntries: 80, maxAgeSeconds: 60 * 60 * 24 * 14 },
+              cacheableResponse: { statuses: [0, 200] }
+            }
           }
         ]
       }

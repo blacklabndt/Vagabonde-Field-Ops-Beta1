@@ -519,6 +519,20 @@ export function TeamChatScreen({ currentUser, onOpenJob, onRead }) {
 
     loadLatest(true);
 
+    // The bookmark move for arriving messages, debounced: a burst is one
+    // upsert. Cleared with everything else on unmount.
+    let readTimer = null;
+    const noteRead = () => {
+      if (readTimer) return;
+      readTimer = setTimeout(() => {
+        readTimer = null;
+        if (!live) return;
+        Db.markChatRead(currentUser.id)
+          .then(() => { if (onReadRef.current) onReadRef.current(); })
+          .catch(() => {});
+      }, 1500);
+    };
+
     // The feed is rebuilt whenever its channel reports failure — the
     // socket reconnects itself after a network drop or a realtime
     // service restart, but a channel that errored stays errored, and a
@@ -577,12 +591,9 @@ export function TeamChatScreen({ currentUser, onOpenJob, onRead }) {
               .catch(() => {});
           }
           // Reading the room as it happens keeps the badge honest on the
-          // person's other devices.
-          if (document.visibilityState === "visible") {
-            Db.markChatRead(currentUser.id)
-              .then(() => { if (onReadRef.current) onReadRef.current(); })
-              .catch(() => {});
-          }
+          // person's other devices. Debounced: a burst of five messages
+          // is one bookmark move, not five upserts.
+          if (document.visibilityState === "visible") noteRead();
         },
         onUpdate: m => {
           if (!live) return;
@@ -649,6 +660,7 @@ export function TeamChatScreen({ currentUser, onOpenJob, onRead }) {
     return () => {
       live = false;
       if (resubTimer) clearTimeout(resubTimer);
+      if (readTimer) clearTimeout(readTimer);
       if (unsubscribe) unsubscribe();
       clearInterval(timer);
       window.removeEventListener("focus", onFocus);

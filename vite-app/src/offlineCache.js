@@ -70,6 +70,9 @@ async function ocDelete(key) {
 // is what was here at 14:32" is.
 let state = { servingCached: false, at: null };
 const listeners = new Set();
+// What readThrough last wrote per key, serialized — the guard that keeps
+// an unchanged poll result from touching IndexedDB again.
+const rtLastWritten = new Map();
 const notify = () => listeners.forEach(fn => fn(state));
 
 function setState(next) {
@@ -108,11 +111,23 @@ export const OfflineCache = {
   // Network first, remembered copy second, and only ever for a real
   // connectivity failure. A permission error or a bad request is a genuine
   // answer from the server and has to surface as one.
+  //
+  // Unchanged results skip the disk: the chat polls its page every couple
+  // of minutes for as long as the room is open, and rewriting an identical
+  // 100KB blob to IndexedDB each time is battery spent remembering what
+  // the device already knows. The stringify used for the comparison is an
+  // order of magnitude cheaper than the write it saves. Trade: a skipped
+  // write keeps the older saved-at stamp, which is honest — the content
+  // really is from then.
   async readThrough(key, fetcher) {
     try {
       const value = await fetcher();
       this.markLive();
-      ocPut(key, value).catch(() => {});
+      const serialized = JSON.stringify(value);
+      if (rtLastWritten.get(key) !== serialized) {
+        rtLastWritten.set(key, serialized);
+        ocPut(key, value).catch(() => {});
+      }
       return value;
     } catch (e) {
       if (!isNetworkError(e)) throw e;
