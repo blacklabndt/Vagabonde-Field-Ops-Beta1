@@ -384,11 +384,15 @@ label.field-label-missing {
   to   { opacity: 1; transform: translateX(-50%) translateY(0); }
 }
 
-@media (prefers-reduced-motion: reduce) {
-  *, *::before, *::after {
-    animation-duration: 0.01ms !important; animation-iteration-count: 1 !important;
-    transition-duration: 0.01ms !important; scroll-behavior: auto !important;
-  }
+/* Motion is governed by the app's own switch (drawer footer), not the
+   OS preference: Windows boxes with animation effects off were silently
+   flattening the whole app, and an in-app toggle is discoverable where
+   a buried OS setting is not. data-motion is stamped by App.jsx. */
+:root[data-motion="off"] *,
+:root[data-motion="off"] *::before,
+:root[data-motion="off"] *::after {
+  animation-duration: 0.01ms !important; animation-iteration-count: 1 !important;
+  transition-duration: 0.01ms !important; scroll-behavior: auto !important;
 }
 
 /* — waiting — */
@@ -432,13 +436,11 @@ label.field-label-missing {
    and shrinks in place instead of travelling, because a thing changing size
    where it stands is not what carries the vestibular risk; a thing crossing
    the viewport is. */
-@media (prefers-reduced-motion: reduce) {
-  .loading-bar::after {
-    left: 0; width: 15%;
-    animation: loading-breathe 2s ease-in-out infinite !important;
-    animation-duration: 2s !important;
-    animation-iteration-count: infinite !important;
-  }
+:root[data-motion="off"] .loading-bar::after {
+  left: 0; width: 15%;
+  animation: loading-breathe 2s ease-in-out infinite !important;
+  animation-duration: 2s !important;
+  animation-iteration-count: infinite !important;
 }
 
 /* — the easter egg — */
@@ -560,10 +562,9 @@ label.field-label-missing {
 /* A new message rises into place, with a slight overshoot so the
    motion registers. The class is only ever put on rows that arrive
    while you watch: history mounts still, because eighty bubbles
-   animating on open is a screensaver, not a chat. The global
-   prefers-reduced-motion rule above flattens this to nothing for
-   anyone whose device asks (phone settings named "Reduce Motion" or
-   "Remove animations" — worth knowing when it "doesn't work").
+   animating on open is a screensaver, not a chat. The app's own
+   Animations switch (drawer footer, data-motion) flattens this to
+   nothing when turned off.
    Opacity starts at .3, not 0: a hidden tab holds a CSS animation on
    its first frame, and a message that parks invisible until the tab
    is looked at again is worse than one that arrives a little pale. */

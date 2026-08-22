@@ -2,7 +2,7 @@ import React, { useState, useEffect, useMemo, useRef, Suspense, lazy } from "rea
 import { sbClient } from "./config.js";
 import { TABS, CONTEXT_TABS, EMPTY_JOB_RECORD, Store } from "./data.js";
 import { Db } from "./db.js";
-import { tabList, Blueprint, Btn, ErrorBox, ErrorBoundary, TagX, Toast, Loading } from "./components/common.jsx";
+import { tabList, Blueprint, Btn, ErrorBox, ErrorBoundary, TagX, Toast, Loading, Switch } from "./components/common.jsx";
 import { Toasts } from "./toastBus.js";
 import { QueueBadge, QueueDialog } from "./components/queuePanel.jsx";
 import { OfflineQueue } from "./offlineQueue.js";
@@ -78,6 +78,11 @@ export function App() {
   const [menuVisible, setMenuVisible] = useState(false);
   useEffect(() => { if (menuOpen) setMenuVisible(true); }, [menuOpen]);
   const [theme, setTheme] = useState(() => Store.load("theme", "light"));
+  // Motion is the app's own choice, not the OS's: Windows machines with
+  // animation effects off were silently flattening every animation, and
+  // Kyle chose an in-app switch over inheriting that. Defaults on; the
+  // drawer toggle below is the escape hatch for anyone motion-sensitive.
+  const [motion, setMotion] = useState(() => Store.load("motion", "on"));
 
   // The drawer is the only navigation now, at every width, so there is no
   // breakpoint at which an open menu becomes stray buttons — but Escape should
@@ -178,6 +183,11 @@ export function App() {
     document.documentElement.setAttribute("data-theme", theme);
     Store.save("theme", theme);
   }, [theme]);
+
+  useEffect(() => {
+    document.documentElement.setAttribute("data-motion", motion);
+    Store.save("motion", motion);
+  }, [motion]);
 
   // Hiding a section is not locking a door: if the screen someone is on stops
   // being one of theirs, move them to the first section they do have rather
@@ -565,6 +575,9 @@ export function App() {
                 <button className={theme === "light" ? "active" : ""} aria-pressed={theme === "light"} onClick={() => setTheme("light")}>Light</button>
                 <button className={theme === "dark" ? "active" : ""} aria-pressed={theme === "dark"} onClick={() => setTheme("dark")}>Dark</button>
               </div>
+            </div>
+            <div className="drawer-foot">
+              <Switch on={motion === "on"} onClick={() => setMotion(motion === "on" ? "off" : "on")} label="Animations" />
             </div>
           </nav>
         </div>

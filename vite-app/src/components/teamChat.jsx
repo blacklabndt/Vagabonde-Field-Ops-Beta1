@@ -63,10 +63,10 @@ async function shrinkForChat(file) {
 }
 
 
-// Whether this device asked for stillness — checked once; the smooth
-// scrolls fall back to instant jumps for it.
-const REDUCED_MOTION = typeof matchMedia !== "undefined" &&
-  matchMedia("(prefers-reduced-motion: reduce)").matches;
+// Whether the app's own Animations switch (drawer footer) is off —
+// read at call time so flipping it applies without a reload. The smooth
+// scrolls fall back to instant jumps when it is.
+const motionOff = () => document.documentElement.getAttribute("data-motion") === "off";
 
 // The curated reaction set — must match the chat_reactions check.
 const REACTION_SET = ["👍", "❤️", "😂", "😮", "🔥", "👌"];
@@ -677,7 +677,7 @@ export function TeamChatScreen({ currentUser, onOpenJob, onRead }) {
   const scrollBottom = smooth => {
     const el = listRef.current;
     if (!el) return;
-    if (smooth && !REDUCED_MOTION) el.scrollTo({ top: el.scrollHeight, behavior: "smooth" });
+    if (smooth && !motionOff()) el.scrollTo({ top: el.scrollHeight, behavior: "smooth" });
     else el.scrollTop = el.scrollHeight;
   };
 
