@@ -591,10 +591,10 @@ export function App() {
         <ErrorBoundary resetKey={screen}>
           <Suspense fallback={<ScreenFallback />}>
             {/* Keyed on the screen so arriving anywhere plays the same
-                short entrance. The keyframes end at transform: none, so
-                the wrapper stops being a containing block the moment the
-                entrance finishes — fixed-position dialogs inside are
-                unaffected by the time anyone can open one. */}
+                short entrance. The animation is opacity-only on purpose:
+                a transform here captures the fixed-position dialogs
+                rendered inside and centres them against the page instead
+                of the viewport — see .screen-in in app.css. */}
             <div key={screen} className="screen-in">{body}</div>
           </Suspense>
         </ErrorBoundary>

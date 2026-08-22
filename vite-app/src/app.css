@@ -173,12 +173,17 @@ tbody tr.clickable { cursor: pointer; }
 .lightbox-in { animation: backdrop-in .24s ease both; }
 .lightbox-in img { animation: dialog-in .24s var(--ease-enter) both; }
 
-/* Arriving on a section: a short settle rather than a cut. Kept brief
-   and ending at transform none — see the wrapper's comment in App.jsx. */
+/* Arriving on a section: a short settle rather than a cut. Opacity
+   ONLY, never transform: dialogs and the lightbox are position:fixed
+   children of this wrapper, and an animated transform makes the wrapper
+   their containing block — Chromium keeps that capture even after a
+   filled animation settles at none, which centred every dialog against
+   the full page height instead of the viewport. On a tall phone page
+   that put popups below the fold. A fade cannot capture anything. */
 .screen-in { animation: screen-in .22s var(--ease-enter) both; }
 @keyframes screen-in {
-  from { opacity: 0; transform: translateY(8px); }
-  to { opacity: 1; transform: none; }
+  from { opacity: 0; }
+  to { opacity: 1; }
 }
 /* The Blueprint frame deliberately has no fill, but a dialog needs one —
    otherwise its dark body text sits directly on the dark scrim. */
