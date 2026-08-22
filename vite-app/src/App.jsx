@@ -39,6 +39,26 @@ const ScreenFallback = () => (
   <div className="page"><Loading /></div>
 );
 
+// The page entrance, with the transform taken back off afterwards. The
+// class must not linger: an animated transform makes this wrapper the
+// containing block for the fixed-position dialogs rendered inside, and
+// Chromium keeps that capture for as long as a filled animation exists —
+// which once centred every popup against the page instead of the
+// viewport. Dropping the class on animationend means the transform
+// exists only for the entrance's quarter-second, when no dialog can be
+// open yet, and re-renders afterwards never restart it.
+function ScreenIn({ children }) {
+  const [settled, setSettled] = useState(false);
+  return (
+    <div
+      className={settled ? undefined : "screen-in"}
+      onAnimationEnd={e => { if (e.target === e.currentTarget) setSettled(true); }}
+    >
+      {children}
+    </div>
+  );
+}
+
 // The egg renders outside the screen ErrorBoundary, so a crash inside it —
 // or its chunk failing to load — would unmount the whole shell to a white
 // screen. The screen boundary's full-page fallback is wrong here too: with
@@ -609,11 +629,9 @@ export function App() {
         <ErrorBoundary resetKey={screen}>
           <Suspense fallback={<ScreenFallback />}>
             {/* Keyed on the screen so arriving anywhere plays the same
-                short entrance. The animation is opacity-only on purpose:
-                a transform here captures the fixed-position dialogs
-                rendered inside and centres them against the page instead
-                of the viewport — see .screen-in in app.css. */}
-            <div key={screen} className="screen-in">{body}</div>
+                short entrance; ScreenIn strips its own class once the
+                entrance ends — see its comment for why that matters. */}
+            <ScreenIn key={screen}>{body}</ScreenIn>
           </Suspense>
         </ErrorBoundary>
       </main>
