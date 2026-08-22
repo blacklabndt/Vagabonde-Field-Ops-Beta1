@@ -563,20 +563,25 @@ export function App() {
               {/* Double-click your own name. Nothing announces it and nothing
                   depends on it; a double-click on a label is not something
                   anyone does by accident on the way to signing out. */}
-              <span onDoubleClick={() => setEgg(true)} style={{ userSelect: "none" }}>
+              {/* The name yields first on a narrow drawer — an ellipsis on
+                  your own name beats the theme buttons wrapping away. */}
+              <span onDoubleClick={() => setEgg(true)}
+                style={{ userSelect: "none", minWidth: 0, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
                 {currentUser.name}
               </span>
               <Btn variant="secondary" onClick={signOut}>Sign out</Btn>
-            </div>
-            {/* The bar drops the theme switch on the narrowest phones, so the
-                drawer carries it — otherwise it becomes unreachable. */}
-            <div className="drawer-foot">
-              <div className="seg-theme" role="group" aria-label="Colour theme" style={{ display: "flex" }}>
+              {/* The bar drops the theme switch on the narrowest phones, so
+                  the drawer carries it — in line with Sign out, where the
+                  settings corner of the drawer lives. */}
+              <div className="seg-theme" role="group" aria-label="Colour theme" style={{ display: "flex", marginLeft: "auto" }}>
                 <button className={theme === "light" ? "active" : ""} aria-pressed={theme === "light"} onClick={() => setTheme("light")}>Light</button>
                 <button className={theme === "dark" ? "active" : ""} aria-pressed={theme === "dark"} onClick={() => setTheme("dark")}>Dark</button>
               </div>
             </div>
-            <div className="drawer-foot">
+            {/* The Switch carries no visible text of its own — the word
+                beside it is the label people actually read. */}
+            <div className="drawer-foot" style={{ justifyContent: "flex-end" }}>
+              <span style={{ color: "color-mix(in srgb, var(--color-text) 65%, transparent)" }}>Animations</span>
               <Switch on={motion === "on"} onClick={() => setMotion(motion === "on" ? "off" : "on")} label="Animations" />
             </div>
           </nav>
