@@ -231,9 +231,9 @@ export function TicketMobileScreen({ job, jobRecord, currentUser, onSaved, ticke
   };
 
   // ── Don't lose a half-entered ticket ───────────────────────────────────
-  // Save draft is a deliberate act and is disabled until there is a total, so
-  // a tab evicted by the phone halfway through entering a day's welds used to
-  // take the lot with it. This keeps a copy on the device as it is typed.
+  // Save draft is a deliberate act, so a tab evicted by the phone halfway
+  // through entering a day's welds used to take the lot with it. This keeps
+  // a copy on the device as it is typed.
   //
   // Keyed by the draft being edited, or by the job when it is a new ticket, so
   // two jobs on the go don't overwrite each other.
@@ -393,7 +393,9 @@ export function TicketMobileScreen({ job, jobRecord, currentUser, onSaved, ticke
   };
 
   const save = async sendForApproval => {
-    if (total <= 0) {
+    // Only sending needs charges — an empty draft is a legitimate
+    // placeholder, but a client can't be asked to sign a blank ticket.
+    if (sendForApproval && total <= 0) {
       setSaveError("This ticket has no charges on it yet — enter the day's quantities first.");
       return;
     }
@@ -783,7 +785,11 @@ export function TicketMobileScreen({ job, jobRecord, currentUser, onSaved, ticke
           <Btn variant="primary" block style={{ minHeight: 56, fontSize: 15 }} onClick={() => save(true)} disabled={saving || !ticketId || total <= 0}>
             {saving ? "Saving…" : emailFailed ? "Retry approval email" : "Email for approval"}
           </Btn>
-          <Btn variant="secondary" block style={{ minHeight: 48 }} onClick={() => save(false)} disabled={saving || !ticketId || total <= 0}>Save draft</Btn>
+          {/* No total gate here, unlike sending: a draft with nothing on it
+              yet is a legitimate placeholder for the day — it parks in the
+              tracker and Open tickets until it's finished. Only asking the
+              client to sign requires something to sign for. */}
+          <Btn variant="secondary" block style={{ minHeight: 48 }} onClick={() => save(false)} disabled={saving || !ticketId}>Save draft</Btn>
           {created && (
             <Btn variant="ghost" block style={{ minHeight: 44, marginTop: 4 }} disabled={saving || cancelling} onClick={cancelTicket}>
               {cancelling ? "Cancelling…" : "Cancel this ticket"}
