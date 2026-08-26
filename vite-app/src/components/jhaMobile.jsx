@@ -1,4 +1,4 @@
-import React, { useState, useEffect } from "react";
+import React, { useState, useEffect, useRef } from "react";
 import { JHA_TEMPLATES, SEED_HAZARDS, todayLocal, localDate, dayMonth } from "../data.js";
 import { Db } from "../db.js";
 import { Blueprint, Btn, CheckBox, TagX, Field, Dialog, ErrorBox, Switch, splitContact, hazardTagVariant, NoJobSelected, ConnectionBar, QueuedPanel, useMissingFields } from "./common.jsx";
@@ -71,6 +71,13 @@ export function JhaBuilderScreen({ job, jobRecord, contacts, currentUser, onSubm
   const [people, setPeople] = useState([]);
   const [helperId, setHelperId] = useState("");
   const [w1, setW1] = useState({ unit: "", idCode: "", tld: "", drd: "", alarm: "" });
+  // Whether the tech has hand-edited worker (1)'s kit. Once they have, the
+  // auto-derive effect below must not overwrite it — a corrected DRD or
+  // alarm serial typed before the crew/equipment lists land would otherwise
+  // be silently replaced by the default the moment those fetches resolve,
+  // and the JHA's PDF would record the wrong dosimeter serial.
+  const w1Touched = useRef(false);
+  const editW1 = next => { w1Touched.current = true; setW1(next); };
   const [w2, setW2] = useState({ unit: "", idCode: "", tld: "", drd: "", alarm: "" });
   const [equipment, setEquipment] = useState([]);
 
@@ -106,6 +113,7 @@ export function JhaBuilderScreen({ job, jobRecord, contacts, currentUser, onSubm
   // from the fetch above so the equipment list landing doesn't re-request the
   // crew list along with it.
   useEffect(() => {
+    if (w1Touched.current) return;
     const me = people.find(p => p.id === currentUser.id);
     if (me) setW1(kitOf(me, equipment));
   }, [people, equipment, currentUser.id]);
@@ -310,7 +318,7 @@ export function JhaBuilderScreen({ job, jobRecord, contacts, currentUser, onSubm
 
           <JhaSection title="Nuclear energy worker (1)" note="Technician" />
           <div style={{ fontSize: 13, fontFamily: "var(--font-heading)", fontWeight: 600 }}>{currentUser.name}</div>
-          <WorkerKit value={w1} onChange={setW1} missing={miss.is} onFixed={miss.clear} />
+          <WorkerKit value={w1} onChange={editW1} missing={miss.is} onFixed={miss.clear} />
 
           <JhaSection title="Nuclear energy worker (2)" note="Helper — if one is on site" />
           <Field label="Worker">

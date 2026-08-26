@@ -297,13 +297,26 @@ function FilePickerDialog({ onPick, onClose, busy }) {
 function ChatImage({ imageKey, onSized, onOpen }) {
   const [url, setUrl] = useState("");
   const [failed, setFailed] = useState(false);
+  const retried = useRef(false);
   useEffect(() => {
     let live = true;
+    retried.current = false;
+    setUrl("");
+    setFailed(false);
     Db.signedUrl("chat-media", imageKey)
       .then(u => { if (live) setUrl(u); })
       .catch(() => { if (live) setFailed(true); });
     return () => { live = false; };
   }, [imageKey]);
+  // The <img> is loading="lazy", so an off-screen picture isn't fetched until
+  // it nears the viewport — which can be well past the signed URL's 10-minute
+  // life on a phone left with chat open. Re-mint once on the load error before
+  // giving up, the same recovery ChatAudio has.
+  const onError = () => {
+    if (retried.current) { setFailed(true); return; }
+    retried.current = true;
+    Db.signedUrl("chat-media", imageKey).then(setUrl).catch(() => setFailed(true));
+  };
 
   if (failed) {
     return <div style={{ fontSize: 12, color: "color-mix(in srgb, var(--color-text) 55%, transparent)", padding: "6px 0" }}>Couldn't load the picture.</div>;
@@ -315,6 +328,7 @@ function ChatImage({ imageKey, onSized, onOpen }) {
     <img
       src={url} alt="Shared picture" loading="lazy"
       onLoad={onSized}
+      onError={onError}
       onClick={onOpen}
       style={{ display: "block", maxWidth: "100%", maxHeight: 320, cursor: "zoom-in" }}
     />
@@ -405,6 +419,19 @@ export function TeamChatScreen({ currentUser, onOpenJob, onRead }) {
   // Where this person had read up to when they walked in — the "new
   // messages" line sits there and stays put while they catch up.
   const [entryMark, setEntryMark] = useState(null);
+  // The current local day, so the "Today" divider stays correct on a phone
+  // left open across midnight. The message list can sit idle for hours (an
+  // unchanged poll returns the same array, so the row memo never recomputes
+  // on its own), and without this the last band kept reading "Today" into
+  // the next day. Checked each minute; only a real day change re-renders.
+  const [dayStamp, setDayStamp] = useState(() => new Date().toDateString());
+  useEffect(() => {
+    const t = setInterval(() => {
+      const now = new Date().toDateString();
+      setDayStamp(prev => (prev === now ? prev : now));
+    }, 60000);
+    return () => clearInterval(t);
+  }, []);
   // Every job number, uppercased, so a word in a message can be looked up.
   const [jobNums, setJobNums] = useState(null);
   // A voice note in progress: { startedAt } while the mic is hot.
@@ -604,12 +631,23 @@ export function TeamChatScreen({ currentUser, onOpenJob, onRead }) {
           if (!live) return;
           setMessages(prev => prev.filter(m => m.id !== id));
           setPins(prev => prev.some(p => p.id === id) ? prev.filter(p => p.id !== id) : prev);
+          // Don't leave the composer or the pin dialog pointed at a message
+          // that no longer exists: a reply whose target was just deleted
+          // would fail the reply_to FK on send with a misleading "couldn't
+          // send that", and an open pin dialog would show a ghost.
+          setReplyTarget(prev => (prev && prev.id === id ? null : prev));
+          setPinView(prev => (prev && prev.id === id ? null : prev));
         },
         onStatus: status => {
           if (!live || mine !== feedSeq) return;
           feedLiveRef.current = status === "SUBSCRIBED";
           setFeedLive(feedLiveRef.current);
           if (status === "SUBSCRIBED") {
+            // The feed healed on its own — a brief blip reconnects the same
+            // channel and re-fires SUBSCRIBED. Cancel the pending resubscribe
+            // or it fires 5s later and needlessly tears down a healthy feed
+            // (a second or two of no live messages plus a redundant refresh).
+            if (resubTimer) { clearTimeout(resubTimer); resubTimer = null; }
             // Whatever was said while the feed was down arrived nowhere —
             // pull it now rather than waiting out the poll interval.
             politeRefresh();
@@ -890,6 +928,10 @@ export function TeamChatScreen({ currentUser, onOpenJob, onRead }) {
       await Db.deleteChatMessage(id);
       setMessages(prev => prev.filter(m => m.id !== id));
       setPins(prev => prev.some(p => p.id === id) ? prev.filter(p => p.id !== id) : prev);
+      // Same scrub as the realtime onDelete — clear any composer reply or
+      // pin dialog that was pointing at the message just removed.
+      setReplyTarget(prev => (prev && prev.id === id ? null : prev));
+      setPinView(prev => (prev && prev.id === id ? null : prev));
     } catch (e) {
       setSendError(e.message || "Couldn't remove that message.");
     }
@@ -1060,7 +1102,7 @@ export function TeamChatScreen({ currentUser, onOpenJob, onRead }) {
     let prevMsg = null;
     let prevDayKey = "";
     let markPlaced = false;
-    const today = new Date().toDateString();
+    const today = dayStamp;
     for (const m of messages) {
       const d = new Date(m.createdAt);
       const dayKey = d.toDateString();
@@ -1250,7 +1292,7 @@ export function TeamChatScreen({ currentUser, onOpenJob, onRead }) {
     }
     return rows;
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [messages, isAdmin, currentUser.id, jobNums, entryMark, menuFor]);
+  }, [messages, isAdmin, currentUser.id, jobNums, entryMark, menuFor, dayStamp]);
 
   return (
     <div className="page chat-page" style={{ maxWidth: 760 }}>

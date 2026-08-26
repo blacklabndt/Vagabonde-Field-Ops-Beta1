@@ -34,9 +34,17 @@ export function mergeIn(prev, incoming) {
     const merged = {
       ...m,
       name: m.name || cur.name,
-      // A quote with a name beats one without: the incoming copy wins
-      // unless it's the nameless provisional and we already have better.
-      quoted: m.quoted && (m.quoted.name || !cur.quoted || !cur.quoted.name) ? m.quoted : cur.quoted,
+      // The quote, resolved the same way reactions are — an authoritative
+      // copy wins, a partial one defers. A copy shaped from the reply_to
+      // join (hasQuoteJoin) knows the truth: a null quote there means the
+      // parent was deleted or aged out, so clear it — otherwise a deleted
+      // quoted message keeps showing its text in the reply forever, on every
+      // already-open client, defeating the deletion. A realtime copy has no
+      // join, so its null means "didn't carry it": keep what we had, and let
+      // a named provisional beat a nameless one.
+      quoted: m.hasQuoteJoin
+        ? m.quoted
+        : (m.quoted && (m.quoted.name || !cur.quoted || !cur.quoted.name) ? m.quoted : cur.quoted),
       reactions: m.reactions != null ? m.reactions : cur.reactions
     };
     if (merged.name !== cur.name || merged.pinnedAt !== cur.pinnedAt ||

@@ -56,23 +56,32 @@ export function HomeScreen({ onCreateJob, onOpenJob, onStartTicket, currentUser,
   const [cachedAt, setCachedAt] = useState(null);
   const [pageSize, setPageSize] = useRowsPerPage();
 
+  // A request token, so a slower earlier read can't land after a newer one.
+  // Tapping through filters or pages fires overlapping, uncancelled reads;
+  // whichever returned last used to win, painting stale rows (and a total)
+  // under the current pill — the same race the tracker, contacts, equipment
+  // and timesheets screens all guard with this exact token.
+  const loadSeq = useRef(0);
   const fetchPage = async (p, f, q, sf) => {
+    const mine = ++loadSeq.current;
     setLoading(true);
     setLoadError("");
     try {
       const res = await Db.searchJobs({ page: p, pageSize, status: f, search: q, searchField: sf });
+      if (mine !== loadSeq.current) return;
       setRows(res.rows);
       setTotal(res.total);
       // Served from this device because the network is down. Not an error —
       // it is the board doing its job — so it gets a note, not a red box.
       setCachedAt(res.fromCache ? res.cachedAt : null);
     } catch (e) {
+      if (mine !== loadSeq.current) return;
       setCachedAt(null);
       setLoadError(/failed to fetch|networkerror|load failed/i.test(e.message || "")
         ? "No connection, and nothing saved on this device yet. Once you've opened the board in range, it stays available offline."
         : (e.message || "Couldn't reach the database. Check your connection and reload."));
     }
-    setLoading(false);
+    if (mine === loadSeq.current) setLoading(false);
   };
 
   // One effect covering every input to the query. As three (filter, debounced

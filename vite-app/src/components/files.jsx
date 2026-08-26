@@ -30,17 +30,27 @@ export function FilesScreen() {
   const [dragging, setDragging] = useState(false);
   const fileInput = useRef(null);
 
+  // A request token: breadcrumbs stay clickable during a load, so navigating
+  // folder A → B (or a post-delete reload overlapping a navigation) fires
+  // concurrent listFiles calls. Without the guard a slower older one could
+  // land last and paint one folder's contents under another folder's
+  // breadcrumb — where the row-x delete would then act on a file in a folder
+  // the user believes they left.
+  const loadSeq = useRef(0);
   const load = async (at = prefix) => {
+    const mine = ++loadSeq.current;
     setLoading(true);
     setError("");
     try {
       const { folders, files } = await Db.listFiles(at);
+      if (mine !== loadSeq.current) return;
       setFolders(folders);
       setFiles(files);
     } catch (e) {
+      if (mine !== loadSeq.current) return;
       setError(e.message || "Couldn't load files.");
     }
-    setLoading(false);
+    if (mine === loadSeq.current) setLoading(false);
   };
 
   useEffect(() => { load(prefix); }, [prefix]);
