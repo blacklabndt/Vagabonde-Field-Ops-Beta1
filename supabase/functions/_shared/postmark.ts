@@ -93,7 +93,12 @@ export function esc(v: unknown) {
 // many go out at once. A real send is one rep and maybe a couple of copies;
 // anything reaching for dozens is not a person filing paperwork.
 const MAX_RECIPIENTS = 10;
-const ADDRESS = /^[^\s@,;<>"]+@[^\s@,;<>".]+\.[a-z]{2,}$/i;
+// The domain half allows any depth of dot-separated labels — rep@mail.client.ca
+// is a perfectly ordinary contractor address, and the first cut of this
+// pattern (one label + TLD) refused it. The character class still bans
+// whitespace, commas, semicolons, angle brackets and quotes, which is the
+// header-injection guard doing the actual work here.
+const ADDRESS = /^[^\s@,;<>"]+@(?:[^\s@,;<>".]+\.)+[a-z]{2,}$/i;
 
 export function recipients(value: unknown, field: string): string {
   const list = String(value ?? "")

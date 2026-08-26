@@ -8,6 +8,14 @@ export function UploadMobileScreen({ job, jobRecord, currentUser, onSent }) {
   const [sending, setSending] = useState(false);
   const [error, setError] = useState("");
   const [queued, setQueued] = useState(false);
+  // Typed inline rather than through prompt(): a native prompt is a no-op in
+  // some embedded preview hosts (it returns immediately with no dialog), and
+  // on a phone it hides the file it is asking about behind a system sheet.
+  // Declared before the early returns below — hooks must run in the same
+  // order every render, and the moment setQueued(true) fired, the next
+  // render returned early, called one hook fewer, and React threw instead
+  // of showing the queued panel.
+  const [weldDraft, setWeldDraft] = useState({});
   if (queued) return <QueuedPanel what="the report" onDone={onSent} />;
   if (!job) return <NoJobSelected what="a report" />;
 
@@ -23,10 +31,6 @@ export function UploadMobileScreen({ job, jobRecord, currentUser, onSent }) {
     const key = crypto.randomUUID ? crypto.randomUUID() : String(Date.now()) + Math.random();
     setItems(p => [...p, { key, file: f, welds: [], state: "Queued" }]);
   };
-  // Typed inline rather than through prompt(): a native prompt is a no-op in
-  // some embedded preview hosts (it returns immediately with no dialog), and
-  // on a phone it hides the file it is asking about behind a system sheet.
-  const [weldDraft, setWeldDraft] = useState({});
   const addWeld = key => {
     const w = (weldDraft[key] || "").trim();
     if (!w) return;

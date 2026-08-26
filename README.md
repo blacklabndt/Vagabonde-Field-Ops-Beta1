@@ -76,10 +76,11 @@ safe to be public). What's live there:
   > adding a policy. Permissive policies **OR** together, so a later
   > `FOR ALL` policy added to relax *tab* gating silently ORed away the
   > `approved_at is null` condition that made approved tickets immutable —
-  > the app still refused to edit them, but the database no longer did.
-  > `20260814010000_rls_consolidation_and_indexes` splits that back into one
-  > policy per command. When widening access to a table, add a policy for the
-  > command you mean, never `FOR ALL`.
+  > the app still refused to edit them, but the database no longer did. The
+  > repair — one policy per command, each carrying its own conditions — is
+  > baked into the baseline migration this repo starts from. When widening
+  > access to a table, add a policy for the command you mean, never
+  > `FOR ALL`.
 
 #### Who owns what
 
@@ -161,16 +162,17 @@ safe to toggle — see "Turning on the token hook" below.
   contacts, the seven sample jobs, and a published rate schedule per client
   (RT film/CR/DR × 5 size bands, the other test methods, time & expense).
 
-> **On the migration history.** The original tables were created directly
-> against the live project rather than through migration files, so for a while
-> `supabase/migrations/` held only the changes made *after* that first pass.
-> The twelve `2026081104…`/`2026081111…` files (`001_core_schema` through
-> `012_seed_rate_overrides`) were recovered from the project's own migration
-> history table with `supabase migration fetch`, which is why they read as
-> machine-reconstructed next to the hand-written ones. With them in place the
-> folder is a complete account of the schema and local and remote histories
-> agree — but it has never actually been replayed against an empty project, so
-> treat a from-scratch rebuild as untested rather than guaranteed.
+> **On the migration history.** `supabase/migrations/` starts at
+> `20260817040000_beta1_baseline.sql` — the whole schema as it stood at the
+> Beta 1 cut, squashed into one file generated from the live catalogs. The
+> 77 evolutionary migrations that built up to it stayed with the prototype
+> archive and are deliberately not in this repository. Everything after the
+> baseline is applied history: each file has already run against the live
+> project, and the folder reconciles 1:1 with the project's migrations
+> table. Two cautions follow: never apply the baseline to the live project
+> (it is for fresh environments only), and treat a from-scratch rebuild as
+> untested rather than guaranteed — the baseline has never been replayed
+> against an empty project.
 
 Every screen reads and writes Supabase. What's left is filling in real
 behaviour behind a couple of buttons (see "Known gaps"), not wiring more

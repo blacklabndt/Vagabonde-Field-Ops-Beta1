@@ -492,6 +492,23 @@ function Stat({ label, value, unit }) {
   );
 }
 
+// One place makes the CDN <script> tags. The versions are pinned, so the
+// bytes can be pinned too: `integrity` makes a tampered CDN response fail
+// to execute instead of running inside the signed-in app. The timeout is
+// for the request that neither loads nor errors — without it a stalled
+// fetch left "Exporting…" or an approval spinning forever, with the cached
+// promise poisoned so even a retry click did nothing.
+function cdnScript(src, integrity, onDone, onFail) {
+  const tag = document.createElement("script");
+  tag.src = src;
+  tag.integrity = integrity;
+  tag.crossOrigin = "anonymous";
+  const timer = setTimeout(() => { tag.remove(); onFail(); }, 30000);
+  tag.onload = () => { clearTimeout(timer); onDone(); };
+  tag.onerror = () => { clearTimeout(timer); onFail(); };
+  document.head.appendChild(tag);
+}
+
 // SheetJS is ~900 KB and only one button needs it, so it's fetched on the
 // first export rather than blocking every page load.
 let xlsxPromise = null;
@@ -499,11 +516,12 @@ function loadXlsx() {
   if (window.XLSX) return Promise.resolve(window.XLSX);
   if (!xlsxPromise) {
     xlsxPromise = new Promise((resolve, reject) => {
-      const tag = document.createElement("script");
-      tag.src = "https://cdn.jsdelivr.net/npm/xlsx@0.18.5/dist/xlsx.full.min.js";
-      tag.onload = () => resolve(window.XLSX);
-      tag.onerror = () => { xlsxPromise = null; reject(new Error("Couldn't load the spreadsheet library.")); };
-      document.head.appendChild(tag);
+      cdnScript(
+        "https://cdn.jsdelivr.net/npm/xlsx@0.18.5/dist/xlsx.full.min.js",
+        "sha384-vtjasyidUo0kW94K5MXDXntzOJpQgBKXmE7e2Ga4LG0skTTLeBi97eFAXsqewJjw",
+        () => resolve(window.XLSX),
+        () => { xlsxPromise = null; reject(new Error("Couldn't load the spreadsheet library.")); }
+      );
     });
   }
   return xlsxPromise;
@@ -519,16 +537,18 @@ function loadJsPdf() {
   }
   if (!jspdfPromise) {
     jspdfPromise = new Promise((resolve, reject) => {
-      const add = (src, next) => {
-        const tag = document.createElement("script");
-        tag.src = src;
-        tag.onload = next;
-        tag.onerror = () => { jspdfPromise = null; reject(new Error("Couldn't load the PDF builder — check the connection and try again.")); };
-        document.head.appendChild(tag);
-      };
-      add("https://cdn.jsdelivr.net/npm/jspdf@2.5.2/dist/jspdf.umd.min.js", () =>
-        add("https://cdn.jsdelivr.net/npm/jspdf-autotable@3.8.4/dist/jspdf.plugin.autotable.min.js", () =>
-          resolve(window.jspdf.jsPDF)));
+      const fail = () => { jspdfPromise = null; reject(new Error("Couldn't load the PDF builder — check the connection and try again.")); };
+      cdnScript(
+        "https://cdn.jsdelivr.net/npm/jspdf@2.5.2/dist/jspdf.umd.min.js",
+        "sha384-en/ztfPSRkGfME4KIm05joYXynqzUgbsG5nMrj/xEFAHXkeZfO3yMK8QQ+mP7p1/",
+        () => cdnScript(
+          "https://cdn.jsdelivr.net/npm/jspdf-autotable@3.8.4/dist/jspdf.plugin.autotable.min.js",
+          "sha384-Xl/CUCfJbzsngMp0CFxkmF0VW/8C160IsGujqeQlIhaGxKz2+JsIGORFqtCPeldF",
+          () => resolve(window.jspdf.jsPDF),
+          fail
+        ),
+        fail
+      );
     });
   }
   return jspdfPromise;

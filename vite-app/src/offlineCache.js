@@ -106,7 +106,12 @@ export const OfflineCache = {
   // Drop one entry. Used by the ticket screen to throw away its in-progress
   // copy once the real thing is safely stored — a leftover would otherwise be
   // offered back the next time that job's ticket screen opens.
-  remove(key) { return ocDelete(key).catch(() => {}); },
+  // The skip-unchanged guard forgets the key too, or the next identical
+  // fetch would skip the write and leave the offline copy missing.
+  remove(key) {
+    rtLastWritten.delete(key);
+    return ocDelete(key).catch(() => {});
+  },
 
   // Network first, remembered copy second, and only ever for a real
   // connectivity failure. A permission error or a bad request is a genuine
@@ -158,6 +163,10 @@ export const OfflineCache = {
   // meant to rescue. Trading a rare silent failure for a common noisy one is
   // not a trade.
   async clear() {
+    // The guard map has to empty with the store: after a sign-out it still
+    // held the last serializations, so the next session's unchanged fetches
+    // skipped their writes and the offline fallback was silently gone.
+    rtLastWritten.clear();
     const db = await ocOpenDb();
     const tx = db.transaction(OC_STORE, "readwrite");
     tx.objectStore(OC_STORE).clear();

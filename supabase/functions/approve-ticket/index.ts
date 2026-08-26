@@ -8,9 +8,9 @@
 // GET  ?t=token  → the ticket, read-only, with an Approve button
 // POST ?t=token  → records the approval and burns the token
 //
-// Deploy with --no-verify-jwt, or Supabase will demand a bearer token and the
-// client rep will only ever see a 401:
-//   supabase functions deploy approve-ticket --no-verify-jwt
+// Runs without JWT verification — the rep has no bearer token, only the
+// link — pinned by [functions.approve-ticket] in supabase/config.toml so a
+// deploy can't quietly turn verification back on and 401 every approval.
 
 import { createClient } from "https://esm.sh/@supabase/supabase-js@2";
 import { esc } from "../_shared/postmark.ts";
@@ -139,9 +139,10 @@ async function handle(req: Request): Promise<Response> {
     // Conditional on the ticket still being unsigned, so two taps on a slow
     // phone connection cannot both land and record the second as the
     // signature. The read above narrows the window; this closes it.
+    const approvedAt = new Date().toISOString();
     const { error: signErr } = await admin.from("tickets").update({
       status: "Approved",
-      approved_at: new Date().toISOString(),
+      approved_at: approvedAt,
       approved_by_email: name,
       approved_ip: ip,
       approval_token: null // single use — burn it
@@ -150,7 +151,13 @@ async function handle(req: Request): Promise<Response> {
 
     // Re-render so the signed document itself carries the stamp, rather than
     // a stamp being tacked under a copy that still shows a blank signature
-    // line — the rep keeps this page, and it should read as signed.
+    // line — the rep keeps this page, and it should read as signed. The
+    // loaded invoice data predates the update, so the stamp fields go onto
+    // it by hand; re-reading the row here could race the update and hand
+    // back the unsigned version anyway.
+    invoiceData!.ticket.status = "Approved";
+    invoiceData!.ticket.approved_at = approvedAt;
+    invoiceData!.ticket.approved_by_email = name;
     return page(invoice() + `
       <div class="actions"><p class="signnote">Thank you. VagaboNDE has been notified and this ticket is now
       locked. You can print or save this page for your records.</p></div>`);

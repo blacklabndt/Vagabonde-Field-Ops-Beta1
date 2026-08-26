@@ -1004,9 +1004,10 @@ export const Db = {
     return data;
   },
 
-  // Removes an assessment and its stored PDF. Admin or Technician — the RLS
-  // policy is the enforcement; this reports the refusal rather than letting
-  // a delete that touched nothing pass as success.
+  // Removes an assessment and its stored PDF. A technician removes their
+  // own filings; an Admin removes any — the RLS policy is the enforcement;
+  // this reports the refusal rather than letting a delete that touched
+  // nothing pass as success.
   async deleteJha(jhaId) {
     const { data: rows, error: readErr } = await sbClient
       .from("jhas").select("pdf_key").eq("id", jhaId);
@@ -1023,7 +1024,7 @@ export const Db = {
     // A delete no policy allows is not an error: it reports success having
     // removed nothing. Ask for the rows back and treat silence as a refusal.
     if (!gone || !gone.length) {
-      throw new Error("That assessment wasn't deleted — deleting a hazard assessment takes an Admin or Technician account.");
+      throw new Error("That assessment wasn't deleted — a hazard assessment can only be removed by the technician who filed it, or an Admin.");
     }
     // The PDF goes with the row, best effort: an orphaned object in a private
     // bucket is untidy, not wrong, and must not resurrect the delete's error
@@ -2206,12 +2207,20 @@ export const Db = {
 
   async listProfiles() {
     return cached("profiles", () => OfflineCache.readThrough("profiles", async () => {
-      // Ordered client-side rather than in the query: the name columns arrive
-      // with the crew/timesheets migration, and sorting on one before it runs
-      // makes this throw — taking Users & access and the ticket crew list with
-      // it. Sorting here means the app works either side of the migration.
-      const { data, error } = await sbClient.from("profiles").select("*");
-      if (error) throw error;
+      // Paged like every other "all of them" list: PostgREST caps a response
+      // at 1,000 rows, and the timesheet roster adds an empty sheet for
+      // every profile this returns — a capped read would silently drop
+      // whoever sorted past the cap. Ordered by id in the query for stable
+      // pages; the display sort stays client-side, by name.
+      const data = await fetchAllPages(async page => {
+        const { data: rows, error, count } = await sbClient
+          .from("profiles")
+          .select("*", page === 0 ? { count: "exact" } : {})
+          .order("id")
+          .range(page * RESPONSE_ROW_CAP, (page + 1) * RESPONSE_ROW_CAP - 1);
+        if (error) throw error;
+        return { rows: rows || [], total: count ?? (rows || []).length };
+      });
       // `displayName` is what the app shows; `name` stays untouched so an
       // account whose parts were never filled in still reads sensibly.
       return data

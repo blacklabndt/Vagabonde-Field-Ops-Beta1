@@ -13,6 +13,13 @@ Deno.test("a single address passes through", () => {
   assertEquals(recipients("rep@client.ca", "to"), "rep@client.ca");
 });
 
+Deno.test("a subdomain address is fine", () => {
+  // Contractors run mail on subdomain hosts all the time; the first cut of
+  // the pattern only allowed one label before the TLD and refused these.
+  assertEquals(recipients("rep@mail.client.ca", "to"), "rep@mail.client.ca");
+  assertEquals(recipients("rep@exchange.client.co.uk", "to"), "rep@exchange.client.co.uk");
+});
+
 Deno.test("a list is trimmed and rejoined", () => {
   assertEquals(
     recipients(" a@b.ca , c@d.com ", "to"),

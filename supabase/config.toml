@@ -425,3 +425,16 @@ enabled = true
 # forgotten on a later deploy.
 [functions.approve-ticket]
 verify_jwt = false
+
+# Called by the database itself — an insert trigger (chat-push) and the
+# nightly pg_cron job (chat-retention) fire them through pg_net with only
+# the publishable apikey, no user JWT. The live functions are deployed with
+# verification off; pinning it here keeps a CLI deploy in a fresh
+# environment from silently turning it back on and 401ing every push and
+# every retention run. Both functions decide for themselves what they do —
+# neither takes instructions from its caller.
+[functions.chat-push]
+verify_jwt = false
+
+[functions.chat-retention]
+verify_jwt = false

@@ -1136,12 +1136,25 @@ function loadPdfjs() {
     pdfjsPromise = new Promise((resolve, reject) => {
       const tag = document.createElement("script");
       tag.src = "https://cdn.jsdelivr.net/npm/pdfjs-dist@3.11.174/build/pdf.min.js";
+      // The version is pinned, so the bytes are too: a tampered CDN
+      // response fails the integrity check and never executes in the
+      // signed-in app. The worker below can't carry SRI — it's fetched by
+      // pdf.js itself as a Worker — but a worker runs in its own scope
+      // with no DOM and no cookies, so the main script is the one that
+      // matters. The timeout catches the request that neither loads nor
+      // errors, which otherwise left the drop zone stuck with a poisoned
+      // cached promise.
+      tag.integrity = "sha384-/1qUCSGwTur9vjf/z9lmu/eCUYbpOTgSjmpbMQZ1/CtX2v/WcAIKqRv+U1DUCG6e";
+      tag.crossOrigin = "anonymous";
+      const fail = () => { pdfjsPromise = null; reject(new Error("Couldn't load the PDF reader.")); };
+      const timer = setTimeout(() => { tag.remove(); fail(); }, 30000);
       tag.onload = () => {
+        clearTimeout(timer);
         window.pdfjsLib.GlobalWorkerOptions.workerSrc =
           "https://cdn.jsdelivr.net/npm/pdfjs-dist@3.11.174/build/pdf.worker.min.js";
         resolve(window.pdfjsLib);
       };
-      tag.onerror = () => { pdfjsPromise = null; reject(new Error("Couldn't load the PDF reader.")); };
+      tag.onerror = () => { clearTimeout(timer); fail(); };
       document.head.appendChild(tag);
     });
   }
