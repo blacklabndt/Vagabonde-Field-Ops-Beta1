@@ -338,7 +338,7 @@ function NewUserDialog({ onClose, onCreated }) {
     <Dialog title="New user" onClose={onClose} actions={<><Btn variant="secondary" onClick={onClose}>Cancel</Btn><Btn variant="primary" onClick={submit} disabled={saving}>{saving ? "Creating…" : "Create account"}</Btn></>}>
       <ErrorBox>{error}</ErrorBox>
       <div style={{ fontSize: 12, color: "color-mix(in srgb, var(--color-text) 60%, transparent)" }}>
-        If email confirmation is on for this project, the new person needs to confirm their email before they can sign in.
+        The account is ready the moment it's created — you made it, so there's no confirmation email; give them the password and they can sign in.
       </div>
       <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 12 }}>
         <Field label="First name" missing={miss.is("firstName")}>

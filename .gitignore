@@ -14,3 +14,8 @@ supabase/.temp/
 .env
 .env.*
 !.env.example
+
+# Wrangler's local secrets file — its docs suggest putting credentials in
+# it, so it must never be committable, in any variant.
+.dev.vars
+.dev.vars.*

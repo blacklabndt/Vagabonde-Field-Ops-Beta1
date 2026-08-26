@@ -1,5 +1,4 @@
-import { createClient } from "@supabase/supabase-js";
-import { sbClient, SUPABASE_URL, SUPABASE_ANON_KEY, VAPID_PUBLIC_KEY } from "./config.js";
+import { sbClient, VAPID_PUBLIC_KEY } from "./config.js";
 import { todayLocal, localDate, dayMonth, ticketDateStamp, primaryContact, ageInDays, storageKeySafe, STANDARD_RATE_LINES, nonNegative, lineTotal } from "./data.js";
 import { OfflineCache } from "./offlineCache.js";
 import { Toasts } from "./toastBus.js";
@@ -1659,10 +1658,18 @@ export const Db = {
   // a small, purpose-built fetch rather than paging through search_tickets
   // to reassemble the same thing.
   async listUnsignedTicketContacts() {
-    const { data, error } = await sbClient
-      .from("tickets").select("id, client_contact")
-      .eq("status", "Awaiting approval");
-    if (error) throw error;
+    // Paged: "chase everything unsigned" means everything — a capped read
+    // would quietly leave the tickets past row 1,000 unchased while the
+    // dialog reported the truncated count as the whole job done.
+    const data = await fetchAllPages(async page => {
+      const { data: rows, error, count } = await sbClient
+        .from("tickets").select("id, client_contact", page === 0 ? { count: "exact" } : {})
+        .eq("status", "Awaiting approval")
+        .order("id")
+        .range(page * RESPONSE_ROW_CAP, (page + 1) * RESPONSE_ROW_CAP - 1);
+      if (error) throw error;
+      return { rows: rows || [], total: count ?? (rows || []).length };
+    });
     return data.map(t => ({ id: t.id, contactLabel: t.client_contact ? t.client_contact.name : "" }));
   },
 
@@ -2272,21 +2279,22 @@ export const Db = {
     invalidate("profiles");
   },
 
-  // Creates a real Supabase Auth user (not just a profile) via signUp on a
-  // throwaway client instance — `persistSession: false` keeps this from
-  // touching the admin's own logged-in session. The on_auth_user_created
-  // trigger provisions the matching profile row from the metadata here.
-  // Note: if "Confirm email" is on for this project (the default), the new
-  // person has to click the confirmation email before they can sign in.
+  // Creates a real staff account — Admin-to-Admin, through the create-user
+  // Edge Function, which holds the service-role key and verifies the
+  // caller is a signed-in Admin before touching Auth. This used to go
+  // through the public signUp endpoint with the role riding in client
+  // metadata, which made the rank the client's claim on an endpoint anyone
+  // with the publishable key could reach; the provisioning trigger now
+  // caps metadata roles to the field ones, and the function writes the
+  // real rank itself. Accounts arrive email-confirmed — the admin standing
+  // there is the confirmation — so the new tech signs in immediately.
   async createUserAccount({ firstName, lastName, email, password, role, cert, level, isSubcontractor }) {
     const name = [firstName, lastName].filter(Boolean).join(" ").trim();
-    const tempClient = createClient(SUPABASE_URL, SUPABASE_ANON_KEY, {
-      auth: { persistSession: false, autoRefreshToken: false }
+    const { data, error } = await sbClient.functions.invoke("create-user", {
+      body: { email, password, name, role, cert }
     });
-    const { data, error } = await tempClient.auth.signUp({
-      email, password, options: { data: { name, role, cert } }
-    });
-    if (error) throw error;
+    if (error) throw new Error(await readFnError(error));
+    if (data && data.error) throw new Error(data.error);
     invalidate("profiles");
     // The trigger provisions the profile from auth metadata, which has no
     // slot for the name parts or the subcontractor flag — so set them after.

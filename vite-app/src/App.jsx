@@ -262,7 +262,15 @@ export function App() {
         }
         if (user) {
           setCurrentUser(user);
-          setScreen(user.tabs[0]);
+          // First screen: the first real tab — never a contextual one
+          // (job/ticket screens open from a job, and there is no job
+          // yet) — unless the URL already seeded the chat, which is how
+          // a tapped push notification cold-starts the installed app.
+          // Overwriting that seed here sent every notification tap on a
+          // restored session to the board instead of the room — exactly
+          // what the goto handling above exists to prevent.
+          const first = tabList(user.tabs).filter(t => !CONTEXT_TABS.includes(t))[0] || "board";
+          setScreen(s => (s === "chat" && tabList(user.tabs).includes("chat")) ? "chat" : first);
         }
       } catch (e) {
         console.error("Couldn't restore the session:", e.message);

@@ -55,6 +55,10 @@ export function UploadMobileScreen({ job, jobRecord, currentUser, onSent }) {
     try {
       for (const it of items) {
         try {
+          // Each file leaves the list the moment it is safely stored (or
+          // queued), not when the whole loop finishes — a failure on the
+          // second file used to keep the first one in the list, and the
+          // retry filed it again, report row, email and all.
           // `send` stamps `sent_at` on the row; it does not send anything. This
           // screen used to pass `send: true` and no email, so every report from
           // a phone was recorded as delivered to the contractor while nothing
@@ -79,8 +83,11 @@ export function UploadMobileScreen({ job, jobRecord, currentUser, onSent }) {
           });
           queuedCount++;
         }
+        // Stored or queued — either way this file is accounted for. Only a
+        // thrown non-network error skips this, leaving exactly the
+        // unaccounted files in the list for the retry.
+        removeItem(it.key);
       }
-      setItems([]);
       if (queuedCount) {
         setQueued(true);
       } else if (!recipient) {
