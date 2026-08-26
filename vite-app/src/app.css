@@ -1,0 +1,591 @@
+/* App-level layout CSS. Component visual language (buttons, tags, fields,
+   tables, dialogs, the blueprint frame) all comes from the Industry design
+   system at _ds/.../styles.css — this file only adds what a page shell and
+   this app's specific screens need on top of it. */
+
+:root[data-theme="dark"] {
+  color-scheme: dark;
+  --color-bg: #16181a;
+  --color-surface: #212426;
+  --color-text: #eceded;
+  --color-accent: #94bce3;
+  --color-accent-2: #94bce3;
+  --color-divider: color-mix(in srgb, #eceded 20%, transparent);
+  --color-neutral-100: #2b2b2d; --color-neutral-200: #424244; --color-neutral-300: #5d5d60;
+  --color-neutral-400: #7a7a7d; --color-neutral-500: #98989b; --color-neutral-600: #b7b7ba;
+  --color-neutral-700: #d4d4d7; --color-neutral-800: #e7e7ea; --color-neutral-900: #f5f5f8;
+  --color-accent-100: #1d2d3d; --color-accent-200: #2c455d; --color-accent-300: #416180;
+  --color-accent-400: #597ea3; --color-accent-500: #749dc4; --color-accent-600: #94bce3;
+  --color-accent-700: #b5d9fd; --color-accent-800: #d6ebff; --color-accent-900: #eef6ff;
+  --color-accent-2-100: #1f2d3a; --color-accent-2-200: #314457; --color-accent-2-300: #486077;
+  --color-accent-2-400: #627d98; --color-accent-2-500: #7e9cb8; --color-accent-2-600: #9ebbd8;
+  --color-accent-2-700: #bdd8f2; --color-accent-2-800: #d6ebff; --color-accent-2-900: #eef6ff;
+  --shadow-sm: 0 1px 2px rgba(0,0,0,0.5);
+  --shadow-md: 0 3px 10px rgba(0,0,0,0.55);
+  --shadow-lg: 0 12px 32px rgba(0,0,0,0.6);
+}
+/* The app's two motion curves — every entrance decelerates on the same
+   ease, every exit accelerates on the same one, so the drawer, dialogs,
+   screens and bubbles all read as one hand. Durations sit on a small
+   scale (180–450ms) rather than each animation inventing its own. */
+:root {
+  --ease-enter: cubic-bezier(.22, .75, .28, 1);
+  --ease-exit: cubic-bezier(.55, .06, .68, .19);
+}
+
+html, body, #root { min-height: 100%; }
+*, *::before, *::after { box-sizing: border-box; }
+body {
+  margin: 0; background: var(--color-bg); color: var(--color-text);
+  font-family: var(--font-body); transition: background .15s, color .15s;
+  -webkit-text-size-adjust: 100%;
+}
+button { font-family: inherit; }
+input[type=range] { accent-color: var(--color-accent); }
+
+/* — top bar — */
+.topbar {
+  display: flex; align-items: center; gap: 22px;
+  padding: 14px 28px; border-bottom: 1px solid var(--color-divider);
+}
+/* The logo is drawn as a mask rather than an <img> so it inherits the theme's
+   text colour — the artwork is a single-colour wordmark, and a fixed-fill
+   image would go invisible on the dark ground.
+
+   The artwork used to be inlined as a URL-encoded data URI, written out twice
+   because -webkit-mask and mask each needed their own copy. That was 23KB of
+   unreadable duplication in a render-blocking stylesheet — 57% of this file —
+   and it meant a brand change had to be made in two encoded blobs. It is now
+   a real file, named once. The service worker precaches SVGs, so it is still
+   there with no signal. */
+.topbar-brand {
+  --wordmark: url("/brand/wordmark.svg");
+  display: block; flex: none;
+  width: 156px; height: 36px;
+  background: var(--color-text);
+  -webkit-mask: var(--wordmark) left center / contain no-repeat;
+  mask: var(--wordmark) left center / contain no-repeat;
+}
+.seg-theme {
+  display: inline-flex; border: 1px solid var(--color-divider); overflow: hidden;
+}
+.seg-theme button {
+  background: transparent; border: none; cursor: pointer; padding: 6px 10px;
+  font-size: 12px; font-family: var(--font-heading); font-weight: 600;
+  color: color-mix(in srgb, var(--color-text) 60%, transparent);
+}
+.seg-theme button:not(.active):hover { background: color-mix(in srgb, var(--color-text) 7%, transparent); }
+.seg-theme button.active { background: var(--color-accent); color: var(--color-bg); }
+
+/* — page shell — */
+.page { max-width: 1240px; margin: 0 auto; padding: 32px 28px 64px; }
+.kicker { font-size: 11px; letter-spacing: .12em; text-transform: uppercase; color: var(--color-accent); }
+
+/* — filter pills — */
+.pill {
+  font-family: var(--font-heading); font-weight: 600; font-size: 13px;
+  padding: 7px 14px; cursor: pointer; background: transparent;
+  border: 1px solid var(--color-divider); color: var(--color-text);
+}
+.pill:not(.active):hover { background: color-mix(in srgb, var(--color-text) 7%, transparent); border-color: color-mix(in srgb, var(--color-text) 45%, transparent); }
+.pill.active { background: var(--color-accent); color: var(--color-bg); border-color: var(--color-accent); }
+
+/* — segmented control on real <button>s (Contacts' scope/type toggles) —
+   the DS's .seg-opt styles a hidden radio input via :has(), which never
+   matches a button, so these rendered as bare unstyled buttons (browser
+   outset border + grey face). Same look, built for the markup this app
+   actually uses. */
+.seg-opt {
+  appearance: none; border: none; background: none; color: var(--color-text);
+  font-family: var(--font-body);
+}
+.seg-opt.active { background: var(--color-accent); color: var(--color-bg); }
+.seg-opt:not(.active):hover { background: color-mix(in srgb, var(--color-text) 7%, transparent); }
+.seg-opt:focus-visible { outline: 2px solid var(--color-accent); outline-offset: -2px; }
+
+/* — status tags helper — dashed tag variant, not in the DS — */
+.tag-dashed { border: 1px dashed color-mix(in srgb, var(--color-text) 45%, transparent); color: color-mix(in srgb, var(--color-text) 55%, transparent); }
+
+/* — pdf glyph, drawn not imaged — */
+.pdf-glyph {
+  display: inline-flex; align-items: flex-end; justify-content: center;
+  border: 1px solid var(--color-divider); font-size: 6px; font-weight: 700;
+  letter-spacing: .02em; color: color-mix(in srgb, var(--color-text) 60%, transparent);
+  padding-bottom: 2px; flex: none;
+}
+
+/* — mobile phone frame used by JHA / upload / ticket screens — */
+.phone-shell { display: flex; gap: 28px; align-items: flex-start; flex-wrap: wrap; }
+.phone-frame { width: 390px; padding: 14px; display: flex; flex-direction: column; gap: 12px; }
+.phone-explain { width: 280px; font-size: 13px; color: color-mix(in srgb, var(--color-text) 65%, transparent); padding-top: 10px; }
+.hazard-row { min-height: 56px; display: flex; align-items: center; gap: 12px; padding: 8px 10px; border: 1px solid transparent; }
+.hazard-row.on { border-color: var(--color-accent); background: color-mix(in srgb, var(--color-accent) 7%, transparent); }
+.hazard-check {
+  width: 24px; height: 24px; flex: none; border: 1.5px solid var(--color-divider);
+  display: flex; align-items: center; justify-content: center; cursor: pointer; background: var(--color-surface);
+}
+.hazard-check.on { background: var(--color-accent); border-color: var(--color-accent); color: var(--color-bg); }
+
+/* — dispatch board / tables — */
+tbody tr.clickable { cursor: pointer; }
+/* The billing tracker is nine columns wide. On a phone the choice is between
+   a horizontal scroll inside the card and a page that scrolls sideways as a
+   whole — the first keeps the rest of the layout intact. */
+.table-scroll { overflow-x: auto; -webkit-overflow-scrolling: touch; }
+/* 560px was below what the wide tables actually need, so instead of the
+   wrapper scrolling, the two auto-width columns were crushed — on the board
+   the LSD ended up 45px wide, wrapping to one token per line and dragging
+   every row to 123px. The floor is the sum of the fixed column widths plus
+   room for the auto ones. */
+/* Only the genuinely wide tables get a floor — the ones with seven to nine
+   columns, where letting them shrink crushed the auto-width columns to a few
+   characters each. Narrow tables (files, a job's own three tables) opt out by
+   not carrying .table-wide, so they no longer draw a scrollbar for content that
+   already fits. */
+.table-scroll > .table.table-wide { min-width: 900px; }
+
+/* — dialog field grid scrolls, not the dialog shell — */
+/* overflow-x hidden as well as the vertical auto: with overflow-x left at
+   visible the browser resolves it to auto, so one wide child (the ticket-number
+   plate) drew a horizontal scrollbar across every dialog. */
+.dialog-field-grid { overflow-y: auto; overflow-x: hidden; padding-right: 4px; }
+.dialog-field-grid > * { min-width: 0; }
+
+/* Heavier scrim than the design system's 50% default: these dialogs sit over
+   dense tables, and a light scrim left the page competing with the form. */
+.dialog-backdrop {
+  background: color-mix(in srgb, var(--color-neutral-900) 82%, transparent);
+  backdrop-filter: blur(2px);
+  animation: backdrop-in .26s ease both;
+}
+/* Every dialog arrives with a small zoom: the scrim fades up and the
+   panel scales in from 95% with a touch of rise. One rule here covers
+   every popup in the app; the global reduced-motion rule flattens it. */
+.dialog-backdrop .dialog {
+  animation: dialog-in .26s var(--ease-enter) both;
+  will-change: transform, opacity;
+}
+@keyframes dialog-in {
+  from { opacity: 0; transform: scale(.95) translateY(10px); }
+  to { opacity: 1; transform: none; }
+}
+/* The chat's full-screen picture viewer takes the same entrance. */
+.lightbox-in { animation: backdrop-in .24s ease both; }
+.lightbox-in img { animation: dialog-in .24s var(--ease-enter) both; }
+
+/* Arriving on a section: a rise-and-fade with enough travel to be
+   seen. The transform is safe ONLY because ScreenIn (App.jsx) strips
+   this class on animationend — a lingering transform animation makes
+   the wrapper the containing block for the fixed-position dialogs
+   inside, which once centred every popup against the page instead of
+   the viewport. If this class ever stops being removed, popups return
+   to the bottom of phone screens. */
+.screen-in { animation: screen-in .26s var(--ease-enter) both; }
+@keyframes screen-in {
+  from { opacity: 0; transform: translateY(12px); }
+  to { opacity: 1; transform: none; }
+}
+/* The Blueprint frame deliberately has no fill, but a dialog needs one —
+   otherwise its dark body text sits directly on the dark scrim. */
+.dialog-backdrop .dialog { background: var(--color-bg); }
+:root[data-theme="dark"] .dialog-backdrop {
+  background: color-mix(in srgb, #000 78%, transparent);
+}
+
+/* — small × on a table row (delete) — */
+.row-x {
+  width: 24px; height: 24px; border: 1px solid var(--color-divider);
+  background: transparent; cursor: pointer; font-size: 14px; line-height: 1;
+  color: color-mix(in srgb, var(--color-text) 55%, transparent);
+}
+.row-x:hover { border-color: var(--color-accent); color: var(--color-accent); }
+
+/* — summary strip — */
+.strip { display: grid; gap: 1px; background: var(--color-divider); border: 1px solid var(--color-divider); }
+.strip > div { background: var(--color-bg); padding: 12px 14px; }
+.strip .strip-label { font-size: 10px; text-transform: uppercase; letter-spacing: .08em; color: color-mix(in srgb, var(--color-text) 55%, transparent); }
+.strip .strip-value { font-family: var(--font-heading); font-weight: 600; font-size: 20px; font-variant-numeric: tabular-nums; }
+
+/* — stat tiles — */
+.stat-tile { padding: 16px 18px; display: flex; flex-direction: column; gap: 4px; }
+.stat-label { font-size: 10px; text-transform: uppercase; letter-spacing: .08em; color: color-mix(in srgb, var(--color-text) 55%, transparent); }
+.stat-figure { font-family: var(--font-heading); font-weight: 600; font-size: 30px; font-variant-numeric: tabular-nums; }
+.stat-note { font-size: 12px; color: color-mix(in srgb, var(--color-text) 55%, transparent); }
+
+.tabular { font-variant-numeric: tabular-nums; }
+.error-box[hidden] { display: none; }
+.error-box {
+  border: 1px solid var(--color-accent-700); background: color-mix(in srgb, var(--color-accent) 10%, transparent);
+  color: var(--color-accent-700); font-size: 12px; padding: 8px 10px;
+}
+:root[data-theme="dark"] .error-box { color: var(--color-accent-800); }
+
+.switch { width: 46px; height: 26px; border: 1px solid var(--color-divider); position: relative; cursor: pointer; background: var(--color-surface); flex: none; }
+.switch .knob { position: absolute; top: 2px; left: 2px; width: 20px; height: 20px; background: var(--color-neutral-500); transition: left .12s; }
+.switch.on { background: color-mix(in srgb, var(--color-accent) 25%, transparent); border-color: var(--color-accent); }
+.switch.on .knob { left: 22px; background: var(--color-accent); }
+
+@media (max-width: 900px) {
+  .page { padding: 20px 16px 48px; }
+  .grid-2col { grid-template-columns: 1fr !important; }
+  /* The job record keeps the desktop's three columns at this width \u2014 gap
+     just tightens a little so three narrow value columns still fit. */
+  .job-record-grid { gap: 10px !important; }
+  .topbar { flex-wrap: wrap; gap: 12px; padding: 12px 16px; }
+  .phone-frame { width: 100%; max-width: 390px; }
+  .phone-explain { width: 100%; }
+}
+
+
+/* ─────────────────────────────────────────────────────────────────────────
+   Phone layout
+   ─────────────────────────────────────────────────────────────────────────
+   The ten tabs do not fit a phone, so below 760px they move behind a
+   hamburger and the drawer carries the open job as well — coming back to the
+   job you are working is the most common move in the field.
+
+   Columns marked .col-opt are dropped rather than scrolled: on the board that
+   leaves Job, Project, Client and LSD, which is what a technician is looking
+   for. Nothing is lost — tapping the row opens the job.  */
+
+/* Every section lives behind the hamburger, at every width. Eleven tabs in a
+   bar meant either a scrolling strip nobody noticed or names shortened past
+   the point of meaning; the drawer gives each one a full-width row with room
+   for the open job above them. */
+.nav-toggle {
+  display: flex; flex-direction: column; justify-content: center; gap: 4px;
+  width: 44px; height: 44px; flex: none; padding: 0 10px;
+  background: none; border: 1px solid var(--color-divider); cursor: pointer;
+}
+.nav-toggle span { display: block; height: 2px; background: var(--color-text); }
+.nav-toggle:hover { border-color: var(--color-accent); }
+.nav-toggle:active { background: color-mix(in srgb, var(--color-accent) 12%, transparent); }
+.seg-theme { margin-left: auto; }
+.row-status { display: none; }
+
+/* The drawer overlay is width-independent, because the open/closed state is:
+   styling it only inside a media query meant rotating a phone to landscape
+   turned an open menu into a band of loose buttons in normal flow. */
+.drawer-backdrop {
+  position: fixed; inset: 0; z-index: 60;
+  background: color-mix(in srgb, #000 55%, transparent);
+  animation: backdrop-in .3s ease both;
+}
+.drawer {
+  position: absolute; inset: 0 auto 0 0; width: min(84vw, 320px);
+  display: flex; flex-direction: column;
+  background: var(--color-bg); border-right: 1px solid var(--color-divider);
+  padding: 10px 0 14px; overflow-y: auto;
+  animation: drawer-in .3s var(--ease-enter) both;
+  will-change: transform;
+}
+/* Closing plays the same pair backwards; the App unmounts the drawer on
+   animationend, so the slide finishes before the DOM goes. The global
+   reduced-motion rule flattens all four to an instant. */
+.drawer-backdrop.closing { animation: backdrop-out .24s ease both; }
+.drawer-backdrop.closing .drawer { animation: drawer-out .24s var(--ease-exit) both; }
+@keyframes drawer-in { from { transform: translateX(-100%); } to { transform: none; } }
+@keyframes drawer-out { from { transform: none; } to { transform: translateX(-100%); } }
+@keyframes backdrop-in { from { opacity: 0; } to { opacity: 1; } }
+@keyframes backdrop-out { from { opacity: 1; } to { opacity: 0; } }
+
+.drawer > button {
+  /* flex: none, because the drawer is a scrolling flex column: with ten tabs
+     the content is taller than a phone, and shrinkable items collapsed to a
+     couple of pixels each instead of the list scrolling. */
+  display: block; flex: none; width: 100%; text-align: left;
+  min-height: 52px; padding: 0 18px;
+  font-family: var(--font-body); font-size: 16px;
+  background: none; border: 0; border-bottom: 1px solid var(--color-divider);
+  color: var(--color-text); cursor: pointer;
+}
+.drawer > button.active {
+  color: var(--color-accent-700);
+  box-shadow: inset 3px 0 0 var(--color-accent);
+}
+.drawer > button:not(.active):hover { background: color-mix(in srgb, var(--color-text) 6%, transparent); }
+.drawer > button:active { background: color-mix(in srgb, var(--color-accent) 10%, transparent); }
+.drawer-foot {
+  flex: none; padding: 14px 18px 0;
+  display: flex; align-items: center; gap: 12px; font-size: 13px;
+}
+/* Only the first footer block pushes to the bottom; the theme row sits under
+   it rather than fighting it for the same auto margin. */
+.drawer-foot:first-of-type { margin-top: auto; }
+
+@media (max-width: 760px) {
+
+  .topbar { gap: 12px; padding: 10px 14px; flex-wrap: nowrap; }
+  .topbar-brand { width: 116px; height: 26px; }
+  /* The bar keeps only what a thumb needs: menu, mark, theme. Name and sign
+     out live in the drawer, where there is room for them. */
+  .topbar-who { display: none; }
+
+
+  .col-opt { display: none !important; }
+  /* With the optional columns gone there is nothing to scroll sideways for,
+     so drop the min-width that was forcing it. */
+  .table-scroll > .table.table-wide { min-width: 0; }
+  .table th, .table td { padding-left: 8px; padding-right: 8px; }
+  .row-status { display: block; margin-top: 2px; }
+
+  /* The JHA, upload and ticket screens stop being mockups on a phone: no
+     frame, no explanatory column, full width. They ARE the phone screen. */
+  .phone-shell { display: block; }
+  .phone-frame {
+    width: 100%; max-width: none;
+    border: 0; padding: 0; gap: 14px;
+  }
+  .phone-frame > .corner { display: none; }
+  .phone-explain { display: none; }
+
+  /* Anything typed or tapped gets a thumb-sized target. */
+  .input, .btn, select.input { min-height: 46px; font-size: 16px; }
+  .page { padding: 16px 12px 56px; }
+  .page h2 { font-size: 27px; }
+  .job-record-grid { gap: 8px !important; }
+  .job-record-grid > div { font-size: 12px; }
+}
+
+/* Very narrow: the search row and its dropdown stop sharing a line. */
+@media (max-width: 460px) {
+  .seg-theme { display: none; }
+  .topbar-brand { width: 104px; }
+}
+
+/* — a field the form is still waiting on —
+   The error box says what is wrong; this says where. On a short dialog the
+   message alone is enough, but "Site · LSD is required" on a form with eight
+   boxes leaves you reading labels to find the one it means.
+   Matches .error-box's colour so a problem looks the same wherever it shows.
+   The ring is drawn with box-shadow rather than a thicker border so nothing
+   reflows when a field is flagged. */
+.input.invalid,
+.input.invalid:focus {
+  border-color: var(--color-accent-700);
+  box-shadow: 0 0 0 2px color-mix(in srgb, var(--color-accent) 30%, transparent);
+  background: color-mix(in srgb, var(--color-accent) 7%, transparent);
+}
+/* The label above it, so the pairing is legible without relying on the
+   border colour alone — the highlight should not be the only signal.
+   Selector carries the parent because the design system styles `.field label`
+   directly, which outranks a lone class and left the label its default grey. */
+.field > label.field-label-missing,
+label.field-label-missing {
+  color: var(--color-accent-700);
+  font-weight: 600;
+}
+
+/* The save confirmation, rising a little as it appears. The reduced-motion
+   rule below flattens this to nothing, which is the right outcome — the
+   message is the point, the movement isn't. */
+@keyframes toast-in {
+  from { opacity: 0; transform: translateX(-50%) translateY(8px); }
+  to   { opacity: 1; transform: translateX(-50%) translateY(0); }
+}
+
+/* Motion is governed by the app's own switch (drawer footer), not the
+   OS preference: Windows boxes with animation effects off were silently
+   flattening the whole app, and an in-app toggle is discoverable where
+   a buried OS setting is not. data-motion is stamped by App.jsx. */
+:root[data-motion="off"] *,
+:root[data-motion="off"] *::before,
+:root[data-motion="off"] *::after {
+  animation-duration: 0.01ms !important; animation-iteration-count: 1 !important;
+  transition-duration: 0.01ms !important; scroll-behavior: auto !important;
+}
+
+/* — waiting — */
+/* An indeterminate bar, not a percentage. Nothing here knows how many rows
+   are coming, so the honest signal is "still working" rather than a made-up
+   fraction. The point is only that a screen which is fetching should not look
+   like a screen that has hung. */
+.loading {
+  display: flex; flex-direction: column; gap: 8px;
+  font-size: 13px; color: color-mix(in srgb, var(--color-text) 55%, transparent);
+}
+.loading-bar {
+  position: relative; height: 3px; overflow: hidden;
+  background: color-mix(in srgb, var(--color-text) 16%, transparent);
+}
+.loading-bar::after {
+  content: ""; position: absolute; top: 0; bottom: 0; width: 38%;
+  background: var(--color-accent);
+  animation: loading-slide 1.15s ease-in-out infinite;
+}
+@keyframes loading-slide {
+  from { left: -38%; }
+  to   { left: 100%; }
+}
+@keyframes loading-breathe {
+  /* Grows and shrinks from the left edge rather than fading.
+     Two earlier attempts failed on the same 3px bar: pulsing .2 to .65 was so
+     faint it read as nothing, and raising the floor to .45 to fix that
+     flattened the contrast until it read as a solid line. Opacity is simply
+     not a strong enough signal at this size. Width is unmistakable, and it
+     still does not travel across the screen — which is the part that carries
+     vestibular risk, not the change itself. */
+  0%, 100% { width: 15%; opacity: .7; }
+  50%      { width: 100%; opacity: 1; }
+}
+
+/* The blanket reduced-motion rule above stops every animation in the app,
+   which is right for decoration and wrong for this one: switching it off
+   leaves a static bar that says nothing, and the whole reason this exists is
+   to tell somebody the app is still working. So it is exempted — but it grows
+   and shrinks in place instead of travelling, because a thing changing size
+   where it stands is not what carries the vestibular risk; a thing crossing
+   the viewport is. */
+:root[data-motion="off"] .loading-bar::after {
+  left: 0; width: 15%;
+  animation: loading-breathe 2s ease-in-out infinite !important;
+  animation-duration: 2s !important;
+  animation-iteration-count: infinite !important;
+}
+
+/* — the easter egg — */
+/* Its own overlay rather than the Dialog component: Dialog traps focus, locks
+   the page and is built for forms, and this is a canvas you tap. It should
+   also look like it is not part of the app, because it is not. */
+.egg-backdrop {
+  position: fixed; inset: 0; z-index: 200; display: grid; place-items: center;
+  background: rgba(20, 22, 24, .72); padding: 16px;
+  /* A game is tapped dozens of times a minute. The tap highlight is meant to
+     confirm you hit a link, and on a canvas it just strobes the screen — this
+     property inherits, so the whole dialog is covered from here. */
+  -webkit-tap-highlight-color: transparent;
+}
+.egg-box {
+  background: var(--color-bg); border: 1px solid var(--color-text);
+  max-width: 100%; max-height: 100%; display: flex; flex-direction: column;
+  /* Fast repeated taps otherwise start selecting the heading and footer text,
+     which flashes its own highlight and pops up the selection handles. */
+  user-select: none; -webkit-user-select: none; -webkit-touch-callout: none;
+}
+.egg-head, .egg-foot {
+  display: flex; align-items: center; gap: 10px;
+  padding: 9px 12px; font-size: 12px;
+  color: color-mix(in srgb, var(--color-text) 62%, transparent);
+}
+.egg-head { border-bottom: 1px solid var(--color-divider); }
+.egg-head strong { font-family: var(--font-heading); font-size: 15px; color: var(--color-text); }
+.egg-foot { border-top: 1px solid var(--color-divider); }
+.egg-stage { position: relative; display: flex; }
+.egg-board {
+  position: absolute; left: 50%; top: 50%; transform: translate(-50%, -50%);
+  width: min(84%, 260px); padding: 11px 13px; font-size: 13px;
+  /* Opaque: at 93% the pipe behind it showed through as a pale band that
+     read as a rendering fault rather than as a deliberate effect. */
+  background: var(--color-bg);
+  border: 1px solid var(--color-text);
+  /* Taps fall through to the canvas underneath, so the board never becomes
+     something you have to dismiss before you can play again. */
+  pointer-events: none;
+}
+.egg-board strong {
+  display: block; margin-bottom: 7px;
+  font-family: var(--font-heading); font-size: 14px;
+}
+.egg-board ol { list-style: none; margin: 0; padding: 0; }
+.egg-board li { display: flex; gap: 9px; padding: 3px 0; }
+.egg-board li + li { border-top: 1px solid var(--color-divider); }
+.egg-board .pos { width: 1.3em; opacity: .5; font-variant-numeric: tabular-nums; }
+.egg-board .who { flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.egg-board .pts { font-variant-numeric: tabular-nums; font-weight: 600; }
+.egg-board li.mine { font-weight: 600; }
+.egg-board-note { margin: 0; opacity: .6; }
+/* The platformer cabinet: wider stage, an on-screen pad, and the little
+   status card the shifts announce themselves on. */
+/* Two classes, so this outranks the base .egg-canvas sizing below no matter
+   which order a bundler emits them in. */
+.egg-canvas.egg-canvas-wide {
+  width: min(480px, 92vw, calc((100vh - 210px) * 1.5385));
+  width: min(480px, 92vw, calc((100dvh - 210px) * 1.5385));
+  aspect-ratio: 480 / 312;
+}
+.egg-pad { display: flex; gap: 10px; padding: 10px 12px 0; }
+.egg-pad-btn {
+  min-width: 64px; min-height: 44px; font-size: 20px; line-height: 1;
+  border: 1px solid var(--color-text); background: var(--color-bg);
+  color: var(--color-text); cursor: pointer;
+  /* Holding a direction must not scroll the page or select the label. */
+  touch-action: none; user-select: none; -webkit-user-select: none;
+}
+.egg-pad-btn:active { background: color-mix(in srgb, var(--color-text) 12%, transparent); }
+.egg-note {
+  position: absolute; left: 50%; top: 46%; transform: translate(-50%, -50%);
+  background: var(--color-bg); border: 1px solid var(--color-text);
+  padding: 8px 14px; font-size: 13px; white-space: nowrap;
+  pointer-events: none;
+}
+.egg-canvas {
+  display: block; touch-action: manipulation; cursor: pointer;
+  /* Fits whatever is left after the header and footer, keeping the 360:520
+     drawing ratio so nothing distorts on a phone. The third term is the
+     height limit expressed as a width (360/520 = 0.6923): a phone held
+     sideways runs out of height long before width, and without it the
+     ground gets clipped off the bottom of the box.
+
+     Two lines because one invalid term voids an entire min(): a Safari that
+     has never heard of dvh (before 16.4) would drop the declaration whole,
+     and with no width attribute on the element the canvas would render at
+     its raw buffer size. It falls back to vh, wrong only by the URL bar. */
+  width: min(360px, 86vw, calc((100vh - 132px) * 0.6923));
+  width: min(360px, 86vw, calc((100dvh - 132px) * 0.6923));
+  height: auto; aspect-ratio: 360 / 520;
+}
+
+/* — team chat — */
+/* The chat card's height is the one thing on this screen that must not
+   move on its own. Plain vh recalculates on phones as the browser bar
+   hides and the keyboard rises, and the card visibly pumped up and down
+   with it. Small-viewport units hold still through both; the vh line
+   above is the fallback for anything old enough not to know svh. */
+.chat-card {
+  display: flex; flex-direction: column; min-height: 320px;
+  height: min(72vh, 640px);
+  height: min(72svh, 640px);
+}
+/* On a phone the room takes the whole screen below the bar — a chat that
+   stops at 72% reads as a widget, not a place. The subtraction is the
+   topbar (~47px) plus the page's top trim; the page keeps only a sliver
+   of bottom padding here, so the composer sits at the screen's edge.
+   svh keeps it still while the browser bar and keyboard come and go;
+   the env() term keeps it above an iPhone's home indicator. */
+@media (max-width: 760px) {
+  .chat-page { padding-bottom: 10px; }
+  .chat-card {
+    height: calc(100vh - 80px);
+    height: calc(100svh - 80px - env(safe-area-inset-bottom, 0px));
+  }
+}
+/* A new message rises into place, with a slight overshoot so the
+   motion registers. The class is only ever put on rows that arrive
+   while you watch: history mounts still, because eighty bubbles
+   animating on open is a screensaver, not a chat. The app's own
+   Animations switch (drawer footer, data-motion) flattens this to
+   nothing when turned off.
+   Opacity starts at .3, not 0: a hidden tab holds a CSS animation on
+   its first frame, and a message that parks invisible until the tab
+   is looked at again is worse than one that arrives a little pale. */
+/* The overshoot is softened from its first cut (1.15 → 1.06): enough
+   spring to register as arrival, not enough to read as a bounce. */
+.chat-msg-in { animation: chat-msg-in .45s cubic-bezier(.2, .78, .3, 1.06) both; }
+/* Ghost bubbles while the room loads — a sheen moving over quiet blocks.
+   The global reduced-motion rule above freezes the sheen to a still tint. */
+.chat-skel {
+  background: linear-gradient(100deg,
+    color-mix(in srgb, var(--color-text) 6%, transparent) 40%,
+    color-mix(in srgb, var(--color-text) 13%, transparent) 50%,
+    color-mix(in srgb, var(--color-text) 6%, transparent) 60%);
+  background-size: 200% 100%;
+  animation: chat-skel-sheen 1.2s linear infinite;
+}
+@keyframes chat-skel-sheen {
+  from { background-position: 120% 0; }
+  to { background-position: -80% 0; }
+}
+@keyframes chat-msg-in {
+  from { opacity: .3; transform: translateY(16px) scale(.97); }
+  to   { opacity: 1; transform: none; }
+}
