@@ -1,4 +1,4 @@
-import React, { useState, useEffect } from "react";
+import React, { useState, useEffect, useRef } from "react";
 import { TABS, CONTEXT_TABS, ROLE_PRESETS, TECH_LEVELS } from "../data.js";
 import { Db } from "../db.js";
 import { UNIVERSAL_TABS, tabList, Blueprint, Btn, CheckBox, TagX, Field, Dialog, ErrorBox, Switch, emailIn, useMissingFields, SearchSelect, Loading } from "./common.jsx";
@@ -20,14 +20,26 @@ export function UsersAccessScreen({ currentUser }) {
 
   const account = users.find(u => u.id === selected) || users[0];
 
-  const toggleTab = async key => {
+  // Access writes send the whole tab array, so two of them landing out of
+  // order would silently restore a tab the admin just removed. This chains
+  // every access/role write onto the previous one, so they commit in click
+  // order and the database always ends on the last thing the admin did.
+  const writeChain = useRef(Promise.resolve());
+  const chainWrite = (work, failMsg) => {
+    writeChain.current = writeChain.current
+      .catch(() => {})
+      .then(work)
+      .catch(async e => { setError(e.message || failMsg); await load(); });
+  };
+
+  const toggleTab = key => {
     if (!account) return;
     if (account.id === currentUser.id && key === "users") return; // can't remove own admin access
+    const acctId = account.id;
     const current = tabList(account.tab_access);
     const tabs = current.includes(key) ? current.filter(t => t !== key) : [...current, key];
-    setUsers(p => p.map(u => u.id === account.id ? { ...u, tab_access: tabs } : u));
-    try { await Db.updateProfileTabs(account.id, tabs); }
-    catch (e) { setError(e.message || "Couldn't update access."); await load(); }
+    setUsers(p => p.map(u => u.id === acctId ? { ...u, tab_access: tabs } : u));
+    chainWrite(() => Db.updateProfileTabs(acctId, tabs), "Couldn't update access.");
   };
   // Locking yourself out is a one-way trip: once your row loses the users
   // tab, every policy gated on has_tab('users') denies you, so you cannot
@@ -35,7 +47,7 @@ export function UsersAccessScreen({ currentUser }) {
   // this; the role dropdown did not.
   const wouldLockMeOut = tabs => account && account.id === currentUser.id && !tabs.includes("users");
 
-  const setRole = async role => {
+  const setRole = role => {
     if (!account || !ROLE_PRESETS[role]) return;
     const tabs = ROLE_PRESETS[role].slice();
     if (wouldLockMeOut(tabs)) {
@@ -43,9 +55,11 @@ export function UsersAccessScreen({ currentUser }) {
       return;
     }
     setError("");
-    setUsers(p => p.map(u => u.id === account.id ? { ...u, role, tab_access: tabs } : u));
-    try { await Db.updateProfileRole(account.id, role, tabs); }
-    catch (e) { setError(e.message || "Couldn't update role."); await load(); }
+    const acctId = account.id;
+    setUsers(p => p.map(u => u.id === acctId ? { ...u, role, tab_access: tabs } : u));
+    // Same write chain as toggleTab — a role change and a tab toggle both
+    // write tab_access, so they must serialize or race each other.
+    chainWrite(() => Db.updateProfileRole(acctId, role, tabs), "Couldn't update role.");
   };
   const resetPreset = async () => {
     if (!account) return;

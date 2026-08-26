@@ -2,6 +2,7 @@ import React, { useState, useEffect, useRef } from "react";
 import { todayLocal, money } from "../data.js";
 import { Db } from "../db.js";
 import { Blueprint, Btn, TableScroll, StatusTag, ErrorBox, downloadCsv, emailIn, RowsPerPage, useRowsPerPage } from "./common.jsx";
+import { Toasts } from "../toastBus.js";
 
 const TRACKER_FILTERS = ["All", "Draft", "Awaiting approval", "Approved", "Invoiced", "Over 7 days"];
 
@@ -27,12 +28,13 @@ export function BillingTrackerScreen({ onOpenTicket }) {
   const [chaseResult, setChaseResult] = useState("");
 
   // The four tiles are computed over every ticket, independent of the page
-  // showing below — loaded once and refreshed whenever the visible page
-  // changes, since a status flip elsewhere in the app would move a ticket
-  // between buckets.
-  useEffect(() => {
+  // showing below — loaded on mount and refreshed whenever the visible page
+  // or filter changes, since a status flip elsewhere in the app would move a
+  // ticket between buckets. (The empty-deps version never re-ran, so the
+  // tiles silently drifted from the table below them.)
+  const loadStats = () =>
     Db.getTicketTrackerStats().then(setStats).catch(e => setError(e.message || "Couldn't load the tracker totals."));
-  }, []);
+  useEffect(() => { loadStats(); }, [page, filter]);
 
   // A request token, so a slow earlier page cannot land after a newer one.
   // Tapping through filters or pages fires overlapping reads, and whichever
@@ -67,7 +69,10 @@ export function BillingTrackerScreen({ onOpenTicket }) {
     fetchPage(page, filter);
   }, [filter, page, pageSize]);
 
-  const sum = arr => arr.reduce((s, t) => s + t.amount, 0);
+  // Integer-cents sum, never a running float total — the house money rule
+  // (see gstOn in data.js). Summing dollars directly drifts a half-cent low
+  // at certain boundaries; summing cents and dividing once is exact.
+  const sum = arr => arr.reduce((s, t) => s + Math.round(t.amount * 100), 0) / 100;
   const pageCount = Math.max(1, Math.ceil(total / pageSize));
 
   // Local bookkeeping only: this flags a ticket as chased so the admin can
@@ -107,18 +112,29 @@ export function BillingTrackerScreen({ onOpenTicket }) {
       const list = await Db.listUnsignedTicketContacts();
       let sent = 0, skipped = 0, failed = 0;
       const justChased = {};
-      for (const t of list) {
-        const to = emailIn(t.contactLabel);
-        if (!to) { skipped++; continue; }
-        try { await Db.sendTicketApproval({ ticketId: t.id, to }); sent++; justChased[t.id] = true; }
-        catch (e) { failed++; }
-      }
+      // Muted around the loop: sendTicketApproval fires an "Approval sent"
+      // toast per call, so chasing N tickets would stack N toasts over the
+      // one summary line this button is meant to show. Same pattern as
+      // OfflineQueue.flush and saveArcadeScore.
+      Toasts.mute();
+      try {
+        for (const t of list) {
+          const to = emailIn(t.contactLabel);
+          if (!to) { skipped++; continue; }
+          try { await Db.sendTicketApproval({ ticketId: t.id, to }); sent++; justChased[t.id] = true; }
+          catch (e) { failed++; }
+        }
+      } finally { Toasts.unmute(); }
       setChased(p => ({ ...p, ...justChased }));
       const parts = [`Sent to ${sent} of ${list.length}`];
       if (skipped) parts.push(`${skipped} skipped — no client email on file`);
       if (failed) parts.push(`${failed} failed to send`);
       setChaseResult(parts.join(" · "));
+      // The chase moved tickets Draft/Awaiting → Awaiting approval, so both
+      // the table page and the tiles (and this button's own disabled
+      // predicate, which reads stats.unsigned.count) are now stale.
       fetchPage(page, filter);
+      loadStats();
     } catch (e) {
       setError(e.message || "Couldn't chase unsigned tickets.");
     }

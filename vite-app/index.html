@@ -17,6 +17,19 @@
 <meta name="apple-mobile-web-app-title" content="Field Ops" />
 <link rel="apple-touch-icon" href="/icons/apple-touch-icon-180.png" />
 <title>VagaboNDE Field Ops</title>
+<!-- Stamp the saved theme (and motion preference) before the first paint.
+     React reads the same value into state, but its useEffect runs after the
+     browser has already painted a frame — so a saved-dark user flashed the
+     light theme on every cold start. This runs before any paint. Keys match
+     Store in data.js ("nde." + key, JSON-encoded). -->
+<script>
+  try {
+    var t = JSON.parse(localStorage.getItem("nde.theme"));
+    if (t === "dark" || t === "light") document.documentElement.setAttribute("data-theme", t);
+    var m = JSON.parse(localStorage.getItem("nde.motion"));
+    if (m === "off") document.documentElement.setAttribute("data-motion", "off");
+  } catch (e) {}
+</script>
 <link rel="stylesheet" href="/_ds/industry-4eca1223-ce17-4bd0-9b75-9c7070304b91/styles.css">
 </head>
 <body>

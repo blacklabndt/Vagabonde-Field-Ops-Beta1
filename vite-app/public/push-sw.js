@@ -22,6 +22,11 @@ self.addEventListener("push", event => {
     // One tag: a burst of messages collapses into the latest notification
     // instead of stacking a dozen on the lock screen.
     tag: "team-chat",
+    // …but renotify so each new message in that burst still buzzes. Without
+    // it, replacing a same-tag notification updates the banner silently, and
+    // the crew — who depend on push — feel only the first message's buzz and
+    // miss the rest.
+    renotify: true,
     data: { url: data.url || "/" }
   }));
 });

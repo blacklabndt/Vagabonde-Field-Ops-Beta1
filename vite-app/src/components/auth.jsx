@@ -23,10 +23,22 @@ export function SignInScreen({ onSignIn }) {
       setError("That email and password don't match an account.");
       return;
     }
-    const { data: profile, error: profErr } = await sbClient
-      .from("profiles").select("*").eq("id", data.user.id).single();
+    let profile = null, profErr = null;
+    try {
+      const res = await sbClient.from("profiles").select("*").eq("id", data.user.id).single();
+      profile = res.data; profErr = res.error;
+    } catch (e) { profErr = e; }
     setBusy(false);
-    if (profErr || !profile) {
+    // A dropped request is not a missing account. .single() reports a
+    // genuinely-absent row as PGRST116; anything else — a timeout, an RLS
+    // hiccup, a 5xx, a thrown network error on this flaky field link — is a
+    // transient failure, and telling a correctly-provisioned tech to "ask an
+    // admin" sends them chasing a problem that isn't theirs.
+    if (profErr && profErr.code !== "PGRST116") {
+      setError("Signed in, but couldn't load your profile just now — check your connection and try again.");
+      return;
+    }
+    if (!profile) {
       setError("Signed in, but no profile is set up for this account yet — ask an admin to add you in Users & access.");
       return;
     }

@@ -118,7 +118,16 @@ export function TimesheetsScreen({ currentUser }) {
     entries: [], straight: 0, ot: 0, solo: 0, soloOt: 0, dose: 0, mileage: 0
   };
   const person = selectable.find(p => p.profileId === selected)
-    || (!isAdmin ? (people.find(p => p.profileId === currentUser.id) || ownEmpty) : null);
+    || (isAdmin ? (selectable[0] || null) : (people.find(p => p.profileId === currentUser.id) || ownEmpty));
+  // Keep the picker in step with that fallback: when an admin opens a period
+  // with no hours (selected falls to null) or switches to a person with none
+  // this fortnight, point selected at the first roster entry so the picker
+  // shows a name and the card shows that person's empty sheet — an empty
+  // sheet is an answer, not a blank content area.
+  useEffect(() => {
+    if (!isAdmin || !selectable.length) return;
+    if (!selectable.some(p => p.profileId === selected)) setSelected(selectable[0].profileId);
+  }, [isAdmin, selectable, selected]);
   // Solo and mileage columns only appear when they carry something: a tech who
   // never works alone shouldn't read two empty columns all period.
   const showSolo = !!person && (person.solo > 0 || person.soloOt > 0);
@@ -165,6 +174,12 @@ export function TimesheetsScreen({ currentUser }) {
 
   const toggleApproval = async () => {
     if (!person) return;
+    // The load generation this action belongs to. If the admin switches
+    // period mid-approval (the picker isn't disabled during the write), a
+    // new load() bumps loadSeq, and the refresh below is skipped so it can't
+    // overwrite the new period's approvals with this old period's — a wrong
+    // Approved/Not-approved badge on a payroll screen.
+    const mine = loadSeq.current;
     setBusy(true);
     setError("");
     try {
@@ -181,7 +196,8 @@ export function TimesheetsScreen({ currentUser }) {
           approvedBy: currentUser.id, pdfBytes
         });
       }
-      setApprovals(await Db.listApprovals({ start: period.start }));
+      const fresh = await Db.listApprovals({ start: period.start });
+      if (mine === loadSeq.current) setApprovals(fresh);
     } catch (e) {
       setError(e.message || "Couldn't update the approval.");
     }

@@ -34,7 +34,15 @@ export function UploadMobileScreen({ job, jobRecord, currentUser, onSent }) {
   const addWeld = key => {
     const w = (weldDraft[key] || "").trim();
     if (!w) return;
-    setItems(p => p.map(it => it.key === key ? { ...it, welds: [...it.welds, w] } : it));
+    // Ignore a repeat of a weld already on this row. A weld ID is unique on a
+    // report, so a second entry is always a typo or losing track — and
+    // allowing it broke two things: the chips key by weld value, so
+    // duplicates collided as React keys, and removeWeld filters by value, so
+    // tapping one duplicate's × deleted every copy. Deduping keeps values
+    // unique, which makes both the key and the remove correct.
+    setItems(p => p.map(it => it.key === key
+      ? (it.welds.includes(w) ? it : { ...it, welds: [...it.welds, w] })
+      : it));
     setWeldDraft(p => ({ ...p, [key]: "" }));
   };
   const removeWeld = (key, weld) =>
