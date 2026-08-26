@@ -133,6 +133,7 @@ supabase functions deploy send-ticket-approval
 supabase functions deploy render-jha
 supabase functions deploy render-invoice
 supabase functions deploy gif-search
+supabase functions deploy create-user
 supabase functions deploy delete-user
 supabase functions deploy approve-ticket
 supabase functions deploy chat-push
@@ -215,27 +216,32 @@ In the [Supabase dashboard](https://supabase.com/dashboard/project/eielmvxzdwwpr
 ## 6. Host the app somewhere  (~10 min)
 
 To use it on a phone in the field it needs to be on the internet, over HTTPS.
-Build it first — the app is a Vite project, so what gets hosted is the built
-`dist/` folder, not the source:
+The project ships with its own host: the Cloudflare Worker in
+`worker/index.js`, which serves the built app **and** re-serves the client
+approval pages as real HTML (Supabase's shared functions domain forces
+`text/plain` on HTML, so a rep following an approval link straight to
+Supabase would see the page's source code). From the repo root:
 
-```
-cd vite-app
-npm install
+```bash
 npm run build
+npx wrangler deploy
 ```
 
-Easiest path from there: **Netlify Drop** (https://app.netlify.com/drop) —
-drag `vite-app/dist` onto the page, and you have a URL in about thirty
-seconds. Vercel and Cloudflare Pages are equivalent. All have free tiers that
-cover this.
+Then point the approval links at it — `APPROVAL_BASE_URL` is a Supabase
+secret and must be the Worker's URL (or the custom domain in front of it):
+
+```bash
+supabase secrets set APPROVAL_BASE_URL=https://your-worker.workers.dev
+```
+
+Static hosts (Netlify Drop, Vercel, Cloudflare Pages) can serve the app
+itself, but they have no `/approve` route — on those, approval links fall
+back to the Supabase functions domain and open as plain text. Use the
+Worker.
 
 Copy `vite-app/.env.example` to `vite-app/.env` first if you're pointing at a
 different Supabase project than the one baked in as the default; the URL and
 publishable key in there are safe to be public either way.
-
-The approval page your clients see is served by Supabase, not from here, so
-hosting the app isn't a prerequisite for email — it's what gets the app onto
-your crews' phones.
 
 ---
 

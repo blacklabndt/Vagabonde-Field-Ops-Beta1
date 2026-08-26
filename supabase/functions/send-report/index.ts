@@ -74,6 +74,13 @@ Deno.serve(async (req) => {
             "<p style=\"color:#6b6d6e\">The file was too large to attach — use the link above to download it.</p>";
         }
       }
+      // Both storage calls are individually best-effort, but an email with
+      // neither the attachment nor a working link delivers nothing while
+      // the row records it as sent. A report that has a PDF on file must
+      // ship at least one way, or the send is a failure and has to say so.
+      if (!link && !attachments) {
+        throw new Error("Couldn't read the report's PDF from storage — nothing was sent. Try again shortly.");
+      }
     }
 
     const subject = `${job.job_number} · ${job.project} — radiographic report${report.welds ? " (" + report.welds + ")" : ""}`;

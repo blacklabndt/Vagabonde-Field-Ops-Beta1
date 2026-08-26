@@ -76,6 +76,14 @@ Deno.serve(async (req) => {
       }
     }
 
+    // Both storage calls are individually best-effort, but an email with
+    // neither the attachment nor a working link delivers nothing while the
+    // row records it as sent. If no path to the document survived, this is
+    // a failed send and has to say so.
+    if (!link && !attachments) {
+      throw new Error("Couldn't read the assessment's PDF from storage — nothing was sent. Try again, or re-render the PDF first.");
+    }
+
     const subject = `${job.job_number} · ${job.project} — hazard assessment${jha.work_date ? " (" + jha.work_date + ")" : ""}`;
     const note = (message || "").trim();
     const signer = (jha.profiles as any)?.name ?? "";
