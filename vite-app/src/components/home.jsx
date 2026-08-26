@@ -128,8 +128,9 @@ export function HomeScreen({ onCreateJob, onOpenJob, onStartTicket, currentUser,
         </div>
         {/* Pushed to the right edge; the pills hold the left. With the row
             split that way there is width to spare, so the buttons keep
-            their full size. */}
-        <div style={{ display: "flex", gap: 6, flex: "none", marginLeft: "auto" }}>
+            their full size. On desktop the whole row fits one line, so
+            .home-new-work reorders them past the search to the far right. */}
+        <div className="home-new-work" style={{ display: "flex", gap: 6, flex: "none", marginLeft: "auto" }}>
           {/* Raising a ticket used to mean finding the job on the board and
               opening it first. From here it is two choices — whose job, and
               which one — which is how a technician thinks about it at the end
