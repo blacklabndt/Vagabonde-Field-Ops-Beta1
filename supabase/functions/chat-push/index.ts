@@ -55,10 +55,16 @@ Deno.serve(async (req) => {
       : msg.file_name ? `shared a file — ${msg.file_name}`
       : "sent a picture";
 
+    // The inner join carries the permission check: a device whose user has
+    // had the chat tab revoked keeps its subscription row (the device may be
+    // claimed by the next tech), but message previews must stop reaching it
+    // the moment access goes. RLS can't do this here — service role sees
+    // every row — so the filter is the policy.
     const { data: subs, error: sErr } = await admin
       .from("push_subscriptions")
-      .select("id, endpoint, p256dh, auth")
-      .neq("profile_id", msg.profile_id);
+      .select("id, endpoint, p256dh, auth, profiles!inner(tab_access)")
+      .neq("profile_id", msg.profile_id)
+      .contains("profiles.tab_access", ["chat"]);
     if (sErr) throw sErr;
     if (!subs || subs.length === 0) return json({ ok: true, sent: 0 });
 

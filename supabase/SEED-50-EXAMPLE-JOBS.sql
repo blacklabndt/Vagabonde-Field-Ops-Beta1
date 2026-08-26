@@ -11,20 +11,27 @@
 -- everything filed against them) before recreating them, so a repeat run
 -- doesn't duplicate.
 --
--- To remove them afterwards:
---   delete from public.jobs where job_number like 'J-5%';
--- (their JHAs/reports/tickets cascade or are deleted with them below first)
+-- To remove them afterwards: run just the delete block below (through the
+-- "delete from public.jobs" line) inside a begin/commit of its own.
 -- ─────────────────────────────────────────────────────────────────────────
 
 begin;
 
-delete from public.ticket_crew where ticket_id in (select id from public.tickets where job_id in (select id from public.jobs where job_number like 'J-5%'));
-delete from public.ticket_lines where ticket_id in (select id from public.tickets where job_id in (select id from public.jobs where job_number like 'J-5%'));
-delete from public.tickets where job_id in (select id from public.jobs where job_number like 'J-5%');
-delete from public.reports where job_id in (select id from public.jobs where job_number like 'J-5%');
-delete from public.jhas where job_id in (select id from public.jobs where job_number like 'J-5%');
-delete from public.rate_overrides where job_id in (select id from public.jobs where job_number like 'J-5%');
-delete from public.jobs where job_number like 'J-5%';
+-- The seeded numbers, exactly. This used to be `like 'J-5%'`, which also
+-- matched any real job that happened to start with J-5 — J-512, J-5001A —
+-- and quietly lined up its tickets for deletion. Job numbers are freeform
+-- text; only the literal fifty this script creates are fair game.
+create temporary table seed_job_ids on commit drop as
+  select id from public.jobs
+  where job_number in (select 'J-' || (5000 + g) from generate_series(1, 50) as g);
+
+delete from public.ticket_crew where ticket_id in (select id from public.tickets where job_id in (select id from seed_job_ids));
+delete from public.ticket_lines where ticket_id in (select id from public.tickets where job_id in (select id from seed_job_ids));
+delete from public.tickets where job_id in (select id from seed_job_ids);
+delete from public.reports where job_id in (select id from seed_job_ids);
+delete from public.jhas where job_id in (select id from seed_job_ids);
+delete from public.rate_overrides where job_id in (select id from seed_job_ids);
+delete from public.jobs where id in (select id from seed_job_ids);
 
 with c as (
   select id, row_number() over (order by name) - 1 as n, count(*) over () as total from public.clients

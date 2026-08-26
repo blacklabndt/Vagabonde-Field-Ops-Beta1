@@ -148,12 +148,21 @@ Deno.serve(async (req) => {
       tag: "ticket-approval"
     });
 
-    await admin.from("tickets").update({
+    // The token exists only in memory until this lands. If the write fails,
+    // the emailed link points at a token no row holds — approve-ticket would
+    // tell the rep the link was already used — so a failure here has to
+    // surface as one, not vanish behind ok:true.
+    const { error: tokenErr } = await admin.from("tickets").update({
       approval_token: token,
       approval_sent_at: new Date().toISOString(),
       approval_expires_at: expires,
       status: "Awaiting approval"
     }).eq("id", ticketId);
+    if (tokenErr) {
+      throw new Error(
+        `The email went out, but the approval link could not be saved — resend the ticket. (${tokenErr.message})`
+      );
+    }
 
     return new Response(JSON.stringify({ ok: true }), {
       headers: { ...corsHeaders, "Content-Type": "application/json" }

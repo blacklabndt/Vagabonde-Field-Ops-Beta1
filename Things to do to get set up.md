@@ -73,15 +73,27 @@ still works; email just stays a button that does nothing.
 
 ## 3. Store the secrets  (~2 min)
 
-These live on Supabase's servers and are never sent to the browser. Run each
-line, substituting your own values:
+These live on Supabase's servers and are never sent to the browser. Put them
+in a file rather than on the command line — a token typed into a terminal
+stays in the shell's history file afterwards. Create `supabase/.env.secrets`
+(it's covered by `supabase/.gitignore`, so it can't be committed by
+accident):
 
+```bash
+POSTMARK_TOKEN=your-server-api-token
+MAIL_FROM_REPORTS=reports@vagabonde.ca
+MAIL_FROM_BILLING=billing@vagabonde.ca
+MAIL_REPLY_TO=office@vagabonde.ca
 ```
-supabase secrets set POSTMARK_TOKEN=your-server-api-token
-supabase secrets set MAIL_FROM_REPORTS=reports@vagabonde.ca
-supabase secrets set MAIL_FROM_BILLING=billing@vagabonde.ca
-supabase secrets set MAIL_REPLY_TO=office@vagabonde.ca
+
+then load it in one go:
+
+```bash
+supabase secrets set --env-file supabase/.env.secrets
 ```
+
+(Setting them one at a time in the dashboard — Project Settings → Edge
+Functions → Secrets — works just as well and never touches a terminal.)
 
 `SUPABASE_URL` and `SUPABASE_SERVICE_ROLE_KEY` are provided to functions
 automatically — you don't set those.
@@ -96,22 +108,47 @@ security. A Postmark token is not.
 
 ## 4. Deploy the database change and the functions  (~3 min)
 
-From the project folder:
+From the project folder, look before pushing — the migration folder starts
+with a baseline that must **never** run against the live project (it is for
+fresh environments only), so confirm the two histories agree and see what a
+push would actually do before doing it:
 
+```bash
+supabase migration list --linked
+supabase db push --dry-run
 ```
+
+If the listing shows the local and remote histories out of step — a remote
+version the folder doesn't have, or the baseline showing as unapplied
+against the live project — stop and reconcile first (`supabase migration
+repair` marks a version applied without running it). Only when the dry run
+shows exactly the migrations you expect:
+
+```bash
 supabase db push
 
 supabase functions deploy send-report
+supabase functions deploy send-jha
 supabase functions deploy send-ticket-approval
 supabase functions deploy render-jha
+supabase functions deploy render-invoice
+supabase functions deploy gif-search
 supabase functions deploy delete-user
-supabase functions deploy approve-ticket --no-verify-jwt
+supabase functions deploy approve-ticket
+supabase functions deploy chat-push
+supabase functions deploy chat-retention
 ```
 
 `render-jha` draws the FLHA as a PDF into the private `jhas` bucket, and
 `delete-user` is what makes **Remove account** delete the real Supabase Auth
-user rather than only its profile row. Both are called from the app, so
-skipping them leaves those two buttons reporting an error.
+user rather than only its profile row. `send-jha` emails an assessment,
+`render-invoice` draws the in-app invoice view, and `gif-search` is the team
+chat's GIF box. All are called from the app, so skipping one leaves its
+button reporting an error. `chat-push` (message notifications) and
+`chat-retention` (the nightly 30-day sweep) are called by the database
+itself; `approve-ticket` is opened by the client's rep from an email. Those
+three run without JWT verification — `supabase/config.toml` pins that, so
+no `--no-verify-jwt` flags are needed here.
 
 `db push` adds the approval-token columns to the tickets table, creates the
 private `shared` storage bucket behind the **Files** tab (plus its access

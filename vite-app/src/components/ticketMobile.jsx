@@ -402,6 +402,10 @@ export function TicketMobileScreen({ job, jobRecord, currentUser, onSaved, ticke
     setSaving(true);
     setSaveError("");
     setEmailFailed(false);
+    // Declared outside the try so the catch reads the same truth the save
+    // path wrote — see the note on `inDb` below.
+    let savedId = ticketId;
+    let inDb = created;
     try {
       // Saved first, emailed second — and saved as a Draft either way.
       //
@@ -416,8 +420,14 @@ export function TicketMobileScreen({ job, jobRecord, currentUser, onSaved, ticke
       // send doesn't try to insert the same ticket number twice.
       // Everything after the insert has to use the number the database
       // actually minted, not the preview this screen has been showing.
-      let savedId = ticketId;
-      if (!created) {
+      //
+      // `inDb` is the local twin of `created`: setState doesn't change what
+      // this invocation reads back, so the catch block below was seeing the
+      // render-time value — a crew-save failure right after a successful
+      // insert queued the ticket as never-created, and the replay minted a
+      // second ticket with the same billing lines. The local flips the
+      // moment the row exists; the state catches up for later renders.
+      if (!inDb) {
         const saved = await Db.createTicket({
           initials: initialsOf(currentUser.name), jobDbId: job.dbId, technicianId: currentUser.id, workDate,
           clientContact: { name: jobRecord.clientRep }, contractorContact: { name: jobRecord.contractorRep },
@@ -426,8 +436,9 @@ export function TicketMobileScreen({ job, jobRecord, currentUser, onSaved, ticke
         });
         savedId = saved.id;
         setTicketId(savedId);
-        await Db.saveCrewForTicket(savedId, crew);
+        inDb = true;
         setCreated(true);
+        await Db.saveCrewForTicket(savedId, crew);
       } else {
         // Already in the database — either a reopened draft, or a retry after
         // the approval email failed. Both want the same thing: write what is on
@@ -450,12 +461,12 @@ export function TicketMobileScreen({ job, jobRecord, currentUser, onSaved, ticke
           // No ticketId on a ticket that was never created: the number is
           // minted when this replays, so hours offline can't reserve a number
           // somebody else has since been given.
-          ticketId: created ? ticketId : null,
+          ticketId: inDb ? savedId : null,
           initials: initialsOf(currentUser.name),
           jobDbId: job.dbId, technicianId: currentUser.id, workDate,
           clientContact: { name: jobRecord.clientRep }, contractorContact: { name: jobRecord.contractorRep },
           lines: buildLines(), status: "Draft",
-          crew, delays, alreadyCreated: created, sendForApproval, approvalTo: to
+          crew, delays, alreadyCreated: inDb, sendForApproval, approvalTo: to
         });
         // Queued counts as safe: the work is on the device in the outbox now,
         // which is a better home for it than the recovery copy.
@@ -464,9 +475,9 @@ export function TicketMobileScreen({ job, jobRecord, currentUser, onSaved, ticke
         return;
       }
       setSaving(false);
-      if (created) setEmailFailed(true);
-      setSaveError(created
-        ? `Ticket ${ticketId} is saved, but the approval email didn't go out: ${e.message || "the email service didn't respond."} It's in the billing tracker — you can chase it from there.`
+      if (inDb) setEmailFailed(true);
+      setSaveError(inDb
+        ? `Ticket ${savedId} is saved, but the approval email didn't go out: ${e.message || "the email service didn't respond."} It's in the billing tracker — you can chase it from there.`
         : (e.message || "Couldn't save the ticket — try again."));
     }
   };
