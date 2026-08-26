@@ -403,9 +403,13 @@ export function TicketMobileScreen({ job, jobRecord, currentUser, onSaved, ticke
     setSaveError("");
     setEmailFailed(false);
     // Declared outside the try so the catch reads the same truth the save
-    // path wrote — see the note on `inDb` below.
+    // path wrote — see the note on `inDb` below. `stage` records how far
+    // the save actually got: a crew-save failure used to be reported as
+    // "the approval email didn't go out", pointing the tech at a resend
+    // when the real problem was lines or hours that never landed.
     let savedId = ticketId;
     let inDb = created;
+    let stage = "save";
     try {
       // Saved first, emailed second — and saved as a Draft either way.
       //
@@ -450,7 +454,7 @@ export function TicketMobileScreen({ job, jobRecord, currentUser, onSaved, ticke
         });
         await Db.saveCrewForTicket(savedId, crew);
       }
-      if (sendForApproval) await Db.sendTicketApproval({ ticketId: savedId, to });
+      if (sendForApproval) { stage = "email"; await Db.sendTicketApproval({ ticketId: savedId, to }); }
       // Safely stored — the on-device copy has nothing left to protect, and
       // leaving it would offer this ticket back as unsaved work next time.
       await OfflineCache.remove(wipKey);
@@ -475,10 +479,14 @@ export function TicketMobileScreen({ job, jobRecord, currentUser, onSaved, ticke
         return;
       }
       setSaving(false);
-      if (inDb) setEmailFailed(true);
-      setSaveError(inDb
-        ? `Ticket ${savedId} is saved, but the approval email didn't go out: ${e.message || "the email service didn't respond."} It's in the billing tracker — you can chase it from there.`
-        : (e.message || "Couldn't save the ticket — try again."));
+      if (inDb && stage === "email") {
+        setEmailFailed(true);
+        setSaveError(`Ticket ${savedId} is saved, but the approval email didn't go out: ${e.message || "the email service didn't respond."} It's in the billing tracker — you can chase it from there.`);
+      } else if (inDb) {
+        setSaveError(`Ticket ${savedId} exists, but your latest changes didn't all save: ${e.message || "the save failed partway."} Press Save again — nothing on screen is lost.`);
+      } else {
+        setSaveError(e.message || "Couldn't save the ticket — try again.");
+      }
     }
   };
 

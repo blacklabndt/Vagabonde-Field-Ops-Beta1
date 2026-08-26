@@ -170,10 +170,14 @@ initial isn't a name, and guessing at "Dale" would be worse than leaving it
 for you. Tick **Subcontractor** for anyone who invoices you rather than being
 on payroll; their timesheet then carries a mileage column.
 
-That **`--no-verify-jwt` on the last one is not optional**. The approval page
-is opened by a client rep who has no account — the token in their link is the
-credential. Without that flag Supabase demands a bearer token and your client
-sees nothing but a 401.
+A note on JWT verification: `approve-ticket` is opened by a client rep who
+has no account — the token in their link is the credential — so it must
+run without verification, or your client sees nothing but a 401. That
+setting lives in `supabase/config.toml` (`[functions.approve-ticket]`,
+alongside `chat-push` and `chat-retention`), so the deploy commands above
+need no flags and can't forget it. The two chat functions check their own
+door instead: the database signs its calls with a secret header (see the
+`the_database_signs_its_own_calls` migration).
 
 Then test:
 

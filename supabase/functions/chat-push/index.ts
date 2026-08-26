@@ -6,10 +6,14 @@
 // subscription whose push service answers 404/410, which is how a
 // browser says that endpoint is dead for good.
 //
-// Anyone holding the app's public key can call this, so it guards
-// itself: content comes from the database, never the request, and a
-// message older than ten minutes is a replay — re-buzzing the crew for
-// old news — and is refused.
+// The gateway can't vouch for the caller — the trigger holds no user
+// JWT, so verification is off — which means this checks its own door:
+// the database signs its calls with x-internal-secret (a value minted
+// in private.internal_config, readable only through the
+// service-role-only accessor), and a request without it is not the
+// database. Belt and braces beyond that: content comes from the
+// database, never the request, and a message older than ten minutes is
+// a replay — re-buzzing the crew for old news — and is refused.
 
 import { createClient } from "https://esm.sh/@supabase/supabase-js@2";
 import webpush from "npm:web-push@3.6.7";
@@ -33,6 +37,12 @@ Deno.serve(async (req) => {
       Deno.env.get("SUPABASE_URL")!,
       Deno.env.get("SUPABASE_SERVICE_ROLE_KEY")!
     );
+
+    const { data: expected, error: secretErr } = await admin.rpc("internal_secret");
+    if (secretErr) throw secretErr;
+    if (!expected || req.headers.get("x-internal-secret") !== expected) {
+      return json({ error: "Not authorized" }, 401);
+    }
 
     const { data: msg, error } = await admin
       .from("chat_messages")

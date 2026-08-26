@@ -7,6 +7,12 @@
 // run at any moment beyond that: it enforces a fixed policy, so an
 // extra run deletes nothing that was not already due.
 //
+// The gateway can't vouch for the caller — the cron job holds no user
+// JWT — so this checks its own door: the database signs its calls with
+// x-internal-secret (a value minted in private.internal_config,
+// readable only through the service-role-only accessor), and a request
+// without it is not the database.
+//
 // Pictures come down from the chat-media bucket before their rows go,
 // in that order deliberately: a row that briefly outlives its picture
 // is healed by the next run, but a picture whose row is already gone is
@@ -33,6 +39,16 @@ Deno.serve(async (req) => {
       Deno.env.get("SUPABASE_URL")!,
       Deno.env.get("SUPABASE_SERVICE_ROLE_KEY")!
     );
+
+    const { data: expected, error: secretErr } = await admin.rpc("internal_secret");
+    if (secretErr) throw secretErr;
+    if (!expected || req.headers.get("x-internal-secret") !== expected) {
+      return new Response(JSON.stringify({ error: "Not authorized" }), {
+        status: 401,
+        headers: { ...corsHeaders, "Content-Type": "application/json" },
+      });
+    }
+
     const cutoff = new Date(Date.now() - RETENTION_DAYS * 86400000).toISOString();
 
     let deleted = 0;
