@@ -4,6 +4,10 @@ reviews:
   profile: "chill"
   auto_review:
     enabled: true
+    # The full-codebase review PR targets empty-base, not main — without
+    # this, CodeRabbit skips any PR whose base isn't the default branch.
+    base_branches:
+      - "empty-base"
   path_filters:
     # Build output and vendored design-system CSS are not our authorship.
     - "!vite-app/dist/**"
