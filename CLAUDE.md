@@ -50,6 +50,12 @@ Cloudflare Worker `solitary-snowflake-ee22` (assets + `/approve` proxy in
   which is exactly the invisible breakage that rule replaced.
 - Client-facing HTML is rendered by `supabase/functions/_shared/invoice.ts`
   and escaped with `esc()`; the in-app viewer iframe stays sandboxed.
+- Accounts are created by the create-user Edge Function (Admin-gated,
+  service key, arrives email-confirmed), never by client signUp: the
+  signup endpoint answers to anyone with the publishable key, so the
+  provisioning trigger caps metadata roles to Technician/Helper and the
+  function writes the real rank itself. Never widen the trigger's role
+  allowlist back.
 - Team chat forgets: unpinned messages expire after 30 days, deleted by
   the chat-retention Edge Function (it also removes their chat-media
   pictures), fired nightly by the pg_cron job `chat-retention-nightly`.
