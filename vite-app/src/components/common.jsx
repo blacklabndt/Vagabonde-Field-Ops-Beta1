@@ -1,4 +1,5 @@
 import React, { useState, useEffect, useRef, useCallback } from "react";
+import { createPortal } from "react-dom";
 import { Db } from "../db.js";
 import { nonNegative } from "../data.js";
 
@@ -182,6 +183,45 @@ export function SearchSelect({
   const [active, setActive] = useState(0);
   const boxRef = useRef(null);
   const inputRef = useRef(null);
+  const listRef = useRef(null);
+
+  // Where the list sits, in viewport coordinates. It used to hang off the
+  // input with position:absolute, but inside a dialog the scrolling field
+  // grid clips it — overflow clips absolutely-positioned descendants, so
+  // the options were cut off at the dialog's edge. A portal with fixed
+  // coordinates escapes every overflow context; the rAF loop keeps them
+  // honest through the dialog's entrance animation, scrolling and resizes.
+  // Height comes from the visual viewport, not the layout one, so a phone
+  // keyboard shrinks the list instead of hiding it — and when the space
+  // under the input is gone the list flips above it.
+  const [pos, setPos] = useState(null);
+  useEffect(() => {
+    if (!open) { setPos(null); return; }
+    let raf;
+    const measure = () => {
+      const el = inputRef.current;
+      if (el) {
+        const r = el.getBoundingClientRect();
+        const vv = window.visualViewport;
+        const vTop = vv ? vv.offsetTop : 0;
+        const vBottom = vv ? vv.offsetTop + vv.height : window.innerHeight;
+        const below = vBottom - r.bottom - 16;
+        const above = r.top - vTop - 16;
+        const flip = below < 150 && above > below;
+        const next = {
+          left: Math.round(r.left), width: Math.round(r.width),
+          top: flip ? null : Math.round(r.bottom + 4),
+          bottom: flip ? Math.round(window.innerHeight - r.top + 4) : null,
+          maxH: Math.max(90, Math.min(320, Math.round(flip ? above : below)))
+        };
+        setPos(prev => prev && prev.left === next.left && prev.width === next.width &&
+          prev.top === next.top && prev.bottom === next.bottom && prev.maxH === next.maxH ? prev : next);
+      }
+      raf = requestAnimationFrame(measure);
+    };
+    measure();
+    return () => cancelAnimationFrame(raf);
+  }, [open]);
 
   // Debounced so a fast typist makes one request, not one per letter.
   useEffect(() => {
@@ -206,7 +246,10 @@ export function SearchSelect({
   // Close when the click lands anywhere else. mousedown rather than click, so
   // it closes before a button underneath receives its own press.
   useEffect(() => {
-    const away = e => { if (boxRef.current && !boxRef.current.contains(e.target)) setOpen(false); };
+    const away = e => {
+      if (boxRef.current && !boxRef.current.contains(e.target) &&
+        !(listRef.current && listRef.current.contains(e.target))) setOpen(false);
+    };
     document.addEventListener("mousedown", away);
     return () => document.removeEventListener("mousedown", away);
   }, []);
@@ -239,12 +282,14 @@ export function SearchSelect({
         onKeyDown={onKeyDown}
         style={{ width: "100%", minHeight: 38 }}
       />
-      {open && (
-        <div id={listId} role="listbox"
+      {open && pos && createPortal(
+        <div id={listId} ref={listRef} role="listbox"
           style={{
-            position: "absolute", top: "calc(100% + 4px)", left: 0, right: 0, zIndex: 40,
+            position: "fixed", left: pos.left, width: pos.width,
+            ...(pos.top != null ? { top: pos.top } : { bottom: pos.bottom }),
+            zIndex: 300,
             background: "var(--color-surface)", border: "1px solid var(--color-divider)",
-            boxShadow: "var(--shadow-md)", maxHeight: 320, overflowY: "auto"
+            boxShadow: "var(--shadow-md)", maxHeight: pos.maxH, overflowY: "auto"
           }}>
           {loading && !rows.length && (
             <div style={{ padding: "10px 12px", fontSize: 13, color: "color-mix(in srgb, var(--color-text) 55%, transparent)" }}>Searching…</div>
@@ -270,7 +315,8 @@ export function SearchSelect({
               Showing {rows.length} of {total} — keep typing to narrow it down.
             </div>
           )}
-        </div>
+        </div>,
+        document.body
       )}
     </div>
   );
