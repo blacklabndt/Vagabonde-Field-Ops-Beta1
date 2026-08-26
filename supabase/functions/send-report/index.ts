@@ -35,6 +35,19 @@ Deno.serve(async (req) => {
       status: 401, headers: { ...corsHeaders, "Content-Type": "application/json" }
     });
 
+    // Seeing a report is not the same as being allowed to mail it off the
+    // premises: reports_select includes the 'job' tab, which Helpers hold,
+    // so a Helper can read every report in the database. The send below
+    // signs a 14-day URL and attaches the raw PDF with the service role —
+    // a private-data exfiltration path from vagabonde.ca's own domain.
+    // Emailing a report is a Technician-or-office job; Helpers cannot.
+    const { data: caller } = await asUser.from("profiles").select("role").eq("id", user.id).single();
+    if (!["Admin", "Coordinator", "Technician"].includes(caller?.role ?? "")) {
+      return new Response(JSON.stringify({ error: "Only a Technician, Coordinator or Admin can email a report." }), {
+        status: 403, headers: { ...corsHeaders, "Content-Type": "application/json" }
+      });
+    }
+
     // RLS still applies to this read, so a user who can't see the report
     // can't email it either.
     const { data: report, error: rErr } = await asUser

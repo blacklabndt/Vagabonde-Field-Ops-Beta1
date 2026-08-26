@@ -124,22 +124,8 @@ async function drawJha(jha: any): Promise<Uint8Array> {
   // ── drawing helpers ────────────────────────────────────────────────
   const W = PAGE.w - M * 2;
 
-  // The standard PDF fonts are WinAnsi-only, so anything outside Latin-1 —
-  // H₂S, °C, curly quotes, en dashes, ≤ — throws instead of drawing. Field
-  // text arrives from the app and from typed notes, so every string is folded
-  // to an encodable equivalent here rather than trusted at each call site.
-  const ascii = (s: string) =>
-    String(s ?? "")
-      .replace(/[₀₁₂₃₄₅₆₇₈₉]/g, c => "0123456789"[" ₀₁₂₃₄₅₆₇₈₉".indexOf(c) - 1])
-      .replace(/[⁰¹²³⁴⁵⁶⁷⁸⁹]/g, c => "0123456789"["⁰¹²³⁴⁵⁶⁷⁸⁹".indexOf(c)])
-      .replace(/[’‘‚‛]/g, "'").replace(/[“”„‟]/g, '"')
-      .replace(/[–—―]/g, "-").replace(/…/g, "...")
-      .replace(/≤/g, "<=").replace(/≥/g, ">=").replace(/≈/g, "~").replace(/×/g, "x")
-      .replace(/[\u00A0\u2007\u202F]/g, " ")
-      .replace(/[^\x20-\xFF]/g, "");
-
   const text = (s: string, x: number, yy: number, o: any = {}) =>
-    page.drawText(ascii(s), {
+    page.drawText(foldAscii(s), {
       x, y: yy, size: o.size ?? 8, font: o.bold ? bold : font,
       color: o.color ?? INK, maxWidth: o.maxWidth
     });
@@ -342,15 +328,34 @@ async function drawJha(jha: any): Promise<Uint8Array> {
 // but hazard controls are free text in the JHA builder, and a regulatory
 // document that silently prints one field over another is not one to leave to
 // chance.
+// The standard PDF fonts are WinAnsi-only, so anything outside Latin-1 —
+// H₂S, °C, curly quotes, en dashes, ≤ — throws instead of drawing. Field
+// text arrives from the app and from typed notes, so every string is folded
+// to an encodable equivalent before it is drawn OR measured. Module scope so
+// the draw path (foldAscii in drawText) and the wrap path (wrapLines below)
+// size the identical string — several folds expand a glyph (≤ → "<=",
+// ⁰¹²³ → "0123"), so measuring the raw form under-counts and a hazard
+// control could silently overprint the Sev/Prob/Freq columns.
+function foldAscii(s: string): string {
+  return String(s ?? "")
+    .replace(/[₀₁₂₃₄₅₆₇₈₉]/g, c => "0123456789"[" ₀₁₂₃₄₅₆₇₈₉".indexOf(c) - 1])
+    .replace(/[⁰¹²³⁴⁵⁶⁷⁸⁹]/g, c => "0123456789"["⁰¹²³⁴⁵⁶⁷⁸⁹".indexOf(c)])
+    .replace(/[’‘‚‛]/g, "'").replace(/[“”„‟]/g, '"')
+    .replace(/[–—―]/g, "-").replace(/…/g, "...")
+    .replace(/≤/g, "<=").replace(/≥/g, ">=").replace(/≈/g, "~").replace(/×/g, "x")
+    .replace(/[   ]/g, " ")
+    .replace(/[^\x20-\xFF]/g, "");
+}
+
 function wrapLines(s: string, width: number, font: any, size: number): string[] {
   if (!s) return [];
   const out: string[] = [];
   let line = "";
   for (const word of s.split(/\s+/).filter(Boolean)) {
     const next = line ? line + " " + word : word;
-    // Measuring is as encoding-strict as drawing, so any stray glyph is
-    // dropped before it reaches the metrics.
-    if (line && font.widthOfTextAtSize(next.replace(/[^\x20-\xFF]/g, ""), size) > width) {
+    // Measured on the folded form — the exact string foldAscii will draw —
+    // so an expanding fold can't push the drawn line past the column.
+    if (line && font.widthOfTextAtSize(foldAscii(next), size) > width) {
       out.push(line);
       line = word;
     } else {

@@ -35,11 +35,25 @@ Deno.serve(async (req) => {
 
     const { data: ticket, error: tErr } = await asUser
       .from("tickets")
-      .select("id, work_date, total, status, delays, client_contact, jobs(job_number, project, lsd, afe, area, clients(name), contractors(name)), ticket_lines(kind, label, unit, quantity, unit_rate)")
+      .select("id, technician_id, work_date, total, status, delays, client_contact, jobs(job_number, project, lsd, afe, area, clients(name), contractors(name)), ticket_lines(kind, label, unit, quantity, unit_rate)")
       .eq("id", ticketId).single();
     if (tErr || !ticket) throw new Error("Ticket not found, or you don't have access to it");
     if (ticket.status === "Approved" || ticket.status === "Invoiced") {
       throw new Error("That ticket is already approved — nothing to send.");
+    }
+
+    // Being able to SEE the ticket is not being allowed to send it out for
+    // signing: tickets_select is is_staff(), so every signed-in account —
+    // Helpers included — can read any ticket. The mint below runs with the
+    // service role and so bypasses tickets_update's owner-or-Admin gate;
+    // this restores it. Without it, anyone could send a co-worker's ticket
+    // to an inbox they control and self-approve a fabricated signature.
+    const { data: caller } = await asUser.from("profiles").select("role").eq("id", user.id).single();
+    const privileged = caller?.role === "Admin" || caller?.role === "Coordinator";
+    if ((ticket as any).technician_id !== user.id && !privileged) {
+      return new Response(JSON.stringify({ error: "Only the ticket's technician, or an Admin or Coordinator, can send it for approval." }), {
+        status: 403, headers: { ...corsHeaders, "Content-Type": "application/json" }
+      });
     }
 
     const job = ticket.jobs as any;
