@@ -1,0 +1,31 @@
+# CodeRabbit configuration.
+# Reference: https://docs.coderabbit.ai/reference/yaml-template
+reviews:
+  profile: "chill"
+  auto_review:
+    enabled: true
+    # The full-codebase review PR targets empty-base, not main — without
+    # this, CodeRabbit skips any PR whose base isn't the default branch.
+    base_branches:
+      - "empty-base"
+  path_filters:
+    # Build output and vendored design-system CSS are not our authorship.
+    - "!vite-app/dist/**"
+    - "!vite-app/public/_ds/**"
+    - "!**/package-lock.json"
+    # Installed third-party agent skills (Cloudflare's wrangler docs etc.) —
+    # reference material we don't maintain, and this project doesn't even
+    # use the features their examples were flagged for.
+    - "!.claude/skills/**"
+  path_instructions:
+    - path: "supabase/migrations/**"
+      instructions: >-
+        These migrations are applied history and reconcile 1:1 with the
+        live database. Review for genuine correctness or security issues
+        only; do not suggest rewriting, squashing or reordering
+        already-applied migrations.
+    - path: "vite-app/src/**"
+      instructions: >-
+        Comments in this codebase deliberately explain the why behind
+        decisions, sometimes at length. Do not flag comment length or
+        style; focus on correctness, security and real inefficiencies.
