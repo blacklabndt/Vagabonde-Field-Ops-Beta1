@@ -117,6 +117,11 @@ export function TicketMobileScreen({ job, jobRecord, currentUser, onSaved, ticke
   const [provisionalNumber, setProvisionalNumber] = useState(false);
   useEffect(() => OfflineCache.subscribe(s => setProvisionalNumber(!ticket && s.servingCached)), [ticket]);
 
+  // Rates and the crew directory belong to the client and the org, not the
+  // day the work was done — so they load when the client changes and never
+  // on a work-date edit. WIP recovery and reopening a draft both set
+  // workDate after mount; when this was one effect keyed on workDate too,
+  // each of those needlessly re-pulled the whole rate card and profile list.
   useEffect(() => {
     if (!job) return;
     (async () => {
@@ -133,14 +138,6 @@ export function TicketMobileScreen({ job, jobRecord, currentUser, onSaved, ticke
           : (e.message || "Couldn't load rates."));
       }
     })();
-    // A preview only: the number that actually gets stored is minted by the
-    // database when this is saved, which is what keeps a ticket built offline
-    // this morning from colliding with one raised in the meantime.
-    if (!ticket) {
-      Db.nextTicketNumber(initialsOf(currentUser.name), workDate)
-        .then(setTicketId)
-        .catch(e => setLoadError(e.message || "Couldn't reserve a ticket number."));
-    }
 
     Db.listProfiles()
       .then(list => {
@@ -148,9 +145,7 @@ export function TicketMobileScreen({ job, jobRecord, currentUser, onSaved, ticke
         const first = list.find(p => p.id !== currentUser.id);
         if (first) setCrewPick(first.id);
         // A reopened draft brings its own crew rows; seeding "just me" here
-        // would overwrite them the moment the loaded work date re-ran this.
-        // Same for a recovered entry — its work date re-runs this effect, and
-        // without the guard the crew it came back with is wiped.
+        // would overwrite them. The guard also covers a recovered WIP entry.
         if (ticket || wipRestored.current) return;
         const me = list.find(p => p.id === currentUser.id);
         setCrew([{
@@ -161,7 +156,19 @@ export function TicketMobileScreen({ job, jobRecord, currentUser, onSaved, ticke
         }]);
       })
       .catch(e => console.error("Couldn't load crew list:", e.message));
-  }, [job ? job.clientId : null, workDate]);
+  }, [job ? job.clientId : null]);
+
+  // The ticket-number preview is the one thing here that varies by day. A
+  // preview only: the number that actually gets stored is minted by the
+  // database at save time, which keeps a ticket built offline this morning
+  // from colliding with one raised in the meantime. Its own effect so a
+  // work-date edit reprices the number without re-pulling rates or crew.
+  useEffect(() => {
+    if (!job || ticket) return;
+    Db.nextTicketNumber(initialsOf(currentUser.name), workDate)
+      .then(setTicketId)
+      .catch(e => setLoadError(e.message || "Couldn't reserve a ticket number."));
+  }, [job ? job.clientId : null, workDate, ticket]);
 
   // Reopening a draft: pull its lines and crew back into the form. Lines
   // are matched by label, which is what the ticket stores — a line whose label

@@ -13,7 +13,9 @@ export function OpenTicketsScreen({ tickets, loading, onOpenTicket, currentUser 
   const drafts = open.filter(t => t.status === "Draft");
   const awaiting = open.filter(t => t.status === "Awaiting approval");
   const approved = open.filter(t => t.status === "Approved");
-  const sum = arr => arr.reduce((s, t) => s + t.amount, 0);
+  // Integer-cents sum, per the house money rule (gstOn in data.js) — never
+  // a running float of dollars, which drifts a half-cent low at some totals.
+  const sum = arr => arr.reduce((s, t) => s + Math.round(t.amount * 100), 0) / 100;
   // Amounts are an office concern (billing, chasing signatures) — a
   // technician just needs to see what's open and finish it.
   const showAmounts = currentUser.role === "Admin" || currentUser.role === "Coordinator";
