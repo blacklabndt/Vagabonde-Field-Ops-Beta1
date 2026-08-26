@@ -18,7 +18,8 @@ where u.id = p.id
   and lower(u.email) = lower('you@example.com');   -- <- your email here
 
 
--- Check it took: this should list the account as Admin with 10 tabs.
+-- Check it took: this should list the account as Admin with the full
+-- Admin tab set (whatever tabs_for_role('Admin') grants — 14 at present).
 select u.email, p.name, p.role, cardinality(p.tab_access) as tabs
 from public.profiles p
 join auth.users u on u.id = p.id

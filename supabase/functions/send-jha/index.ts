@@ -39,10 +39,24 @@ Deno.serve(async (req) => {
     // can't email it either.
     const { data: jha, error: jErr } = await asUser
       .from("jhas")
-      .select("id, pdf_key, template, work_date, status, site_rep, profiles(name), jobs(job_number, project, clients(name))")
+      .select("id, signed_by, pdf_key, template, work_date, status, site_rep, profiles(name), jobs(job_number, project, clients(name))")
       .eq("id", jhaId).single();
     if (jErr || !jha) throw new Error("Assessment not found, or you don't have access to it");
     if (!jha.pdf_key) throw new Error("This assessment has no PDF yet — render it first");
+
+    // Reading an assessment (jhas read includes the 'job' tab, which
+    // Helpers hold) is not leave to mail its PDF anywhere: a JHA carries
+    // worker names, cert numbers, dosimetry and signatures, and the send
+    // signs a 14-day URL with the service role. The tech who filed it may
+    // send it; otherwise it takes a Technician, Coordinator or Admin.
+    const { data: caller } = await asUser.from("profiles").select("role").eq("id", user.id).single();
+    const mayEmailJha = (jha as any).signed_by === user.id
+      || ["Admin", "Coordinator", "Technician"].includes(caller?.role ?? "");
+    if (!mayEmailJha) {
+      return new Response(JSON.stringify({ error: "Only the technician who filed this assessment, or a Technician, Coordinator or Admin, can email it." }), {
+        status: 403, headers: { ...corsHeaders, "Content-Type": "application/json" }
+      });
+    }
 
     const job = jha.jobs as any;
     const filename = jha.pdf_key.split("/").pop() ?? "jha.pdf";

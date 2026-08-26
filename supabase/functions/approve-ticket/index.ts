@@ -140,24 +140,42 @@ async function handle(req: Request): Promise<Response> {
     // phone connection cannot both land and record the second as the
     // signature. The read above narrows the window; this closes it.
     const approvedAt = new Date().toISOString();
-    const { error: signErr } = await admin.from("tickets").update({
+    // .select() so we learn whether THIS request is the one that signed.
+    // Without it a zero-row update (the token already burned by a
+    // concurrent submit — the same link forwarded to a colleague, both
+    // signing at once) returns {data:null, error:null}, indistinguishable
+    // from success; the loser would then be handed a receipt stamped with
+    // their own name for a ticket the record attributes to someone else.
+    const { data: signedRows, error: signErr } = await admin.from("tickets").update({
       status: "Approved",
       approved_at: approvedAt,
       approved_by_email: name,
       approved_ip: ip,
       approval_token: null // single use — burn it
-    }).eq("id", ticket.id).is("approved_at", null);
+    }).eq("id", ticket.id).is("approved_at", null).select("approved_by_email, approved_at");
     if (signErr) throw signErr;
+
+    if (!signedRows || signedRows.length === 0) {
+      // Someone else's submit won the race and burned the token. Show the
+      // approval that actually persisted, not this request's attempt.
+      const { data: fresh } = await admin.from("tickets")
+        .select("approved_by_email, approved_at").eq("id", ticket.id).maybeSingle();
+      invoiceData!.ticket.status = "Approved";
+      invoiceData!.ticket.approved_at = fresh?.approved_at ?? approvedAt;
+      invoiceData!.ticket.approved_by_email = fresh?.approved_by_email ?? "";
+      return page(invoice() + `
+        <div class="actions"><p class="signnote">This ticket was already approved. The signature on record is shown above.
+        You can print or save this page for your records.</p></div>`);
+    }
 
     // Re-render so the signed document itself carries the stamp, rather than
     // a stamp being tacked under a copy that still shows a blank signature
     // line — the rep keeps this page, and it should read as signed. The
     // loaded invoice data predates the update, so the stamp fields go onto
-    // it by hand; re-reading the row here could race the update and hand
-    // back the unsigned version anyway.
+    // it from the row we just wrote.
     invoiceData!.ticket.status = "Approved";
-    invoiceData!.ticket.approved_at = approvedAt;
-    invoiceData!.ticket.approved_by_email = name;
+    invoiceData!.ticket.approved_at = signedRows[0].approved_at ?? approvedAt;
+    invoiceData!.ticket.approved_by_email = signedRows[0].approved_by_email ?? name;
     return page(invoice() + `
       <div class="actions"><p class="signnote">Thank you. VagaboNDE has been notified and this ticket is now
       locked. You can print or save this page for your records.</p></div>`);

@@ -1,0 +1,749 @@
+import React, { useState, useEffect, useMemo, useRef } from "react";
+import { localDate, dayMonth, payPeriodLabel, recentPayPeriods, hours } from "../data.js";
+import { Db } from "../db.js";
+import { Blueprint, Btn, TableScroll, TagX, ErrorBox, RowsPerPage, useRowsPerPage , Loading, PdfLink } from "./common.jsx";
+import { makeZip, safeFilename, saveBlob } from "../zip.js";
+
+// Timesheets — hours per person per pay period, built from ticket crew rows.
+//
+// Nothing is entered here: every line originates on a billing ticket, so the
+// hours a person is paid for and the hours the client was billed for come
+// from the same record and can't drift apart. Admin reviews and approves;
+// there is no submit step.
+
+export function TimesheetsScreen({ currentUser }) {
+  // Built once. It was rebuilt on every render, which meant the object in
+  // `period` stopped being identity-equal to anything in the list.
+  const periods = useMemo(() => recentPayPeriods(12), []);
+  const [period, setPeriod] = useState(periods[0]);
+  const [entries, setEntries] = useState([]);
+  const [approvals, setApprovals] = useState([]);
+  const [view, setView] = useState("period");      // period | approved
+  const [selected, setSelected] = useState(null);
+  const [loading, setLoading] = useState(true);
+  const [error, setError] = useState("");
+  const [busy, setBusy] = useState(false);
+  const [exporting, setExporting] = useState(false);
+  const [entryPage, setEntryPage] = useState(0);
+  // Everyone on the books, for the admin picker. The crew list beside it only
+  // holds people with hours this period, which is the common case and the
+  // wrong one when the question is "why has Dave not booked anything".
+  const [roster, setRoster] = useState([]);
+  // Shared with the board, the tracker and the equipment register.
+  const [pageSize, setPageSize] = useRowsPerPage();
+
+  // Which load is the current one. A pay period can hold thousands of crew
+  // rows and takes seconds to fetch, so switching period twice in a row means
+  // two requests in flight — and without this the slower, older one lands last
+  // and puts the wrong fortnight's hours under the new period's heading. On a
+  // screen people are paid from, that is not a cosmetic race.
+  const isAdminRef = useRef(currentUser.role === "Admin");
+  const loadSeq = useRef(0);
+  const load = async p => {
+    const mine = ++loadSeq.current;
+    setLoading(true);
+    setError("");
+    try {
+      const [rows, appr] = await Promise.all([
+        Db.listTimesheetEntries(p),
+        Db.listApprovals({ start: p.start })
+      ]);
+      if (mine !== loadSeq.current) return;
+      setEntries(rows);
+      setApprovals(appr);
+      // A technician or helper has one timesheet: their own. Row-level
+      // security already returns only their crew rows, so this is about which
+      // one the screen opens on, not about what they could reach.
+      setSelected(s => {
+        if (!isAdminRef.current) return currentUser.id;
+        return rows.some(r => r.profileId === s) ? s : (rows[0] ? rows[0].profileId : null);
+      });
+    } catch (e) {
+      if (mine !== loadSeq.current) return;
+      setError(e.message || "Couldn't load timesheets.");
+    }
+    if (mine === loadSeq.current) setLoading(false);
+  };
+  useEffect(() => { load(period); }, [period.start]);
+
+  // Admins only: reviewing somebody else's hours is not a technician's job,
+  // and the tab itself is open to more than admins.
+  const isAdmin = currentUser.role === "Admin";
+  useEffect(() => {
+    if (!isAdmin) return;
+    Db.listProfiles().then(setRoster).catch(() => setRoster([]));
+  }, [isAdmin]);
+
+  // One row per person, with their entries attached. Grouped through a Map
+  // rather than a linear search per entry, and recomputed only when the
+  // entries change rather than on every keystroke elsewhere on the page.
+  const people = useMemo(() => {
+    const byId = new Map();
+    for (const e of entries) {
+      let p = byId.get(e.profileId);
+      if (!p) {
+        p = { profileId: e.profileId, name: e.name, isSub: e.isSub, entries: [], straight: 0, ot: 0, solo: 0, soloOt: 0, dose: 0, mileage: 0 };
+        byId.set(e.profileId, p);
+      }
+      p.entries.push(e);
+      p.straight += e.straight;
+      p.ot += e.ot;
+      p.solo += e.solo;
+      p.soloOt += e.soloOt;
+      p.dose += e.dose;
+      p.mileage += e.mileage;
+    }
+    return [...byId.values()].sort((a, b) => String(a.name || "").localeCompare(String(b.name || "")));
+  }, [entries]);
+
+  // A person with no hours this period still has a timesheet — an empty one,
+  // which is an answer rather than a blank screen. Only assembled for admins,
+  // since nobody else can pick from outside the crew list.
+  const selectable = useMemo(() => {
+    if (!isAdmin) return people;
+    const have = new Set(people.map(p => p.profileId));
+    const empties = roster
+      .filter(r => !have.has(r.id))
+      .map(r => ({
+        profileId: r.id, name: r.displayName || r.name, isSub: !!r.is_subcontractor,
+        entries: [], straight: 0, ot: 0, solo: 0, soloOt: 0, dose: 0, mileage: 0
+      }));
+    return [...people, ...empties].sort((a, b) => String(a.name || "").localeCompare(String(b.name || "")));
+  }, [people, roster, isAdmin]);
+
+  // A non-admin with no hours this period still gets their own empty sheet
+  // rather than nothing at all.
+  const ownEmpty = {
+    profileId: currentUser.id, name: currentUser.name, isSub: false,
+    entries: [], straight: 0, ot: 0, solo: 0, soloOt: 0, dose: 0, mileage: 0
+  };
+  const person = selectable.find(p => p.profileId === selected)
+    || (!isAdmin ? (people.find(p => p.profileId === currentUser.id) || ownEmpty) : null);
+  // Solo and mileage columns only appear when they carry something: a tech who
+  // never works alone shouldn't read two empty columns all period.
+  const showSolo = !!person && (person.solo > 0 || person.soloOt > 0);
+  const showMileage = !!person && person.isSub;
+
+  // The entry table is paged, but the totals above and below it are not — they
+  // are the period's figures, which is the whole point of the screen and what
+  // gets approved. Paging is only about how many rows are on screen at once.
+  //
+  // Sliced in the browser rather than fetched per page, unlike the board and
+  // the tracker: the totals, the approval and the Excel export all need every
+  // row for the period anyway, so the data is already here. Asking the server
+  // again per page would be a round trip to re-fetch what we hold.
+  const entryCount = person ? person.entries.length : 0;
+  const entryPageCount = Math.max(1, Math.ceil(entryCount / pageSize));
+  // Clamped rather than reset, so a page that shrinks under you lands on the
+  // last real page instead of an empty one.
+  const safePage = Math.min(entryPage, entryPageCount - 1);
+  const visibleEntries = person
+    ? person.entries.slice(safePage * pageSize, (safePage + 1) * pageSize)
+    : [];
+  // Back to page 1 when the person or the period changes — page 4 of one
+  // person's entries means nothing on the next.
+  useEffect(() => { setEntryPage(0); }, [selected, period.start, pageSize]);
+  const statCount = 3 + (showSolo ? 2 : 0) + (showMileage ? 1 : 0);
+  const approvalFor = id => approvals.find(a => a.profile_id === id);
+  const approved = person ? approvalFor(person.profileId) : null;
+
+  // Who is still waiting this period: hours on the books, no sign-off. A
+  // roster member with no entries is not waiting — there is nothing to
+  // approve — so the count is work outstanding, not people outstanding.
+  const awaiting = selectable.filter(p => p.entries.length && !approvalFor(p.profileId));
+
+  // Every export button goes through this, so none of them can forget to
+  // clear the busy flag on the way out — a download that fails and leaves the
+  // button reading "Building…" looks like the app hung.
+  const runExport = async (fn) => {
+    setExporting(true);
+    setError("");
+    try { await fn(); }
+    catch (e) { setError(e.message || "Couldn't build the spreadsheet."); }
+    setExporting(false);
+  };
+
+  const toggleApproval = async () => {
+    if (!person) return;
+    setBusy(true);
+    setError("");
+    try {
+      if (approved) {
+        await Db.unapproveTimesheet({ profileId: person.profileId, start: period.start });
+      } else {
+        // The document is built from exactly what is on screen, before the
+        // row is written: approving means freezing these figures, so if the
+        // PDF cannot be produced the period stays unapproved.
+        const JsPDF = await loadJsPdf();
+        const pdfBytes = buildTimesheetPdf(JsPDF, person, period, currentUser.name);
+        await Db.approveTimesheet({
+          profileId: person.profileId, start: period.start, end: period.end,
+          approvedBy: currentUser.id, pdfBytes
+        });
+      }
+      setApprovals(await Db.listApprovals({ start: period.start }));
+    } catch (e) {
+      setError(e.message || "Couldn't update the approval.");
+    }
+    setBusy(false);
+  };
+
+  return (
+    <div className="page">
+      <div style={{ display: "flex", alignItems: "flex-end", gap: 16, marginBottom: 20, flexWrap: "wrap" }}>
+        <div>
+          <div className="kicker">Admin · Hours</div>
+          <h2 style={{ fontSize: 34, margin: "2px 0 0" }}>Timesheets</h2>
+        </div>
+        {view === "period" && <div style={{ marginLeft: "auto", display: "flex", gap: 8, alignItems: "center", flexWrap: "wrap" }}>
+          {/* Applies to the entry table on the right, not the crew list — the
+              crew list is one row per person and is short by nature. */}
+          <RowsPerPage value={pageSize} onChange={setPageSize} />
+          {/* Admins can reach anybody, not only whoever booked hours. The crew
+              list beside the table stays as the quick path for the usual
+              case; this is for the question the crew list cannot answer. */}
+          {isAdmin && selectable.length > 0 && (
+            <select className="input" aria-label="Show timesheet for" style={{ width: "auto", minHeight: 38 }}
+              value={selected || ""} onChange={e => setSelected(e.target.value)}>
+              {selectable.map(p => (
+                <option key={p.profileId} value={p.profileId}>
+                  {p.name}{p.entries.length ? "" : " — no hours"}
+                </option>
+              ))}
+            </select>
+          )}
+          <select className="input" value={period.start} style={{ width: "auto", minHeight: 38 }}
+            onChange={e => setPeriod(periods.find(p => p.start === e.target.value) || periods[0])}>
+            {periods.map(p => <option key={p.start} value={p.start}>{payPeriodLabel(p)}</option>)}
+          </select>
+          {isAdmin && (
+            <Btn variant="secondary" style={{ minHeight: 38 }}
+              onClick={() => runExport(() => exportOneTimesheet({ person, period }))}
+              disabled={!person || exporting}>
+              {exporting ? "Building…" : "This timesheet"}
+            </Btn>
+          )}
+          {isAdmin && (
+            <Btn variant="secondary" style={{ minHeight: 38 }}
+              onClick={() => runExport(() => exportEveryTimesheet({ people: selectable, period }))}
+              disabled={!selectable.length || exporting}>
+              {exporting ? "Building…" : "All timesheets (.zip)"}
+            </Btn>
+          )}
+          <Btn variant="secondary" style={{ minHeight: 38 }}
+            onClick={() => runExport(() => exportTimesheetWorkbook({ people, period }))}
+            disabled={!people.length || exporting}>{exporting ? "Building…" : "Export period summary"}</Btn>
+        </div>}
+      </div>
+
+      {/* The live period on one tab; what has been signed off on the other.
+          The approved tab is everyone's own record — an admin reviewing
+          somebody else stays on the period view, where the roster is. */}
+      <div style={{ display: "flex", gap: 6, marginBottom: 16 }}>
+        <button className={"pill" + (view === "period" ? " active" : "")} onClick={() => setView("period")}>Timesheet</button>
+        <button className={"pill" + (view === "approved" ? " active" : "")} onClick={() => setView("approved")}>Approved timesheets</button>
+        {/* The count is this period's outstanding work, so an admin opening
+            the screen knows whether payroll is ready without hunting. */}
+        {isAdmin && (
+          <button className={"pill" + (view === "awaiting" ? " active" : "")} onClick={() => setView("awaiting")}>
+            Awaiting approval{!loading && awaiting.length ? ` (${awaiting.length})` : ""}
+          </button>
+        )}
+      </div>
+
+      {view === "approved" ? (
+        <ApprovedList currentUser={currentUser} />
+      ) : view === "awaiting" ? (
+        <div>
+          <ErrorBox>{error}</ErrorBox>
+          <div style={{ marginBottom: 14 }}>
+            <select className="input" value={period.start} style={{ width: "auto", minHeight: 38 }}
+              onChange={e => setPeriod(periods.find(p => p.start === e.target.value) || periods[0])}>
+              {periods.map(p => <option key={p.start} value={p.start}>{payPeriodLabel(p)}</option>)}
+            </select>
+          </div>
+          {loading ? (
+            <Loading />
+          ) : !awaiting.length ? (
+            <Blueprint style={{ padding: "22px 20px" }}>
+              <div style={{ fontSize: 14, color: "color-mix(in srgb, var(--color-text) 60%, transparent)" }}>
+                Everyone with hours in {payPeriodLabel(period)} has been signed off.
+              </div>
+            </Blueprint>
+          ) : (
+            <Blueprint style={{ padding: "6px 18px 14px" }}>
+              <TableScroll><table className="table">
+                <thead>
+                  <tr>
+                    <th>Name</th>
+                    <th style={{ width: 80 }}>Entries</th>
+                    <th style={{ width: 80 }}>Reg hrs</th>
+                    <th style={{ width: 80 }}>OT hrs</th>
+                    <th style={{ width: 90 }}>Dose (mR)</th>
+                    <th style={{ width: 110 }}></th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {awaiting.map(p => (
+                    <tr key={p.profileId}>
+                      <td>{p.name}{p.isSub ? <span style={{ fontSize: 11, opacity: .6 }}> · Subcontractor</span> : ""}</td>
+                      <td className="tabular">{p.entries.length}</td>
+                      <td className="tabular">{hours(p.straight)}</td>
+                      <td className="tabular">{hours(p.ot)}</td>
+                      <td className="tabular">{hours(p.dose)}</td>
+                      {/* Review, not Approve: signing off hours nobody looked
+                          at is exactly what this screen exists to prevent. */}
+                      <td><Btn variant="secondary" onClick={() => { setSelected(p.profileId); setView("period"); }}>Review</Btn></td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table></TableScroll>
+            </Blueprint>
+          )}
+        </div>
+      ) : (<>
+
+      <ErrorBox>{error}</ErrorBox>
+
+      {loading ? (
+        <Loading />
+      ) : !selectable.length ? (
+        <Blueprint style={{ padding: "22px 20px" }}>
+          <div style={{ fontSize: 14, color: "color-mix(in srgb, var(--color-text) 60%, transparent)" }}>
+            No hours recorded in {payPeriodLabel(period)}, and nobody on the books to show. Hours arrive here when a billing ticket is raised with a crew on it.
+          </div>
+        </Blueprint>
+      ) : (
+        <div>
+
+          {person && (
+            <div style={{ display: "flex", flexDirection: "column", gap: 20 }}>
+              <Blueprint style={{ padding: "18px 20px" }}>
+                <div style={{ display: "flex", alignItems: "center", gap: 10, marginBottom: 14, flexWrap: "wrap" }}>
+                  <h4 style={{ margin: 0, fontSize: 19 }}>{person.name}</h4>
+                  {person.isSub && <TagX variant="outline">Subcontractor</TagX>}
+                  {approved
+                    ? <TagX variant="accent">Approved {new Date(approved.approved_at).toLocaleDateString("en-CA", { day: "2-digit", month: "short" })}</TagX>
+                    : <TagX variant="dashed">Not approved</TagX>}
+                  {approved && approved.pdf_key && (
+                    <PdfLink bucket="timesheets" pdfKey={approved.pdf_key} file="View" style={{ fontSize: 13 }} />
+                  )}
+                  {/* Approval is a control, not a formality: signing off your
+                      own hours is not one. */}
+                  {isAdmin && <Btn variant={approved ? "secondary" : "primary"} style={{ marginLeft: "auto" }}
+                    onClick={toggleApproval} disabled={busy}>
+                    {approved ? "Reopen" : "Approve period"}
+                  </Btn>}
+                </div>
+
+                {/* auto-fit, not repeat(N, 1fr): a 1fr track will not shrink
+                    below its content, so six stats forced the layout to
+                    ~540px and a phone viewport stretched to match — the
+                    whole screen scrolled sideways. Wrapping to two rows on
+                    narrow screens is the correct trade. */}
+                <div className="strip" style={{ gridTemplateColumns: "repeat(auto-fit, minmax(104px, 1fr))" }}>
+                  <Stat label="Reg hrs" value={hours(person.straight)} unit="h" />
+                  <Stat label="OT hrs" value={hours(person.ot)} unit="h" />
+                  {showSolo && <Stat label="Solo reg" value={hours(person.solo)} unit="h" />}
+                  {showSolo && <Stat label="Solo OT" value={hours(person.soloOt)} unit="h" />}
+                  <Stat label="Dose this period" value={hours(person.dose)} unit="mR" />
+                  {showMileage && <Stat label="Mileage" value={person.mileage.toFixed(0)} unit="km" />}
+                </div>
+                <div style={{ fontSize: 11, color: "color-mix(in srgb, var(--color-text) 50%, transparent)", marginTop: 10 }}>
+                  Total paid hours {hours(person.straight + person.ot)}{showSolo ? " — solo hours are a rate distinction within those, not additional time." : "."}
+                </div>
+              </Blueprint>
+
+              <Blueprint style={{ padding: "6px 18px 14px" }}>
+                <TableScroll><table className="table table-wide">
+                  <thead>
+                    <tr>
+                      <th style={{ width: 90 }}>Date</th>
+                      <th style={{ width: 120 }}>Ticket</th>
+                      <th>Job · project</th>
+                      <th style={{ width: 70 }}>Reg</th>
+                      <th style={{ width: 60 }}>OT</th>
+                      {showSolo && <th style={{ width: 75 }}>Solo reg</th>}
+                      {showSolo && <th style={{ width: 70 }}>Solo OT</th>}
+                      <th style={{ width: 75 }}>Dose</th>
+                      {showMileage && <th style={{ width: 80 }}>Mileage</th>}
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {visibleEntries.map(e => (
+                      <tr key={e.id}>
+                        <td className="tabular">{dayMonth(localDate(e.date))}</td>
+                        <td className="tabular" style={{ fontFamily: "var(--font-heading)", fontWeight: 600 }}>{e.ticketId}</td>
+                        <td>
+                          <div>{e.project}</div>
+                          <div style={{ fontSize: 11, color: "color-mix(in srgb, var(--color-text) 50%, transparent)" }}>{e.job} · {e.client}</div>
+                        </td>
+                        <td className="tabular">{hours(e.straight)}</td>
+                        <td className="tabular">{hours(e.ot)}</td>
+                        {showSolo && <td className="tabular">{e.solo ? hours(e.solo) : "—"}</td>}
+                        {showSolo && <td className="tabular">{e.soloOt ? hours(e.soloOt) : "—"}</td>}
+                        <td className="tabular">{e.dose ? hours(e.dose) + " mR" : "—"}</td>
+                        {showMileage && <td className="tabular">{e.mileage ? e.mileage.toFixed(0) : "—"}</td>}
+                      </tr>
+                    ))}
+                    <tr>
+                      {/* Says "all N entries" once there is more than one page,
+                          so a total larger than the rows above it reads as the
+                          period's figure rather than a mistake. */}
+                      <td colSpan={3} style={{ fontWeight: 600 }}>
+                        Period total{entryPageCount > 1 ? ` · all ${entryCount} entries` : ""}
+                      </td>
+                      <td className="tabular" style={{ fontWeight: 600 }}>{hours(person.straight)}</td>
+                      <td className="tabular" style={{ fontWeight: 600 }}>{hours(person.ot)}</td>
+                      {showSolo && <td className="tabular" style={{ fontWeight: 600 }}>{hours(person.solo)}</td>}
+                      {showSolo && <td className="tabular" style={{ fontWeight: 600 }}>{hours(person.soloOt)}</td>}
+                      <td className="tabular" style={{ fontWeight: 600 }}>{hours(person.dose)}</td>
+                      {showMileage && <td className="tabular" style={{ fontWeight: 600 }}>{person.mileage.toFixed(0)}</td>}
+                    </tr>
+                  </tbody>
+                </table></TableScroll>
+                {/* Same control as the dispatch board, the billing tracker and
+                    the equipment register — hidden at one page, as they are. */}
+                {entryPageCount > 1 && (
+                  <div style={{ display: "flex", alignItems: "center", gap: 10, padding: "12px 4px 4px" }}>
+                    <Btn variant="secondary" onClick={() => setEntryPage(p => Math.max(0, p - 1))} disabled={safePage === 0}>← Previous</Btn>
+                    <span style={{ fontSize: 13, color: "color-mix(in srgb, var(--color-text) 60%, transparent)" }}>Page {safePage + 1} of {entryPageCount}</span>
+                    <Btn variant="secondary" onClick={() => setEntryPage(p => Math.min(entryPageCount - 1, p + 1))} disabled={safePage >= entryPageCount - 1}>Next →</Btn>
+                  </div>
+                )}
+              </Blueprint>
+
+              <p style={{ fontSize: 11, color: "color-mix(in srgb, var(--color-text) 50%, transparent)", margin: 0 }}>
+                Hours come from the crew on each billing ticket — to correct one, edit the ticket rather than this page.
+                Dose is recorded per person per ticket in mR.
+              </p>
+            </div>
+          )}
+        </div>
+      )}
+      </>)}
+    </div>
+  );
+}
+
+// The other tab: every period of yours that has been signed off, newest
+// first, each one a stored PDF. This is deliberately your own record even
+// for admins — reviewing somebody else's hours happens on the period view,
+// where the roster and the Approve button are.
+function ApprovedList({ currentUser }) {
+  const [rows, setRows] = useState(null);
+  const [error, setError] = useState("");
+  useEffect(() => {
+    let live = true;
+    Db.listMyApprovedTimesheets(currentUser.id)
+      .then(r => { if (live) setRows(r); })
+      .catch(e => { if (live) { setError(e.message || "Couldn't load approved timesheets."); setRows([]); } });
+    return () => { live = false; };
+  }, [currentUser.id]);
+
+  if (rows === null) return <Loading />;
+  return (
+    <div>
+      <ErrorBox>{error}</ErrorBox>
+      {!rows.length && !error ? (
+        <Blueprint style={{ padding: "22px 20px" }}>
+          <div style={{ fontSize: 14, color: "color-mix(in srgb, var(--color-text) 60%, transparent)" }}>
+            Nothing signed off yet. When an admin approves one of your pay periods, the timesheet lands here as a PDF.
+          </div>
+        </Blueprint>
+      ) : (
+        <Blueprint style={{ padding: "6px 18px 14px" }}>
+          <TableScroll><table className="table">
+            <thead>
+              <tr>
+                <th>Pay period</th>
+                <th style={{ width: 160 }}>Approved by</th>
+                <th style={{ width: 110 }}>On</th>
+                <th style={{ width: 200 }}>Document</th>
+              </tr>
+            </thead>
+            <tbody>
+              {rows.map(r => (
+                <tr key={r.start}>
+                  <td>{payPeriodLabel({ start: r.start, end: r.end })}</td>
+                  <td>{r.by}</td>
+                  <td className="tabular">{new Date(r.at).toLocaleDateString("en-CA", { day: "2-digit", month: "short", year: "numeric" })}</td>
+                  {/* Approvals recorded before PDFs existed have no document;
+                      PdfLink renders those as muted text, which is the truth. */}
+                  <td><PdfLink bucket="timesheets" pdfKey={r.pdfKey} file={`Timesheet ${r.start}`} /></td>
+                </tr>
+              ))}
+            </tbody>
+          </table></TableScroll>
+        </Blueprint>
+      )}
+    </div>
+  );
+}
+
+function Stat({ label, value, unit }) {
+  return (
+    <div>
+      <div style={{ fontSize: 10, letterSpacing: ".1em", textTransform: "uppercase", color: "color-mix(in srgb, var(--color-text) 55%, transparent)" }}>{label}</div>
+      <div className="tabular" style={{ fontFamily: "var(--font-heading)", fontWeight: 600, fontSize: 26, lineHeight: 1.15 }}>
+        {value}<span style={{ fontSize: 13, fontWeight: 400, marginLeft: 4, color: "color-mix(in srgb, var(--color-text) 55%, transparent)" }}>{unit}</span>
+      </div>
+    </div>
+  );
+}
+
+// One place makes the CDN <script> tags. The versions are pinned, so the
+// bytes can be pinned too: `integrity` makes a tampered CDN response fail
+// to execute instead of running inside the signed-in app. The timeout is
+// for the request that neither loads nor errors — without it a stalled
+// fetch left "Exporting…" or an approval spinning forever, with the cached
+// promise poisoned so even a retry click did nothing.
+function cdnScript(src, integrity, onDone, onFail) {
+  const tag = document.createElement("script");
+  tag.src = src;
+  tag.integrity = integrity;
+  tag.crossOrigin = "anonymous";
+  const timer = setTimeout(() => { tag.remove(); onFail(); }, 30000);
+  tag.onload = () => { clearTimeout(timer); onDone(); };
+  tag.onerror = () => { clearTimeout(timer); onFail(); };
+  document.head.appendChild(tag);
+}
+
+// SheetJS is ~900 KB and only one button needs it, so it's fetched on the
+// first export rather than blocking every page load.
+let xlsxPromise = null;
+function loadXlsx() {
+  if (window.XLSX) return Promise.resolve(window.XLSX);
+  if (!xlsxPromise) {
+    xlsxPromise = new Promise((resolve, reject) => {
+      cdnScript(
+        "https://cdn.jsdelivr.net/npm/xlsx@0.18.5/dist/xlsx.full.min.js",
+        "sha384-vtjasyidUo0kW94K5MXDXntzOJpQgBKXmE7e2Ga4LG0skTTLeBi97eFAXsqewJjw",
+        () => resolve(window.XLSX),
+        () => { xlsxPromise = null; reject(new Error("Couldn't load the spreadsheet library.")); }
+      );
+    });
+  }
+  return xlsxPromise;
+}
+
+// jsPDF and its table plugin, from the CDN on first approval — the same
+// bargain as SheetJS above, with the same recovery: a failed load clears
+// the promise so the next click retries instead of staying poisoned.
+let jspdfPromise = null;
+function loadJsPdf() {
+  if (window.jspdf && window.jspdf.jsPDF && window.jspdf.jsPDF.API.autoTable) {
+    return Promise.resolve(window.jspdf.jsPDF);
+  }
+  if (!jspdfPromise) {
+    jspdfPromise = new Promise((resolve, reject) => {
+      const fail = () => { jspdfPromise = null; reject(new Error("Couldn't load the PDF builder — check the connection and try again.")); };
+      cdnScript(
+        "https://cdn.jsdelivr.net/npm/jspdf@2.5.2/dist/jspdf.umd.min.js",
+        "sha384-en/ztfPSRkGfME4KIm05joYXynqzUgbsG5nMrj/xEFAHXkeZfO3yMK8QQ+mP7p1/",
+        () => cdnScript(
+          "https://cdn.jsdelivr.net/npm/jspdf-autotable@3.8.4/dist/jspdf.plugin.autotable.min.js",
+          "sha384-Xl/CUCfJbzsngMp0CFxkmF0VW/8C160IsGujqeQlIhaGxKz2+JsIGORFqtCPeldF",
+          () => resolve(window.jspdf.jsPDF),
+          fail
+        ),
+        fail
+      );
+    });
+  }
+  return jspdfPromise;
+}
+
+// The document that approval freezes: the same figures as the Excel export
+// and the screen — totals strip, then every entry — plus the line neither
+// of those carries, which is who signed it off and when. Ticket data can be
+// corrected after the fact; this is the record of what was approved.
+function buildTimesheetPdf(JsPDF, person, period, approverName) {
+  const doc = new JsPDF({ unit: "pt", format: "letter" });
+  const label = payPeriodLabel(period);
+  const showSolo = person.solo > 0 || person.soloOt > 0;
+  const ink = [29, 31, 32];
+  const num = n => String(hours(n));
+
+  doc.setFont("helvetica", "bold");
+  doc.setFontSize(17);
+  doc.setTextColor(...ink);
+  doc.text("VagaboNDE — Timesheet", 48, 54);
+  doc.setFont("helvetica", "normal");
+  doc.setFontSize(10);
+  doc.text(`${person.name} · ${person.isSub ? "Subcontractor" : "Employee"}`, 48, 72);
+  doc.text(label, 48, 86);
+
+  doc.autoTable({
+    startY: 104,
+    margin: { left: 48, right: 48 },
+    styles: { fontSize: 9, cellPadding: 5, textColor: ink },
+    headStyles: { fillColor: [40, 44, 46], textColor: 255 },
+    head: [[
+      "Reg hrs", "OT hrs",
+      ...(showSolo ? ["Solo reg", "Solo OT"] : []),
+      "Total paid", "Dose (mR)",
+      ...(person.isSub ? ["Mileage (km)"] : [])
+    ]],
+    body: [[
+      num(person.straight), num(person.ot),
+      ...(showSolo ? [num(person.solo), num(person.soloOt)] : []),
+      num(person.straight + person.ot), num(person.dose),
+      ...(person.isSub ? [String(Math.round(person.mileage))] : [])
+    ]]
+  });
+
+  const detailCols = 5 + 2 + (showSolo ? 2 : 0) + 1 + (person.isSub ? 1 : 0);
+  doc.autoTable({
+    startY: doc.lastAutoTable.finalY + 16,
+    margin: { left: 48, right: 48 },
+    styles: { fontSize: 7.5, cellPadding: 3.5, textColor: ink },
+    headStyles: { fillColor: [40, 44, 46], textColor: 255 },
+    head: [[
+      "Date", "Ticket", "Job", "Project", "Client", "Reg", "OT",
+      ...(showSolo ? ["Solo", "Solo OT"] : []),
+      "Dose",
+      ...(person.isSub ? ["km"] : []),
+      "Status"
+    ]],
+    body: person.entries.length
+      ? person.entries.map(e => [
+          e.date, e.ticketId, e.job, e.project, e.client, num(e.straight), num(e.ot),
+          ...(showSolo ? [num(e.solo), num(e.soloOt)] : []),
+          num(e.dose),
+          ...(person.isSub ? [String(Math.round(e.mileage))] : []),
+          e.ticketStatus
+        ])
+      : [[{ content: "No hours recorded in this period.", colSpan: detailCols + 1, styles: { fontStyle: "italic" } }]]
+  });
+
+  // The approval line, and a fresh page for it if the table ran the sheet
+  // out — a signature block that overprints the last row is not a document
+  // anyone should file.
+  let y = doc.lastAutoTable.finalY + 26;
+  if (y > doc.internal.pageSize.getHeight() - 48) {
+    doc.addPage();
+    y = 56;
+  }
+  doc.setFontSize(10);
+  doc.text(
+    `Approved by ${approverName} — ${new Date().toLocaleDateString("en-CA", { day: "2-digit", month: "short", year: "numeric" })}`,
+    48, y
+  );
+  return doc.output("arraybuffer");
+}
+
+// Two sheets, because a bookkeeper wants both: Summary is one row per person
+// to key into payroll, Detail is every entry so a subcontractor can lift the
+// lines straight into their own invoice.
+//
+// Built rather than written, so the same shape serves all three buttons: the
+// whole period in one workbook, one person on their own, and one workbook per
+// person inside a bundle. A person's figures must not depend on which button
+// produced them.
+function buildWorkbook(XLSX, people, period) {
+  const label = payPeriodLabel(period);
+
+  const summary = people.map(p => ({
+    Name: p.name,
+    Type: p.isSub ? "Subcontractor" : "Employee",
+    "Straight hours": Number(hours(p.straight)),
+    "Overtime hours": Number(hours(p.ot)),
+    "Solo reg hours": Number(hours(p.solo)),
+    "Solo OT hours": Number(hours(p.soloOt)),
+    "Total hours": Number(hours(p.straight + p.ot)),
+    "Dose (mR)": Number(hours(p.dose)),
+    "Mileage (km)": p.isSub ? Math.round(p.mileage) : "",
+    "Pay period": label
+  }));
+
+  const detail = [];
+  for (const p of people) {
+    for (const e of p.entries) {
+      detail.push({
+        Name: p.name,
+        Type: p.isSub ? "Subcontractor" : "Employee",
+        Role: e.role || "Technician",
+        Date: e.date,
+        Ticket: e.ticketId,
+        Job: e.job,
+        Project: e.project,
+        Client: e.client,
+        "Straight hours": Number(hours(e.straight)),
+        "Overtime hours": Number(hours(e.ot)),
+        "Solo reg hours": Number(hours(e.solo)),
+        "Solo OT hours": Number(hours(e.soloOt)),
+        "Dose (mR)": Number(hours(e.dose)),
+        "Mileage (km)": p.isSub ? Math.round(e.mileage) : "",
+        "Ticket status": e.ticketStatus
+      });
+    }
+  }
+
+  // A person with no hours gets a workbook with a header row and nothing
+  // under it. json_to_sheet on an empty array produces a sheet with no header
+  // at all, which reads as a broken file rather than as an empty period.
+  const wb = XLSX.utils.book_new();
+  const s1 = XLSX.utils.json_to_sheet(summary.length ? summary : [{
+    Name: people.length ? people[0].name : "",
+    Type: "", "Straight hours": 0, "Overtime hours": 0, "Solo reg hours": 0,
+    "Solo OT hours": 0, "Total hours": 0, "Dose (mR)": 0, "Mileage (km)": "", "Pay period": label
+  }]);
+  const s2 = XLSX.utils.json_to_sheet(detail.length ? detail : [{
+    Name: people.length ? people[0].name : "", Type: "", Role: "", Date: "", Ticket: "",
+    Job: "", Project: "", Client: "", "Straight hours": "", "Overtime hours": "",
+    "Solo reg hours": "", "Solo OT hours": "", "Dose (mR)": "", "Mileage (km)": "",
+    "Ticket status": "No hours recorded in this period"
+  }]);
+  s1["!cols"] = [{ wch: 22 }, { wch: 15 }, { wch: 14 }, { wch: 14 }, { wch: 14 }, { wch: 13 }, { wch: 12 }, { wch: 11 }, { wch: 13 }, { wch: 20 }];
+  s2["!cols"] = [{ wch: 22 }, { wch: 15 }, { wch: 12 }, { wch: 14 }, { wch: 10 }, { wch: 26 }, { wch: 24 }, { wch: 14 }, { wch: 14 }, { wch: 14 }, { wch: 13 }, { wch: 11 }, { wch: 13 }, { wch: 16 }];
+  XLSX.utils.book_append_sheet(wb, s1, "Summary");
+  XLSX.utils.book_append_sheet(wb, s2, "Detail");
+  return wb;
+}
+
+const periodSuffix = period => `${period.start} to ${period.end}`;
+
+// Everyone, in one workbook — "Export period summary". Its Summary sheet is
+// one row per person, which is the whole crew side by side and the only one
+// of the three exports that gives you that: the bundle holds a file each,
+// every one with a single-row Summary.
+async function exportTimesheetWorkbook({ people, period }) {
+  const XLSX = await loadXlsx();
+  XLSX.writeFile(buildWorkbook(XLSX, people, period), `Timesheets ${periodSuffix(period)}.xlsx`);
+}
+
+// One person, on their own — what gets emailed to a subcontractor who asked
+// for their hours, without the rest of the crew's attached.
+async function exportOneTimesheet({ person, period }) {
+  const XLSX = await loadXlsx();
+  XLSX.writeFile(
+    buildWorkbook(XLSX, [person], period),
+    `Timesheet ${safeFilename(person.name)} ${periodSuffix(period)}.xlsx`
+  );
+}
+
+// One workbook each, bundled. Not one workbook with a sheet per person:
+// these get forwarded individually, and a bookkeeper should be able to send
+// somebody their hours without sending everyone else's too.
+async function exportEveryTimesheet({ people, period }) {
+  const XLSX = await loadXlsx();
+  const suffix = periodSuffix(period);
+
+  // Names come from a free-text column and two people can share one. A
+  // duplicate would silently overwrite inside the archive, so a collision
+  // gets a number rather than one person's hours disappearing.
+  const used = new Map();
+  const files = people.map(p => {
+    const base = safeFilename(p.name, "unnamed");
+    const n = (used.get(base) || 0) + 1;
+    used.set(base, n);
+    const name = `Timesheet ${base}${n > 1 ? ` (${n})` : ""} ${suffix}.xlsx`;
+    return {
+      name,
+      data: new Uint8Array(XLSX.write(buildWorkbook(XLSX, [p], period), { type: "array", bookType: "xlsx" }))
+    };
+  });
+
+  saveBlob(makeZip(files), `Timesheets ${suffix}.zip`);
+}
