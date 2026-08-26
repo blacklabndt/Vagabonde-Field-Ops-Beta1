@@ -374,6 +374,12 @@ export function PdfLink({ file, pdfKey, bucket = "reports", style }) {
 let dialogSeq = 0;
 export function Dialog({ title, maxWidth = 520, onClose, children, actions }) {
   const shell = useRef(null);
+  // Callers pass onClose as a fresh inline arrow every render. Held in a ref
+  // so the setup effect below can run once (mount only) instead of tearing
+  // down and re-running — which re-focused the first field — on any ancestor
+  // re-render (a toast, a queue update) while the user was typing.
+  const onCloseRef = useRef(onClose);
+  onCloseRef.current = onClose;
   const titleId = useRef("dlg-" + (++dialogSeq)).current;
 
   useEffect(() => {
@@ -392,7 +398,7 @@ export function Dialog({ title, maxWidth = 520, onClose, children, actions }) {
     if (first) first.focus();
 
     const onKey = e => {
-      if (e.key === "Escape") { onClose(); return; }
+      if (e.key === "Escape") { onCloseRef.current(); return; }
       if (e.key !== "Tab") return;
       const items = focusable();
       if (!items.length) return;
@@ -408,7 +414,9 @@ export function Dialog({ title, maxWidth = 520, onClose, children, actions }) {
       document.body.style.overflow = prevOverflow;
       if (opener && opener.focus) opener.focus();
     };
-  }, [onClose]);
+    // Mount-only: onClose is reached through onCloseRef so a new inline
+    // onClose each render can't re-run this and yank focus back to field one.
+  }, []);
 
   return (
     <div className="dialog-backdrop" onMouseDown={e => { if (e.target === e.currentTarget) onClose(); }}>
@@ -484,13 +492,18 @@ export function LoadingRow({ cols = 1, label = "Loading…" }) {
 }
 
 export function Toast({ message, tone = "ok", onDone, duration = 2600 }) {
+  // onDone arrives as a fresh inline arrow each render; a ref keeps the timer
+  // from re-arming on unrelated App re-renders. Left in the deps it restarted
+  // the countdown every render, so under steady churn the toast never left.
+  const onDoneRef = useRef(onDone);
+  onDoneRef.current = onDone;
   useEffect(() => {
     if (!message) return;
-    const t = setTimeout(onDone, duration);
+    const t = setTimeout(() => onDoneRef.current(), duration);
     // Re-armed per message, so a second save mid-fade resets the clock
     // instead of inheriting the tail of the first one's timer.
     return () => clearTimeout(t);
-  }, [message, duration, onDone]);
+  }, [message, duration]);
 
   if (!message) return null;
   const bad = tone === "error";

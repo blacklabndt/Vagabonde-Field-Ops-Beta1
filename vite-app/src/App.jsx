@@ -297,7 +297,13 @@ export function App() {
   useEffect(() => {
     if (!currentUser) return;
     loadReferenceData();
-    Db.getMostRecentJob().then(j => { if (j) setActiveJob(j); }).catch(e => console.error("Couldn't load the most recent job:", e.message));
+    // Warm the most-recent job so a drawer-opened Job screen has something
+    // to show — but only if the user hasn't already opened a job. The
+    // functional update keeps whatever they picked: on a slow connection
+    // this RPC can resolve seconds after sign-in, and it used to overwrite
+    // a job the tech had already tapped into, silently binding any JHA or
+    // ticket they then started to the wrong job.
+    Db.getMostRecentJob().then(j => { if (j) setActiveJob(prev => prev || j); }).catch(e => console.error("Couldn't load the most recent job:", e.message));
     // Warmed on sign-in so the JHA builder still opens with this person's
     // usual hazard ratings when they're out of range.
     Db.lastHazardRatings(currentUser.id).catch(() => {});
@@ -377,6 +383,16 @@ export function App() {
       Toasts.show(e.message || "Couldn't clear this device's cached data.", "error");
       console.error("Sign-out could not clear the offline cache:", e);
     }
+    // Reset the session-scoped UI too, or the next person to sign in on this
+    // shared tablet inherits it: the drawer was opened to reach Sign out, so
+    // menuOpen/menuVisible are true and would render the nav drawer open over
+    // their board; and chatUnread still holds the last crew member's count,
+    // which the app icon badge would keep showing (and expose) until a fresh
+    // count resolves. Zeroing chatUnread also drives the badge effect to
+    // clear the OS icon.
+    setMenuOpen(false);
+    setMenuVisible(false);
+    setChatUnread(0);
     setCurrentUser(null);
   };
 
@@ -451,6 +467,12 @@ export function App() {
     case "job":
       body = activeJob ? (
         <JobDetailScreen
+          // Keyed by job id: if activeJob is swapped on this same instance
+          // (e.g. the delete-and-redirect path), React remounts the screen
+          // fresh rather than carrying the previous job's edit state (draft,
+          // editingRecord) — which a save would otherwise write onto the new
+          // job's record.
+          key={activeJob.dbId || activeJob.id}
           job={activeJob} currentUser={currentUser}
           onStartJha={() => gotoContext("jha")}
           onOpenTicket={openTicketDraft}

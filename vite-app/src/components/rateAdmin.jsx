@@ -38,11 +38,13 @@ export function RateAdminScreen() {
   // the figures the client gets billed at, so the last request wins and the
   // rest are dropped.
   const loadSeq = useRef(0);
-  const loadSchedule = async () => {
+  const loadSchedule = async (keepError = false) => {
     if (!selected) return;
     const mine = ++loadSeq.current;
     setLoading(true);
-    setError("");
+    // A recovery reload from a failed save passes keepError so it doesn't
+    // wipe the error banner the failing caller just set.
+    if (!keepError) setError("");
     try {
       const { schedule: s, lines: l } = await Db.getEditableSchedule(selected);
       // A card that follows the house card displays the house card — the
@@ -150,16 +152,16 @@ export function RateAdminScreen() {
       return u ? { ...l, position: u.position } : l;
     }));
     setJustPublished(false);
-    inFlight.current++;
-    setSaveState("saving");
+    beginWrite();
     try {
       await Db.reorderRateLines(updates);
-      if (--inFlight.current === 0) setSaveState("saved");
+      endWrite();
     } catch (e) {
+      anyFailed.current = true;
       inFlight.current--;
       setSaveState("failed");
       setError(e.message || "Couldn't save the new order.");
-      await loadSchedule();
+      await loadSchedule(true);
     }
   };
 
@@ -205,15 +207,28 @@ export function RateAdminScreen() {
     setError("");
     try {
       if (following) {
-        await Db.setFollowsDefault(schedule.id, false);
+        // Turning follow OFF: copy the house card in FIRST, then stop
+        // following. Order matters — copyDefaultInto is idempotent (it only
+        // fills missing lines), so if it fails the schedule stays safely
+        // following the house card; if the copy lands but the flag flip
+        // then fails, the copied lines lie dormant and the client still
+        // follows. The old order (flip first) could leave the schedule not
+        // following AND with no lines, which blocks every ticket for the
+        // client at "No published rate schedule."
         Toasts.mute();
         try { await Db.copyDefaultInto(schedule.id); }
         finally { Toasts.unmute(); }
+        await Db.setFollowsDefault(schedule.id, false);
       } else {
         await Db.setFollowsDefault(schedule.id, true);
       }
       await loadSchedule();
-    } catch (e) { setError(e.message || "Couldn't change who prices this client's tickets."); }
+    } catch (e) {
+      setError(e.message || "Couldn't change who prices this client's tickets.");
+      // Reconcile the switch with what actually landed — without this the
+      // toggle keeps showing its old position after a mid-flight failure.
+      await loadSchedule(true).catch(() => {});
+    }
     setSwitching(false);
   };
 
@@ -223,25 +238,38 @@ export function RateAdminScreen() {
   // looks identical whether the last figure reached the database or not.
   const [saveState, setSaveState] = useState("idle");
   const inFlight = useRef(0);
+  // Whether any write in the CURRENT in-flight cycle failed. The inFlight
+  // counter alone can't tell "saved" from "one of these failed": a later
+  // write reaching 0 would flip the indicator back to ✓ even though an
+  // earlier one was rejected and its rate silently reverted. This latches a
+  // failure for the cycle and clears only when a fresh cycle begins.
+  const anyFailed = useRef(false);
+  const beginWrite = () => {
+    if (inFlight.current === 0) anyFailed.current = false;
+    inFlight.current++;
+    setSaveState("saving");
+  };
+  const endWrite = () => {
+    if (--inFlight.current === 0) setSaveState(anyFailed.current ? "failed" : "saved");
+  };
 
   // The grid updates immediately; the write waits until typing stops. Keyed
   // by line id, so editing two rates in quick succession doesn't cancel one.
   const persistRate = useDebounced(async (id, rate) => {
-    inFlight.current++;
-    setSaveState("saving");
+    beginWrite();
     try {
       await Db.setRateLine(id, rate);
       // Only settles once the last outstanding write lands, so editing several
       // rates quickly gets one confirmation at the end rather than a queue of
-      // them, and never claims "saved" while others are still in flight.
-      if (--inFlight.current === 0) {
-        setSaveState("saved");
-      }
+      // them, and never claims "saved" while others are still in flight — or
+      // if any of them failed (see anyFailed).
+      endWrite();
     } catch (e) {
+      anyFailed.current = true;
       inFlight.current--;
       setSaveState("failed");
       setError(e.message || "Couldn't save that rate.");
-      await loadSchedule();
+      await loadSchedule(true);
     }
   }, 500);
 

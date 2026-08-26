@@ -52,6 +52,26 @@ test("a nameless provisional cannot overwrite a named quote", () => {
   assert.equal(out[0].quoted.name, "Aaron Toews");
 });
 
+test("an authoritative null quote clears a deleted parent's text", () => {
+  // Bob's reply resolved its quote while Aaron's message existed. Aaron's
+  // message is deleted; the next poll (which ran the reply_to join, so
+  // hasQuoteJoin) returns quoted=null. The stale quote text must clear, not
+  // linger forever on already-open clients.
+  const prev = [msg("b", { replyTo: "a", quoted: { id: "a", name: "Aaron Toews", body: "bring RadHed 4471", label: "" } })];
+  const out = mergeIn(prev, [msg("b", { replyTo: "a", quoted: null, hasQuoteJoin: true })]);
+  assert.notEqual(out, prev);
+  assert.equal(out[0].quoted, null);
+});
+
+test("a realtime null quote (no join) keeps the resolved quote", () => {
+  // A joinless realtime update carries quoted=null because it never had the
+  // embed — that must not wipe a quote the poll already resolved.
+  const good = { id: "a", name: "Aaron Toews", body: "bring RadHed 4471", label: "" };
+  const prev = [msg("b", { replyTo: "a", quoted: good })];
+  const out = mergeIn(prev, [msg("b", { replyTo: "a", quoted: null, pinnedAt: "2026-08-20T11:00:00Z" })]);
+  assert.equal(out[0].quoted && out[0].quoted.name, "Aaron Toews");
+});
+
 test("null reactions mean unknown; an array is authoritative", () => {
   const prev = [msg("a", { reactions: [{ emoji: "🔥", profileId: "p2" }] })];
   // A realtime pin update carries no reactions embed — must not clear.

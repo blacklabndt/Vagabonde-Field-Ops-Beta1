@@ -85,6 +85,12 @@ function shapeChatMessage(m) {
       body: m.quoted.body || "",
       label: m.quoted.image_key ? "(picture)" : m.quoted.gif_url ? "(GIF)" : m.quoted.audio_key ? "(voice note)" : m.quoted.file_name ? "(file)" : ""
     } : null,
+    // Whether this copy resolved the reply_to join. A joined select carries
+    // the `quoted` embed key (null when the parent is gone); a raw realtime
+    // payload has no such key. The merge trusts an authoritative null here
+    // to clear a deleted quote, and defers to what it already has otherwise
+    // — see mergeIn in chatMerge.js.
+    hasQuoteJoin: "quoted" in m,
     pinnedAt: m.pinned_at || null,
     createdAt: m.created_at,
     at: stamp(m.created_at)
@@ -474,8 +480,14 @@ export const Db = {
     if (error) throw error;
     // The board, the job itself and its history are all now wrong on this
     // device, and the deleted job must not come back from the cache — nor
-    // should the chat keep linkifying its number.
-    invalidate("jobs.recent", "job_numbers");
+    // should the chat keep linkifying its number. "job_numbers" is an
+    // in-memory cached() key; "jobs.recent" is the offline board page and
+    // lives in OfflineCache, so invalidate() never touched it — it has to
+    // be removed there, or an offline board falls back to a stale page
+    // still holding the deleted job (whose per-job entries are gone below,
+    // so tapping it errors).
+    invalidate("job_numbers");
+    await OfflineCache.remove("jobs.recent");
     await OfflineCache.remove("job." + jobId);
     await OfflineCache.remove("jhas." + jobId);
     await OfflineCache.remove("reports." + jobId);
@@ -1483,6 +1495,19 @@ export const Db = {
   async saveCrewForTicket(ticketId, crew) {
     // Replace rather than diff: a ticket's crew is small and edited as a
     // whole, and this keeps removals from needing their own bookkeeping.
+    //
+    // Delete-then-insert with the old rows held back, exactly like
+    // updateTicket does for the billing lines: crew rows carry the hours,
+    // dose and mileage that drive payroll and the dosimetry record, so a
+    // refused insert (RLS, a deactivated profile's FK, a constraint, a
+    // timeout after the delete lands) must not leave the ticket with no
+    // crew at all. If the replacement fails, the originals go back.
+    const { data: oldCrew, error: oErr } = await sbClient
+      .from("ticket_crew")
+      .select("profile_id, crew_role, straight_hours, ot_hours, solo_hours, solo_ot_hours, dose_mr, mileage_km")
+      .eq("ticket_id", ticketId);
+    if (oErr) throw oErr;
+
     const { error: dErr } = await sbClient.from("ticket_crew").delete().eq("ticket_id", ticketId);
     if (dErr) throw dErr;
     if (!crew.length) return;
@@ -1496,7 +1521,14 @@ export const Db = {
         dose_mr: nonNegative(c.dose), mileage_km: nonNegative(c.mileage)
       }))
     );
-    if (error) throw error;
+    if (error) {
+      if (oldCrew && oldCrew.length) {
+        await sbClient.from("ticket_crew")
+          .insert(oldCrew.map(r => ({ ticket_id: ticketId, ...r })))
+          .then(() => {}, () => {});
+      }
+      throw error;
+    }
   },
 
   // Every crew entry in a pay period, with the ticket and job behind it —
@@ -1674,12 +1706,26 @@ export const Db = {
   },
 
   async listMyTickets(technicianId) {
-    const { data, error } = await sbClient
-      .from("tickets")
-      .select("id, work_date, status, total, created_at, jobs(job_number, project, clients(name))")
-      .eq("technician_id", technicianId)
-      .order("created_at", { ascending: false });
-    if (error) throw error;
+    // The Open tickets screen wants every unbilled ticket this tech raised,
+    // then filters out Invoiced client-side. Two hazards the old bare query
+    // had: Invoiced tickets dominate lifetime volume, and a technician past
+    // 1,000 lifetime tickets would hit the PostgREST cap — sorted newest
+    // first, the rows that vanish are the oldest non-Invoiced ones, exactly
+    // the forgotten Draft an Open-tickets view exists to surface. Filter
+    // Invoiced out at the server (so the working set stays far under the
+    // cap) and page the rest to be certain nothing is dropped.
+    const data = await fetchAllPages(async page => {
+      const { data: rows, error, count } = await sbClient
+        .from("tickets")
+        .select("id, work_date, status, total, created_at, jobs(job_number, project, clients(name))",
+          page === 0 ? { count: "exact" } : {})
+        .eq("technician_id", technicianId)
+        .neq("status", "Invoiced")
+        .order("created_at", { ascending: false }).order("id")
+        .range(page * RESPONSE_ROW_CAP, (page + 1) * RESPONSE_ROW_CAP - 1);
+      if (error) throw error;
+      return { rows: rows || [], total: count ?? (rows || []).length };
+    });
     return data.map(t => ({
       id: t.id, date: dayMonth(localDate(t.work_date)),
       age: ageInDays(t.created_at),
@@ -1922,11 +1968,21 @@ export const Db = {
   // Every rate change ever made to a schedule, newest first — what "Rate
   // history" shows, backed by the trigger in the migrations.
   async getRateLineHistory(scheduleId) {
-    const { data, error } = await sbClient
-      .from("rate_line_history")
-      .select("id, label, kind, unit, old_rate, new_rate, changed_at, profiles(name)")
-      .eq("schedule_id", scheduleId).order("changed_at", { ascending: false });
-    if (error) throw error;
+    // Paged: "every rate change ever" is an all-of-them read, and a
+    // long-lived house card can accumulate more than the 1000-row cap,
+    // which would silently drop the oldest changes from the audit dialog.
+    // Ordered by changed_at then id so the pages can't overlap or skip.
+    const data = await fetchAllPages(async page => {
+      const { data: rows, error, count } = await sbClient
+        .from("rate_line_history")
+        .select("id, label, kind, unit, old_rate, new_rate, changed_at, profiles(name)",
+          page === 0 ? { count: "exact" } : {})
+        .eq("schedule_id", scheduleId)
+        .order("changed_at", { ascending: false }).order("id")
+        .range(page * RESPONSE_ROW_CAP, (page + 1) * RESPONSE_ROW_CAP - 1);
+      if (error) throw error;
+      return { rows: rows || [], total: count ?? (rows || []).length };
+    });
     return data.map(h => ({
       id: h.id, label: h.label, kind: h.kind, unit: h.unit,
       oldRate: Number(h.old_rate), newRate: Number(h.new_rate),
