@@ -699,10 +699,11 @@ export function App() {
               <span style={{ color: "color-mix(in srgb, var(--color-text) 65%, transparent)" }}>Animations</span>
               <Switch on={motion === "on"} onClick={() => setMotion(motion === "on" ? "off" : "on")} label="Animations" />
             </div>
-            {/* Which build this device is on — the commit and its day, so
-                "is everyone on the same version?" is a glance at each
-                drawer, not a guess. Stamped at build time (vite.config). */}
-            <div className="drawer-foot" style={{ justifyContent: "flex-end", fontSize: 11, color: "color-mix(in srgb, var(--color-text) 45%, transparent)" }}>
+            {/* Which build this device is on — name, commit, day — so "is
+                everyone on the same version?" is a glance at each drawer,
+                not a guess. Pinned to the drawer's bottom edge (the auto
+                margin takes the slack), clear of the controls above. */}
+            <div style={{ marginTop: "auto", padding: "12px 16px 0", textAlign: "center", fontSize: 10.5, color: "color-mix(in srgb, var(--color-text) 40%, transparent)" }}>
               Version {typeof __APP_VERSION__ !== "undefined" ? __APP_VERSION__ : "dev"}
             </div>
           </nav>
