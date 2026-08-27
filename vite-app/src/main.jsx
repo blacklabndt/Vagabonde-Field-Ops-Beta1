@@ -3,6 +3,11 @@ import ReactDOM from "react-dom/client";
 import "./app.css";
 import { App } from "./App.jsx";
 import { ErrorBoundary } from "./components/common.jsx";
+import { initUpdateWatcher } from "./swUpdates.js";
+
+// Registers the service worker and keeps asking for new versions on the
+// moments a field device actually has: waking up, regaining signal, a timer.
+initUpdateWatcher();
 
 const mount = (() => {
   const found = document.getElementById("root");

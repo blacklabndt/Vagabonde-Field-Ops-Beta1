@@ -1,8 +1,20 @@
 import { defineConfig } from "vite";
 import react from "@vitejs/plugin-react";
 import { VitePWA } from "vite-plugin-pwa";
+import { execSync } from "node:child_process";
+import { readFileSync } from "node:fs";
+
+// Stamped into the bundle so the drawer can answer "what version is this
+// device on?" without guessing — the named version (package.json), the
+// commit that built it, and when. Deploys commit first and build second,
+// so the hash names the commit that is actually live.
+const pkg = JSON.parse(readFileSync(new URL("./package.json", import.meta.url), "utf8"));
+let commit = "dev";
+try { commit = execSync("git rev-parse --short HEAD").toString().trim(); } catch { /* not a checkout */ }
+const APP_VERSION = `${pkg.version} · ${commit} · ${new Date().toISOString().slice(0, 10)}`;
 
 export default defineConfig({
+  define: { __APP_VERSION__: JSON.stringify(APP_VERSION) },
   plugins: [
     react(),
     // The offline queue was only ever half the story: it kept a JHA, report or
@@ -12,7 +24,15 @@ export default defineConfig({
     // behind it. This precaches the shell so the app starts with no
     // connection at all, which is the condition it was written for.
     VitePWA({
-      registerType: "autoUpdate",
+      // "prompt", not "autoUpdate": a new version downloads and *waits* —
+      // the running app keeps serving its own cached chunks (an autoUpdate
+      // takeover deletes them, breaking lazy screens under an open page) —
+      // until the update banner's restart applies it, or the app is fully
+      // closed and reopened. swUpdates.js owns the watching and the banner.
+      registerType: "prompt",
+      // swUpdates.js registers by hand (it needs the registration object
+      // for periodic checks); the auto-injected script would double up.
+      injectRegister: false,
       // No `includeAssets`: the workbox glob below already sweeps up
       // everything in public/, and listing the icons again put duplicate
       // entries in the precache manifest.
@@ -38,6 +58,13 @@ export default defineConfig({
         ]
       },
       workbox: {
+        // Claim, but never skip waiting: activation still only happens on
+        // the update banner's restart (or a full close-and-reopen), and
+        // claiming right then means the restart's reload comes up under
+        // the new worker's control — without it, that first load ran
+        // uncontrolled and the register helper offered the banner again
+        // for an update that had just been applied.
+        clientsClaim: true,
         // The push handlers ride inside the generated worker — generateSW
         // writes sw.js itself, and importScripts is the seam it leaves
         // for hand-written worker code (public/push-sw.js).

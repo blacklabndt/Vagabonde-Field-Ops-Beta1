@@ -7,6 +7,7 @@ import { Toasts } from "./toastBus.js";
 import { QueueBadge, QueueDialog } from "./components/queuePanel.jsx";
 import { OfflineQueue } from "./offlineQueue.js";
 import { OfflineCache } from "./offlineCache.js";
+import { SwUpdates } from "./swUpdates.js";
 import { restoreSession, IDENTITY_KEY } from "./session.js";
 import { SignInScreen } from "./components/auth.jsx";
 import { HomeScreen } from "./components/home.jsx";
@@ -74,6 +75,33 @@ class EggBoundary extends React.Component {
   render() { return this.state.broken ? null : this.props.children; }
 }
 
+// The update banner. It never interrupts: the new version sits waiting
+// while the running one keeps working, so "When I'm done" is a real
+// choice — it collapses to the top-bar chip (signed in) or just steps
+// aside (sign-in screen), and the update also applies by itself on the
+// next full close-and-reopen.
+function UpdateBanner({ onLater }) {
+  return (
+    <div role="status" style={{
+      position: "fixed", left: "50%", bottom: 18, transform: "translateX(-50%)",
+      zIndex: 55, width: "min(440px, calc(100vw - 24px))",
+      background: "var(--color-bg)", border: "1px solid var(--color-accent)",
+      boxShadow: "var(--shadow-md)", padding: "14px 16px"
+    }}>
+      <div style={{ fontFamily: "var(--font-heading)", fontWeight: 600, fontSize: 15, marginBottom: 4 }}>
+        A new version is ready
+      </div>
+      <div style={{ fontSize: 13, color: "color-mix(in srgb, var(--color-text) 70%, transparent)", marginBottom: 12 }}>
+        Restart when it suits you — nothing changes until then. Anything queued or auto-saved on this device survives the restart.
+      </div>
+      <div style={{ display: "flex", gap: 8, justifyContent: "flex-end" }}>
+        <Btn variant="secondary" onClick={onLater}>Postpone</Btn>
+        <Btn variant="primary" onClick={() => SwUpdates.apply()}>Restart now</Btn>
+      </div>
+    </div>
+  );
+}
+
 export function App() {
   const [currentUser, setCurrentUser] = useState(null);
   const [checkingSession, setCheckingSession] = useState(true);
@@ -133,6 +161,12 @@ export function App() {
   // even when it isn't one of the sections in this account's menu.
   const [contextScreen, setContextScreen] = useState("");
   const [queued, setQueued] = useState([]);
+  // A new version has downloaded and is waiting. The banner offers restart
+  // now or later; "later" collapses it to a top-bar chip so it stays one
+  // tap away without standing in front of a half-entered ticket.
+  const [updateReady, setUpdateReady] = useState(false);
+  const [updateDeferred, setUpdateDeferred] = useState(false);
+  useEffect(() => SwUpdates.subscribe(setUpdateReady), []);
   const [showQueue, setShowQueue] = useState(false);
   const [egg, setEgg] = useState(false);
   // Every save in the app arrives here, from db.js by way of the toast bus.
@@ -370,7 +404,12 @@ export function App() {
     );
   }
   if (!currentUser) {
-    return <SignInScreen onSignIn={u => { setCurrentUser(u); setScreen(tabList(u.tabs).filter(t => !CONTEXT_TABS.includes(t))[0] || "board"); }} />;
+    // The banner rides along here too: a shared tablet parked on the
+    // sign-in screen is exactly the device nobody ever updates.
+    return <>
+      <SignInScreen onSignIn={u => { setCurrentUser(u); setScreen(tabList(u.tabs).filter(t => !CONTEXT_TABS.includes(t))[0] || "board"); }} />
+      {updateReady && !updateDeferred && <UpdateBanner onLater={() => setUpdateDeferred(true)} />}
+    </>;
   }
 
   const myTabs = tabList(currentUser.tabs);
@@ -591,6 +630,17 @@ export function App() {
           </TagX>
         )}
         <QueueBadge items={queued} onOpen={() => setShowQueue(true)} />
+        {updateReady && updateDeferred && (
+          <button
+            type="button"
+            className="tag tag-accent"
+            onClick={() => SwUpdates.apply()}
+            style={{ cursor: "pointer", font: "inherit" }}
+            title="A new version is ready — tap to restart into it. Anything queued or auto-saved on this device survives the restart."
+          >
+            Update ready
+          </button>
+        )}
         {/* Just who is signed in. Signing out lives in the drawer, which is
             the only place it exists on a phone anyway — `.topbar-who` is
             hidden at that width — so having it in both was a second button
@@ -649,6 +699,12 @@ export function App() {
               <span style={{ color: "color-mix(in srgb, var(--color-text) 65%, transparent)" }}>Animations</span>
               <Switch on={motion === "on"} onClick={() => setMotion(motion === "on" ? "off" : "on")} label="Animations" />
             </div>
+            {/* Which build this device is on — the commit and its day, so
+                "is everyone on the same version?" is a glance at each
+                drawer, not a guess. Stamped at build time (vite.config). */}
+            <div className="drawer-foot" style={{ justifyContent: "flex-end", fontSize: 11, color: "color-mix(in srgb, var(--color-text) 45%, transparent)" }}>
+              Version {typeof __APP_VERSION__ !== "undefined" ? __APP_VERSION__ : "dev"}
+            </div>
           </nav>
         </div>
       )}
@@ -684,6 +740,7 @@ export function App() {
           screen so every write is announced the same way and in the same
           place — and outside the ErrorBoundary and Suspense, so it survives a
           screen swap and isn't torn down mid-fade by a lazy chunk loading. */}
+      {updateReady && !updateDeferred && <UpdateBanner onLater={() => setUpdateDeferred(true)} />}
       <Toast message={toast && toast.text} tone={toast && toast.tone} onDone={() => setToast(null)} />
     </div>
   );
