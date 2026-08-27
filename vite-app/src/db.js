@@ -1947,8 +1947,18 @@ export const Db = {
     if (delays !== undefined) patch.delays = delays || null;
     if (clientContact) patch.client_contact = clientContact;
     if (contractorContact) patch.contractor_contact = contractorContact;
-    const { error: uErr } = await sbClient.from("tickets").update(patch).eq("id", ticketId);
+    // Ask for the row back: an update no policy allows reports success
+    // having changed nothing (same trap as the delete below), which here
+    // would mean quietly not-saving another technician's ticket — or, with
+    // the line replacement next, half-saving it and surfacing raw RLS
+    // errors. Refuse in plain words before any of that starts.
+    const { data: hit, error: uErr } = await sbClient.from("tickets").update(patch).eq("id", ticketId).select("id");
     if (uErr) throw uErr;
+    if (!hit || !hit.length) {
+      const foreign = new Error(`Ticket ${ticketId} belongs to another technician — your account can't change it. Ask them, or the office, to make the edit.`);
+      foreign.plain = true;
+      throw foreign;
+    }
 
     // Replacing the lines is delete-then-insert, and the gap between the two
     // is where a dropped connection or a refused insert used to destroy a

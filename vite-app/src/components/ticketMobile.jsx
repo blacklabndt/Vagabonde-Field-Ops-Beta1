@@ -488,9 +488,10 @@ export function TicketMobileScreen({ job, jobRecord, currentUser, onSaved, ticke
         return;
       }
       setSaving(false);
-      if (e.ticketGone) {
-        // The ticket vanished under this editor — cancelled on another
-        // device. The generic "press Save again" wrapper would be a lie.
+      if (e.ticketGone || e.plain) {
+        // The ticket vanished under this editor, or belongs to someone
+        // else — either way the message stands on its own, and the generic
+        // "press Save again" wrapper would be a lie.
         setSaveError(e.message);
       } else if (inDb && stage === "email") {
         setEmailFailed(true);
