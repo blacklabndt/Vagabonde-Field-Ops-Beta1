@@ -121,22 +121,10 @@ export function HomeScreen({ onCreateJob, onOpenJob, onStartTicket, currentUser,
           stranded above them. Labels and padding are kept compact so the
           five of them share a phone's width. */}
       <div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 14, flexWrap: "wrap" }}>
-        <div style={{ display: "flex", gap: 6, flex: "none" }}>
+        <div className="home-pills" style={{ display: "flex", gap: 6, flex: "none" }}>
           {FILTERS.map(f => (
             <button key={f} className={`pill${filter === f ? " active" : ""}`} onClick={() => setFilter(f)}>{f}</button>
           ))}
-        </div>
-        {/* Pushed to the right edge; the pills hold the left. With the row
-            split that way there is width to spare, so the buttons keep
-            their full size. On desktop the whole row fits one line, so
-            .home-new-work reorders them past the search to the far right. */}
-        <div className="home-new-work" style={{ display: "flex", gap: 6, flex: "none", marginLeft: "auto" }}>
-          {/* Raising a ticket used to mean finding the job on the board and
-              opening it first. From here it is two choices — whose job, and
-              which one — which is how a technician thinks about it at the end
-              of a day. */}
-          <Btn variant="secondary" style={{ whiteSpace: "nowrap" }} onClick={() => setShowNewTicket(true)}>+ Ticket</Btn>
-          <Btn variant="primary" style={{ whiteSpace: "nowrap" }} onClick={() => setShowNew(true)}>+ Job</Btn>
         </div>
         <div style={{ position: "relative", flex: "1 1 260px", minWidth: 200 }}>
           <input
@@ -174,6 +162,18 @@ export function HomeScreen({ onCreateJob, onOpenJob, onStartTicket, currentUser,
         <span style={{ fontSize: 13, color: "color-mix(in srgb, var(--color-text) 60%, transparent)", whiteSpace: "nowrap" }}>
           {cachedAt ? `${rows.length} saved` : `${total} job${total === 1 ? "" : "s"}`}
         </span>
+        {/* Last in the DOM so desktop tab order runs left-to-right with the
+            visual row — pills, search, then these at the right edge. On a
+            phone the row wraps and .home-new-work's order lifts them up
+            beside the pills; the auto margin holds the right edge on both. */}
+        <div className="home-new-work" style={{ display: "flex", gap: 6, flex: "none", marginLeft: "auto" }}>
+          {/* Raising a ticket used to mean finding the job on the board and
+              opening it first. From here it is two choices — whose job, and
+              which one — which is how a technician thinks about it at the end
+              of a day. */}
+          <Btn variant="secondary" style={{ whiteSpace: "nowrap" }} onClick={() => setShowNewTicket(true)}>+ Ticket</Btn>
+          <Btn variant="primary" style={{ whiteSpace: "nowrap" }} onClick={() => setShowNew(true)}>+ Job</Btn>
+        </div>
       </div>
 
       <Blueprint style={{ padding: "6px 18px 14px" }}>

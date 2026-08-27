@@ -172,6 +172,24 @@ const assertBillable = total => {
   }
 };
 
+// A race lost against another actor is reported as what it was. `plain`
+// marks a message complete in itself — screens show it bare instead of
+// wrapping it in retry advice; `ticketGone` additionally tells the caller
+// the row no longer exists (the offline queue re-creates from its payload,
+// the cancel path treats it as already done).
+const plainError = (message, extra) => Object.assign(new Error(message), { plain: true, ...extra });
+
+// An empty read can also mean the session died mid-edit: with no session
+// supabase-js falls back to the anon key, and anon sees zero rows without
+// any error — which must never be reported as "the ticket is gone".
+// Checked only on the empty-result paths, so the happy path pays nothing.
+const assertSessionAlive = async () => {
+  const { data } = await sbClient.auth.getSession();
+  if (!data || !data.session) {
+    throw plainError("You're signed out, so nothing could be checked or changed. Sign in again and retry — everything on screen is still there.");
+  }
+};
+
 // The same database refusal, translated, for anything that slips past the
 // client-side check (a stale tab, a hand-crafted request).
 const friendlyLineError = e =>
@@ -1847,11 +1865,12 @@ export const Db = {
     const { data: row, error: rErr } = await sbClient.from("tickets").select("status").eq("id", ticketId).maybeSingle();
     if (rErr) throw rErr;
     // Two people cancelling the same mistake: the second should hear it's
-    // done, not a coercion error from the missing row.
+    // done, not a coercion error from the missing row. But an empty read
+    // with no session would say "gone" about a live ticket — rule that out
+    // first.
     if (!row) {
-      const gone = new Error(`Ticket ${ticketId} is already gone — it was cancelled on another device.`);
-      gone.ticketGone = true;
-      throw gone;
+      await assertSessionAlive();
+      throw plainError(`Ticket ${ticketId} is already gone — it was cancelled on another device.`, { ticketGone: true });
     }
     if (row.status === "Approved" || row.status === "Invoiced") {
       throw new Error(`Ticket ${ticketId} is ${row.status.toLowerCase()} — it can't be cancelled. Raise a credit or a corrected ticket instead.`);
@@ -1894,12 +1913,16 @@ export const Db = {
       .eq("job_id", jobDbId);
     // Reopening a draft shouldn't offer to copy that same draft over itself.
     if (excludeTicketId) q = q.neq("id", excludeTicketId);
+    // A handful, not one: since an empty draft became saveable, the newest
+    // ticket can be a blank placeholder parked for the day — offering to
+    // copy a blank (and then claiming "lines copied") is worse than looking
+    // one further back for the last ticket that actually billed something.
     const { data, error } = await q
       .order("work_date", { ascending: false })
       .order("created_at", { ascending: false })
-      .limit(1);
+      .limit(5);
     if (error) throw error;
-    const row = data && data[0];
+    const row = (data || []).find(r => (r.ticket_lines || []).length);
     if (!row) return null;
     const crew = await this.listCrewForTicket(row.id).catch(() => []);
     return { id: row.id, workDate: row.work_date, lines: row.ticket_lines || [], crew };
@@ -1925,11 +1948,11 @@ export const Db = {
     if (rErr) throw rErr;
     // Cancelled on another device while this editor was open. Say so —
     // the screen's generic wrapper ("press Save again") would be a lie
-    // here, so the flag lets it show this message bare.
+    // here, so the flag lets it show this message bare. An empty read with
+    // no session must not masquerade as a cancellation, so check that first.
     if (!row) {
-      const gone = new Error(`Ticket ${ticketId} no longer exists — it was cancelled on another device, so there is nothing to save onto. Raise a new ticket if the day still needs billing.`);
-      gone.ticketGone = true;
-      throw gone;
+      await assertSessionAlive();
+      throw plainError(`Ticket ${ticketId} no longer exists — it was cancelled on another device, so there is nothing to save onto.`, { ticketGone: true });
     }
     await this.assertJobOpen(row.job_id);
     if (row.status === "Approved" || row.status === "Invoiced") {
@@ -1955,9 +1978,22 @@ export const Db = {
     const { data: hit, error: uErr } = await sbClient.from("tickets").update(patch).eq("id", ticketId).select("id");
     if (uErr) throw uErr;
     if (!hit || !hit.length) {
-      const foreign = new Error(`Ticket ${ticketId} belongs to another technician — your account can't change it. Ask them, or the office, to make the edit.`);
-      foreign.plain = true;
-      throw foreign;
+      // The policy refused silently — but silence has four causes, and
+      // three of them are races that can land after the pre-read above:
+      // the row was deleted, the client just approved it, or the session
+      // died. Only the leftover case is genuinely someone else's ticket,
+      // so look again before blaming ownership.
+      await assertSessionAlive();
+      const { data: now, error: nErr } = await sbClient.from("tickets")
+        .select("status, approved_at").eq("id", ticketId).maybeSingle();
+      if (nErr) throw nErr;
+      if (!now) {
+        throw plainError(`Ticket ${ticketId} no longer exists — it was cancelled on another device, so there is nothing to save onto.`, { ticketGone: true });
+      }
+      if (now.approved_at || now.status === "Approved" || now.status === "Invoiced") {
+        throw plainError(`Ticket ${ticketId} was just ${now.status === "Invoiced" ? "invoiced" : "approved by the client"} — it can't be changed any more. Raise a new ticket for any correction.`);
+      }
+      throw plainError(`Ticket ${ticketId} belongs to another technician — your account can't change it. Ask them, or the office, to make the edit.`);
     }
 
     // Replacing the lines is delete-then-insert, and the gap between the two

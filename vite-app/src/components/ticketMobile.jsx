@@ -488,10 +488,16 @@ export function TicketMobileScreen({ job, jobRecord, currentUser, onSaved, ticke
         return;
       }
       setSaving(false);
-      if (e.ticketGone || e.plain) {
-        // The ticket vanished under this editor, or belongs to someone
-        // else — either way the message stands on its own, and the generic
-        // "press Save again" wrapper would be a lie.
+      if (e.ticketGone) {
+        // The ticket vanished under this editor — cancelled on another
+        // device. The entries on screen are still good, so flip back to
+        // insert mode: the next Save mints a fresh number and raises them
+        // as a new ticket instead of re-failing against the dead id.
+        setCreated(false);
+        setSaveError(`${e.message} Everything on this screen is still here — press Save draft to raise it as a new ticket.`);
+      } else if (e.plain) {
+        // Complete in itself (someone else's ticket, just approved, signed
+        // out) — the generic "press Save again" wrapper would be a lie.
         setSaveError(e.message);
       } else if (inDb && stage === "email") {
         setEmailFailed(true);
@@ -522,6 +528,9 @@ export function TicketMobileScreen({ job, jobRecord, currentUser, onSaved, ticke
       await Db.deleteTicket(ticketId);
       onSaved();
     } catch (e) {
+      // Already cancelled on another device is the outcome that was asked
+      // for — leave the dead ticket's editor like any successful cancel.
+      if (e.ticketGone) { onSaved(); return; }
       setCancelling(false);
       setSaveError(e.message || "Couldn't cancel that ticket.");
     }

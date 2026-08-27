@@ -185,7 +185,22 @@ export function App() {
         // line must resume against *this* ticket, not mint another one.
         await checkpoint({ alreadyCreated: true, ticketId: id });
       } else {
-        await Db.updateTicket({ ticketId: id, lines: payload.lines, status: payload.status, delays: payload.delays });
+        try {
+          await Db.updateTicket({ ticketId: id, lines: payload.lines, status: payload.status, delays: payload.delays });
+        } catch (e) {
+          // The row was cancelled on another device while this sat in the
+          // outbox. The payload still holds the whole day — the only copy
+          // of it — so raise it as a fresh ticket rather than stranding it
+          // behind a dead id forever.
+          if (!e.ticketGone) throw e;
+          const saved = await Db.createTicket({
+            initials: payload.initials, jobDbId: payload.jobDbId, technicianId: payload.technicianId,
+            workDate: payload.workDate, clientContact: payload.clientContact, contractorContact: payload.contractorContact,
+            lines: payload.lines, status: payload.status, delays: payload.delays
+          });
+          id = saved.id;
+          await checkpoint({ alreadyCreated: true, ticketId: id });
+        }
       }
       // Crew is a delete-then-insert, so replaying it is harmless.
       await Db.saveCrewForTicket(id, payload.crew);

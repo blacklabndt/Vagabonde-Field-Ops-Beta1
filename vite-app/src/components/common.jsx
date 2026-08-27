@@ -223,6 +223,21 @@ export function SearchSelect({
     return () => cancelAnimationFrame(raf);
   }, [open]);
 
+  // The portal escapes every overflow clip — including the one holding its
+  // own input. If the input scrolls out of sight (under a dialog body's
+  // clip edge, or off the page) the list must not float on alone: close it,
+  // the way a native select drops its menu. IntersectionObserver sees
+  // ancestor clipping, which a viewport check would miss.
+  useEffect(() => {
+    if (!open || !inputRef.current) return;
+    const io = new IntersectionObserver(
+      ([entry]) => { if (entry.intersectionRatio < 0.5) setOpen(false); },
+      { threshold: 0.5 }
+    );
+    io.observe(inputRef.current);
+    return () => io.disconnect();
+  }, [open]);
+
   // Debounced so a fast typist makes one request, not one per letter.
   useEffect(() => {
     if (!open) return;
