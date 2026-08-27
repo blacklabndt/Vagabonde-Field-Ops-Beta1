@@ -1844,8 +1844,15 @@ export const Db = {
   // Approved and invoiced tickets are never cancellable — by then it is the
   // client's document, and a correction is a new ticket.
   async deleteTicket(ticketId) {
-    const { data: row, error: rErr } = await sbClient.from("tickets").select("status").eq("id", ticketId).single();
+    const { data: row, error: rErr } = await sbClient.from("tickets").select("status").eq("id", ticketId).maybeSingle();
     if (rErr) throw rErr;
+    // Two people cancelling the same mistake: the second should hear it's
+    // done, not a coercion error from the missing row.
+    if (!row) {
+      const gone = new Error(`Ticket ${ticketId} is already gone — it was cancelled on another device.`);
+      gone.ticketGone = true;
+      throw gone;
+    }
     if (row.status === "Approved" || row.status === "Invoiced") {
       throw new Error(`Ticket ${ticketId} is ${row.status.toLowerCase()} — it can't be cancelled. Raise a credit or a corrected ticket instead.`);
     }
@@ -1914,8 +1921,16 @@ export const Db = {
   // client has approved is what they agreed to pay, and nothing in the app may
   // quietly rewrite it afterwards.
   async updateTicket({ ticketId, clientContact, contractorContact, lines, status, delays }) {
-    const { data: row, error: rErr } = await sbClient.from("tickets").select("status, job_id").eq("id", ticketId).single();
+    const { data: row, error: rErr } = await sbClient.from("tickets").select("status, job_id").eq("id", ticketId).maybeSingle();
     if (rErr) throw rErr;
+    // Cancelled on another device while this editor was open. Say so —
+    // the screen's generic wrapper ("press Save again") would be a lie
+    // here, so the flag lets it show this message bare.
+    if (!row) {
+      const gone = new Error(`Ticket ${ticketId} no longer exists — it was cancelled on another device, so there is nothing to save onto. Raise a new ticket if the day still needs billing.`);
+      gone.ticketGone = true;
+      throw gone;
+    }
     await this.assertJobOpen(row.job_id);
     if (row.status === "Approved" || row.status === "Invoiced") {
       throw new Error(`Ticket ${ticketId} is ${row.status.toLowerCase()} — it can't be changed. Raise a new ticket for any correction.`);

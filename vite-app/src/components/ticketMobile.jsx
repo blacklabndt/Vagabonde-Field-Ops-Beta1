@@ -488,7 +488,11 @@ export function TicketMobileScreen({ job, jobRecord, currentUser, onSaved, ticke
         return;
       }
       setSaving(false);
-      if (inDb && stage === "email") {
+      if (e.ticketGone) {
+        // The ticket vanished under this editor — cancelled on another
+        // device. The generic "press Save again" wrapper would be a lie.
+        setSaveError(e.message);
+      } else if (inDb && stage === "email") {
         setEmailFailed(true);
         setSaveError(`Ticket ${savedId} is saved, but the approval email didn't go out: ${e.message || "the email service didn't respond."} It's in the billing tracker — you can chase it from there.`);
       } else if (inDb) {
