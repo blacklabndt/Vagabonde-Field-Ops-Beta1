@@ -1,3 +1,8 @@
 .env
 node_modules/
 dist/
+
+# Playwright run artifacts, and the banked sign-in session.
+test-results/
+playwright-report/
+e2e/.auth/
