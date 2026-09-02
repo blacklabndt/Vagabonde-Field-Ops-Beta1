@@ -9,7 +9,7 @@ import { OfflineQueue } from "./offlineQueue.js";
 import { OfflineCache } from "./offlineCache.js";
 import { SwUpdates } from "./swUpdates.js";
 import { restoreSession, IDENTITY_KEY } from "./session.js";
-import { SignInScreen } from "./components/auth.jsx";
+import { SignInScreen, SetNewPasswordScreen } from "./components/auth.jsx";
 import { HomeScreen } from "./components/home.jsx";
 import { JobDetailScreen } from "./components/jobDetail.jsx";
 import { JhaBuilderScreen } from "./components/jhaMobile.jsx";
@@ -106,6 +106,18 @@ function UpdateBanner({ onLater }) {
 export function App() {
   const [currentUser, setCurrentUser] = useState(null);
   const [checkingSession, setCheckingSession] = useState(true);
+  // A password-reset link lands here with recovery tokens in the URL hash;
+  // the session it starts is only for choosing a new password, so the app
+  // gates on that screen instead of quietly opening. The hash check catches
+  // it at first paint (before supabase-js consumes the tokens); the auth
+  // event below is the backup for any timing the hash read misses.
+  const [recovering, setRecovering] = useState(() => window.location.hash.includes("type=recovery"));
+  useEffect(() => {
+    const { data: sub } = sbClient.auth.onAuthStateChange(event => {
+      if (event === "PASSWORD_RECOVERY") setRecovering(true);
+    });
+    return () => sub.subscription.unsubscribe();
+  }, []);
   // A push notification's tap lands on /?goto=chat — honoured here so
   // tapping "Kyle — Team chat" opens the room, not the board. The
   // service worker sends both the closed and the already-open app
@@ -404,6 +416,20 @@ export function App() {
       </div>
     );
   }
+  // Ahead of the signed-in/signed-out fork: the recovery session exists
+  // whether or not the profile has loaded yet, and this screen is the only
+  // thing a reset link should ever open onto.
+  if (recovering) {
+    return <SetNewPasswordScreen onDone={saved => {
+      // Done either way (saved, or kept the old one): clear the recovery
+      // tokens from the URL so a reload doesn't reopen this screen, and
+      // fall through to wherever the session state leads.
+      window.history.replaceState({}, "", window.location.pathname);
+      setRecovering(false);
+      if (saved) Toasts.show("Password updated");
+    }} />;
+  }
+
   if (!currentUser) {
     // The banner rides along here too: a shared tablet parked on the
     // sign-in screen is exactly the device nobody ever updates.

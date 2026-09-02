@@ -9,6 +9,35 @@ export function SignInScreen({ onSignIn }) {
   const [password, setPassword] = useState("");
   const [error, setError] = useState("");
   const [busy, setBusy] = useState(false);
+  const [resetState, setResetState] = useState("idle"); // idle | sending | sent
+
+  // The reset email carries a link back to this app; opening it starts a
+  // recovery session, which App.jsx catches and answers with the
+  // set-a-new-password screen. Uses whatever is typed in the email field —
+  // the link is only ever mailed to the account's own address, so there is
+  // nothing to leak by asking.
+  const forgotPassword = async e => {
+    e.preventDefault();
+    if (resetState === "sending") return;
+    const addr = email.trim();
+    if (!addr) {
+      setError("Type your email above first, then tap Forgot password.");
+      return;
+    }
+    setError("");
+    setResetState("sending");
+    const { error: resetErr } = await sbClient.auth.resetPasswordForEmail(addr, {
+      redirectTo: window.location.origin
+    });
+    if (resetErr) {
+      setResetState("idle");
+      // Supabase rate-limits these hard (a couple per hour per address) —
+      // the likeliest failure, and "try later" is the honest advice for it.
+      setError(resetErr.message || "Couldn't send the reset email — wait a few minutes and try again.");
+      return;
+    }
+    setResetState("sent");
+  };
 
   const submit = async e => {
     if (e && e.preventDefault) e.preventDefault();
@@ -90,7 +119,9 @@ export function SignInScreen({ onSignIn }) {
           <Btn type="submit" variant="primary" block style={{ minHeight: 48 }} disabled={busy}>{busy ? "Signing in…" : "Sign in"}</Btn>
           <div style={{ display: "flex", justifyContent: "space-between", fontSize: 11, marginTop: 4, color: "color-mix(in srgb, var(--color-text) 55%, transparent)" }}>
             <span>Offline sign-in cached for 12 h</span>
-            <a href="#" onClick={e => e.preventDefault()}>Forgot password</a>
+            {resetState === "sent"
+              ? <span>Reset link sent — check that inbox</span>
+              : <a href="#" onClick={forgotPassword}>{resetState === "sending" ? "Sending…" : "Forgot password"}</a>}
           </div>
         </Blueprint>
       </div>
@@ -98,3 +129,57 @@ export function SignInScreen({ onSignIn }) {
   );
 }
 
+
+// Where the reset email's link lands. The link signs the person in for one
+// recovery session; without this screen that session would just open the
+// app and they'd still be locked out next time. App.jsx shows this over
+// everything when the recovery session starts; Save writes the new
+// password onto the account they're now (temporarily) signed in as.
+export function SetNewPasswordScreen({ onDone }) {
+  const [password, setPassword] = useState("");
+  const [again, setAgain] = useState("");
+  const [error, setError] = useState("");
+  const [busy, setBusy] = useState(false);
+
+  const save = async e => {
+    if (e && e.preventDefault) e.preventDefault();
+    if (busy) return;
+    if (password.length < 8) { setError("Use at least 8 characters."); return; }
+    if (password !== again) { setError("The two passwords don't match."); return; }
+    setBusy(true);
+    setError("");
+    const { error: updErr } = await sbClient.auth.updateUser({ password });
+    setBusy(false);
+    if (updErr) {
+      setError(updErr.message || "Couldn't set the new password — try again.");
+      return;
+    }
+    onDone(true);
+  };
+
+  return (
+    <div style={{ minHeight: "100vh", display: "grid", placeItems: "center", padding: "40px 24px" }}>
+      <Blueprint as="form" onSubmit={save} style={{ width: "min(380px,100%)", padding: "22px 20px", display: "flex", flexDirection: "column", gap: 12 }}>
+        <h3 style={{ margin: 0, fontSize: 19 }}>Set a new password</h3>
+        <div style={{ fontSize: 13, color: "color-mix(in srgb, var(--color-text) 65%, transparent)" }}>
+          You followed a reset link, so you're signed in just long enough to choose a new password.
+        </div>
+        <Field label="New password">
+          <input className="input" type="password" autoComplete="new-password" value={password}
+            onChange={e => { setPassword(e.target.value); setError(""); }} style={{ width: "100%" }} />
+        </Field>
+        <Field label="Same again">
+          <input className="input" type="password" autoComplete="new-password" value={again}
+            onChange={e => { setAgain(e.target.value); setError(""); }} style={{ width: "100%" }} />
+        </Field>
+        <ErrorBox>{error}</ErrorBox>
+        <Btn type="submit" variant="primary" block style={{ minHeight: 44 }} disabled={busy}>
+          {busy ? "Saving…" : "Save new password"}
+        </Btn>
+        <Btn variant="ghost" block onClick={e => { e.preventDefault(); onDone(false); }}>
+          Keep my old password
+        </Btn>
+      </Blueprint>
+    </div>
+  );
+}

@@ -203,12 +203,17 @@ In the [Supabase dashboard](https://supabase.com/dashboard/project/eielmvxzdwwpr
 
 1. **Authentication → Policies →** turn on **leaked-password protection**.
    It rejects passwords found in known breaches. Off by default.
-2. **Authentication → Providers → Email →** decide about **Confirm email**.
+2. **Authentication → URL Configuration →** set the **Site URL** to the
+   app's address (the Worker URL from step 6, or the custom domain in
+   front of it). The sign-in screen's **Forgot password** emails a reset
+   link that must come back to the app — with the wrong Site URL the link
+   lands somewhere that can't finish the job.
+3. **Authentication → Providers → Email →** decide about **Confirm email**.
    Leaving it on means every new user must click a confirmation link before
    they can sign in. Turning it off makes adding a technician instant. For a
    small crew where you're creating the accounts yourself, off is
    reasonable — you already know who they are.
-3. Create the real user accounts (**Authentication → Users → Add user**),
+4. Create the real user accounts (**Authentication → Users → Add user**),
    one per person. Check **Auto Confirm User**, and under **User Metadata**
    put:
    ```json
