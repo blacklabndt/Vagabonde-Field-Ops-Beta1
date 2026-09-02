@@ -54,6 +54,22 @@ ${invoiceCss}
   button:hover { background:#4a6d90 }
   button:disabled { opacity:.5; cursor:default }
   .signnote { font-size:12px; color:var(--mute); margin-top:12px }
+  /* The signing surface. touch-action:none or the page scrolls instead of
+     inking on the one device most reps sign from. */
+  .sigpad { display:block; width:100%; height:150px; margin-top:6px;
+            border:1px dashed var(--hard); background:#fff;
+            touch-action:none; cursor:crosshair }
+  .sigrow { display:flex; gap:10px; margin-top:8px; align-items:center; flex-wrap:wrap }
+  .sigrow .ghost { display:inline-block; width:auto; min-height:0; margin:0; padding:9px 13px;
+                   background:none; border:1px solid var(--hard); color:var(--ink);
+                   font-size:13px; font-weight:400; cursor:pointer }
+  .sigrow .ghost:hover { background:var(--band) }
+  .sigrow input[type=file] { display:none }
+  button.dl { background:none; border:1px solid var(--accent); color:var(--accent) }
+  button.dl:hover { background:var(--band); color:var(--accent) }
+  /* Printing (or Save as PDF) keeps the bill and drops the buttons — the
+     invoice's own print rules already strip the grey backdrop. */
+  @media print { .actions { display:none } }
 </style></head><body>${inner}</body></html>`,
   { headers: { "Content-Type": "text/html; charset=utf-8" } }
 );
@@ -124,8 +140,8 @@ async function handle(req: Request): Promise<Response> {
   // overwriting the original signature, time and IP on a finished record.
   if (ticket.status === "Approved" || ticket.approved_at) {
     // renderInvoice prints the approval stamp itself once the ticket is
-    // signed, so this needs nothing added to it.
-    return page(header);
+    // signed — including the drawn signature, which rides the select.
+    return page(header + `<div class="actions">${downloadButton()}</div>`);
   }
 
   if (req.method === "POST") {
@@ -134,6 +150,14 @@ async function handle(req: Request): Promise<Response> {
     if (!name) {
       return page(header + `<div class="actions"><p style="color:#8a3b3b;font-size:13px">Please type your name to sign.</p></div>` + signForm());
     }
+    // The drawn/uploaded signature, if one came along. Validated to exactly
+    // a small PNG data URL — anything else (oversized, wrong type, not a
+    // data URL at all) is dropped rather than argued with: the typed name
+    // above is the signature of record either way.
+    const rawSig = String(form.get("signature") ?? "");
+    const signature =
+      rawSig && rawSig.length <= 400000 && /^data:image\/png;base64,[A-Za-z0-9+/=]+$/.test(rawSig)
+        ? rawSig : null;
     // Best-effort client IP; behind Supabase's edge this is the forwarded header.
     const ip = req.headers.get("x-forwarded-for")?.split(",")[0].trim() ?? null;
     // Conditional on the ticket still being unsigned, so two taps on a slow
@@ -151,21 +175,25 @@ async function handle(req: Request): Promise<Response> {
       approved_at: approvedAt,
       approved_by_email: name,
       approved_ip: ip,
+      // Always written, even as null: the signature column must only ever
+      // hold what THIS approval carried, never something staged earlier.
+      approved_signature: signature,
       approval_token: null // single use — burn it
-    }).eq("id", ticket.id).is("approved_at", null).select("approved_by_email, approved_at");
+    }).eq("id", ticket.id).is("approved_at", null).select("approved_by_email, approved_at, approved_signature");
     if (signErr) throw signErr;
 
     if (!signedRows || signedRows.length === 0) {
       // Someone else's submit won the race and burned the token. Show the
       // approval that actually persisted, not this request's attempt.
       const { data: fresh } = await admin.from("tickets")
-        .select("approved_by_email, approved_at").eq("id", ticket.id).maybeSingle();
+        .select("approved_by_email, approved_at, approved_signature").eq("id", ticket.id).maybeSingle();
       invoiceData!.ticket.status = "Approved";
       invoiceData!.ticket.approved_at = fresh?.approved_at ?? approvedAt;
       invoiceData!.ticket.approved_by_email = fresh?.approved_by_email ?? "";
+      invoiceData!.ticket.approved_signature = fresh?.approved_signature ?? null;
       return page(invoice() + `
-        <div class="actions"><p class="signnote">This ticket was already approved. The signature on record is shown above.
-        You can print or save this page for your records.</p></div>`);
+        <div class="actions"><p class="signnote">This ticket was already approved. The signature on record is shown above.</p>
+        ${downloadButton()}</div>`);
     }
 
     // Re-render so the signed document itself carries the stamp, rather than
@@ -176,20 +204,112 @@ async function handle(req: Request): Promise<Response> {
     invoiceData!.ticket.status = "Approved";
     invoiceData!.ticket.approved_at = signedRows[0].approved_at ?? approvedAt;
     invoiceData!.ticket.approved_by_email = signedRows[0].approved_by_email ?? name;
+    invoiceData!.ticket.approved_signature = signedRows[0].approved_signature ?? null;
     return page(invoice() + `
       <div class="actions"><p class="signnote">Thank you. VagaboNDE has been notified and this ticket is now
-      locked. You can print or save this page for your records.</p></div>`);
+      locked.</p>
+      ${downloadButton()}</div>`);
   }
 
   return page(header + signForm());
 }
 
+// The typed name remains the signature of record; the pad adds the rep's
+// actual mark to the bill. One canvas is the single source: drawing inks
+// it, uploading a picture lands the picture in it (fitted), Clear empties
+// it, and whatever it holds at submit rides along as a small PNG.
 function signForm() {
-  return `<form method="POST" class="actions">
+  return `<form method="POST" class="actions" id="signform">
     <label class="signbox">Your name — typing it here signs this ticket
       <input name="name" autocomplete="name" placeholder="T. Beaudry" required>
     </label>
+    <label class="signbox" style="margin-top:14px">Your signature (optional) — draw it below with a finger or mouse, or upload a photo of it</label>
+    <canvas id="sigpad" class="sigpad"></canvas>
+    <div class="sigrow">
+      <button type="button" class="ghost" id="sigclear">Clear</button>
+      <label class="ghost">Upload signature image<input type="file" id="sigfile" accept="image/*"></label>
+    </div>
+    <input type="hidden" name="signature" id="sigdata">
     <button type="submit">Approve this ticket</button>
     <p class="note">Approving records your name, the time, and your IP address as the signature. Questions before you sign? Reply to the email instead.</p>
-  </form>`;
+  </form>
+  <script>
+  (function () {
+    var pad = document.getElementById("sigpad");
+    if (!pad || !pad.getContext) return;
+    var ctx = pad.getContext("2d");
+    var dirty = false;
+    var dpr = Math.max(1, window.devicePixelRatio || 1);
+    function reset() {
+      pad.width = Math.round(pad.clientWidth * dpr);
+      pad.height = Math.round(pad.clientHeight * dpr);
+      ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+      ctx.lineWidth = 2.2; ctx.lineCap = "round"; ctx.lineJoin = "round";
+      ctx.strokeStyle = "#1d1f20";
+      dirty = false;
+    }
+    reset();
+    var drawing = false, lx = 0, ly = 0;
+    function pos(e) { var r = pad.getBoundingClientRect(); return [e.clientX - r.left, e.clientY - r.top]; }
+    pad.addEventListener("pointerdown", function (e) {
+      e.preventDefault();
+      // Capture keeps a stroke inked when the finger wanders off the pad;
+      // losing the capture is no reason to lose the stroke.
+      try { pad.setPointerCapture(e.pointerId); } catch { /* draw anyway */ }
+      drawing = true;
+      var p = pos(e); lx = p[0]; ly = p[1];
+      ctx.beginPath(); ctx.moveTo(lx, ly); ctx.lineTo(lx + 0.01, ly); ctx.stroke();
+      dirty = true;
+    });
+    pad.addEventListener("pointermove", function (e) {
+      if (!drawing) return;
+      var p = pos(e);
+      ctx.beginPath(); ctx.moveTo(lx, ly); ctx.lineTo(p[0], p[1]); ctx.stroke();
+      lx = p[0]; ly = p[1];
+    });
+    ["pointerup", "pointercancel"].forEach(function (t) {
+      pad.addEventListener(t, function () { drawing = false; });
+    });
+    document.getElementById("sigclear").addEventListener("click", reset);
+    document.getElementById("sigfile").addEventListener("change", function () {
+      var f = this.files && this.files[0];
+      this.value = "";
+      if (!f) return;
+      if (f.size > 8 * 1024 * 1024) { alert("That image is over 8 MB — use a smaller photo of your signature."); return; }
+      var img = new Image();
+      img.onload = function () {
+        reset();
+        var w = pad.clientWidth, h = pad.clientHeight;
+        var s = Math.min(w / img.width, h / img.height);
+        ctx.drawImage(img, (w - img.width * s) / 2, (h - img.height * s) / 2, img.width * s, img.height * s);
+        dirty = true;
+        URL.revokeObjectURL(img.src);
+      };
+      img.onerror = function () { alert("That file couldn't be read as an image."); };
+      img.src = URL.createObjectURL(f);
+    });
+    document.getElementById("signform").addEventListener("submit", function () {
+      if (!dirty) return;
+      // Exported small: the bill needs a legible mark, not a photograph.
+      var out = document.createElement("canvas");
+      out.width = 600; out.height = Math.max(1, Math.round(600 * pad.clientHeight / pad.clientWidth));
+      out.getContext("2d").drawImage(pad, 0, 0, out.width, out.height);
+      var data = out.toDataURL("image/png");
+      if (data.length > 400000) {
+        out.width = 300; out.height = Math.max(1, Math.round(out.height / 2));
+        out.getContext("2d").drawImage(pad, 0, 0, out.width, out.height);
+        data = out.toDataURL("image/png");
+      }
+      if (data.length <= 400000) document.getElementById("sigdata").value = data;
+    });
+  })();
+  </script>`;
+}
+
+// Offered once the document is signed (or was already): the page IS the
+// bill, so the device's own print dialog — Save as PDF — hands over a
+// pixel-faithful copy. The print rules hide this bar itself.
+function downloadButton() {
+  return `<button type="button" class="dl" onclick="window.print()">Download PDF</button>
+    <p class="signnote">Opens your device's print dialog — choose &ldquo;Save as PDF&rdquo; to keep a copy of this bill.</p>`;
 }

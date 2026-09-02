@@ -17,7 +17,7 @@ import { LEVEL_LEGEND } from "./levels.ts";
 
 // Everything the invoice prints, and nothing else.
 export const TICKET_INVOICE_SELECT =
-  "id, work_date, total, status, delays, client_contact, approved_at, approved_by_email, " +
+  "id, work_date, total, status, delays, client_contact, approved_at, approved_by_email, approved_signature, " +
   "jobs(job_number, project, lsd, afe, area, clients(name), contractors(name)), " +
   "ticket_lines(kind, label, unit, quantity, unit_rate)";
 

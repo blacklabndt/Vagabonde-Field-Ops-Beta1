@@ -34,6 +34,7 @@ export interface InvoiceData {
     id: string; work_date: string; status?: string; total: number | string;
     delays?: string | null;
     approved_by_email?: string | null; approved_at?: string | null;
+    approved_signature?: string | null;
   };
   job: {
     job_number?: string; project?: string; lsd?: string; afe?: string;
@@ -71,6 +72,16 @@ const dash = (v: unknown) => {
   return s ? esc(s) : '<span class="mute">&mdash;</span>';
 };
 
+// The drawn/uploaded signature, if the approval carried one. Injected as a
+// data: URL, so no escaping question arises as long as the shape is exactly
+// a PNG data URL — approve-ticket validates on the way in, and this guards
+// again on the way out so a hand-edited row cannot smuggle markup.
+const SIG_SHAPE = /^data:image\/png;base64,[A-Za-z0-9+/=]+$/;
+const sigImage = (v: string | null | undefined) =>
+  v && SIG_SHAPE.test(v)
+    ? `<img class="sigimg" src="${v}" alt="Signature">`
+    : "";
+
 export const invoiceCss = `
   :root{--ink:#1d1f20;--mute:#6b6d6e;--line:rgba(29,31,32,.30);--hard:rgba(29,31,32,.55);
         --accent:#5980a6;--band:#e7e9ea;--paper:#fff}
@@ -105,6 +116,7 @@ export const invoiceCss = `
   .totals .grand .v{font-size:19px}
   .sig{height:40px}
   .stamp{border:1px solid var(--accent);padding:11px 13px;margin-top:16px;font-size:12px}
+  .sigimg{display:block;max-height:64px;max-width:240px;margin-bottom:6px}
   .wrap{overflow-x:auto}
   .two{display:grid;grid-template-columns:1fr 1fr;gap:10px}
   @media print{body{background:#fff;padding:0}.sheet{border:0;width:auto}}
@@ -250,7 +262,7 @@ export function renderInvoice(d: InvoiceData): string {
   </table>
 
   ${signed ? `
-  <div class="stamp"><strong>Approved</strong><br>
+  <div class="stamp">${sigImage(d.ticket.approved_signature)}<strong>Approved</strong><br>
     Signed by ${esc(d.ticket.approved_by_email || "")}${d.ticket.approved_at
       ? " on " + esc(new Date(d.ticket.approved_at).toLocaleString("en-CA")) : ""}
   </div>` : `
