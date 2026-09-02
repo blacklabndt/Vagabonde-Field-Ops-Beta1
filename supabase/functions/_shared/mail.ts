@@ -72,13 +72,11 @@ export async function sendMail(opts: {
   }
   // Key set but no verified sending address: the fallback is Resend's
   // onboarding sender, which only delivers to the Resend account owner's
-  // own inbox. Attempting a real send would 403 in the field an hour
-  // after the office saw a green test — refuse it with the reason
-  // instead. The test email (tag "test") is exactly what this mode is for.
+  // own inbox. That is still a real delivery — sending yourself a ticket
+  // approval end-to-end is the whole point of testing mode — so the
+  // attempt goes through, and a refused recipient gets the translation
+  // below instead of a bare vendor 403.
   const from = opts.from === "billing" ? settings.fromBilling : settings.fromReports;
-  if (from === TEST_SENDER && opts.tag !== "test") {
-    throw new Error("Email is still in testing mode — the sending domain isn't verified, so mail can only reach the Resend account's own inbox. An Admin can verify the domain and set the sending addresses on the Admin screen.");
-  }
 
   const replyTo = opts.replyTo || settings.replyTo;
   const res = await fetch(RESEND_URL, {
@@ -110,9 +108,14 @@ export async function sendMail(opts: {
   const body = await res.json().catch(() => ({}));
   if (!res.ok) {
     const msg = String(body.message ?? "send failed");
-    // The one refusal an admin can actually cause from inside the app: a
-    // sending address on a domain Resend hasn't verified. Name the fix,
-    // not just the vendor's error.
+    // Testing mode's one limit, named: only the Resend account owner's own
+    // inbox can receive until a domain is verified.
+    if (/testing emails|own email address/i.test(msg)) {
+      throw new Error(`Email is in testing mode, so Resend only delivers to the inbox of the email address the Resend account was created with — it refused ${opts.to}. Sending to anyone needs the domain verified and the sending addresses set on the Admin screen.`);
+    }
+    // The other refusal an admin can cause from inside the app: a sending
+    // address on a domain Resend hasn't verified. Name the fix, not just
+    // the vendor's error.
     if (/not verified/i.test(msg)) {
       throw new Error(`Resend refused the sending address ${from}: ${msg} On the Admin screen, clear the sending addresses to go back to testing mode, or use an address on the domain verified at resend.com/domains.`);
     }

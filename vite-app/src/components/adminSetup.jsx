@@ -133,9 +133,10 @@ export function AdminSetupScreen() {
             </Field>
             {emailTestingMode && form.resendApiKey.trim() && (
               <div style={{ fontSize: 12, color: "color-mix(in srgb, var(--color-text) 60%, transparent)" }}>
-                No sending address yet, so mail goes out from Resend&rsquo;s onboarding sender —
-                deliverable only to the Resend account owner&rsquo;s own email until the domain is
-                verified. Right for testing, not for clients.
+                No sending address yet, so everything — test emails and real report or approval
+                sends alike — goes out from Resend&rsquo;s onboarding sender and can only reach the
+                inbox of the address the Resend account was created with. Right for trying the
+                whole flow on yourself, not for clients.
               </div>
             )}
           </div>
