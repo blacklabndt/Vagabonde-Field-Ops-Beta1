@@ -208,6 +208,15 @@ In the [Supabase dashboard](https://supabase.com/dashboard/project/eielmvxzdwwpr
    front of it). The sign-in screen's **Forgot password** emails a reset
    link that must come back to the app — with the wrong Site URL the link
    lands somewhere that can't finish the job.
+   *Optional, once the domain is verified in Resend:* those reset emails
+   come from Supabase's generic sender by default, which works but isn't
+   yours. **Project Settings → Authentication → SMTP settings** lets them
+   ride Resend instead — host `smtp.resend.com`, port `465`, username
+   `resend`, password = the same API key from step 1, sender an address on
+   the verified domain. Doing this also lifts Supabase's own cap of a
+   couple of auth emails per hour, and the templates under
+   **Authentication → Email Templates** become worth wording properly at
+   the same time.
 3. **Authentication → Providers → Email →** decide about **Confirm email**.
    Leaving it on means every new user must click a confirmation link before
    they can sign in. Turning it off makes adding a technician instant. For a
