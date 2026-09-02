@@ -13,7 +13,7 @@
 //
 // Until the KLIPY_API_KEY secret is set, the picker shows this
 // function's own explanation instead of a grid — the same
-// build-now-configure-later shape as Postmark.
+// build-now-configure-later shape as the mail sender.
 
 const corsHeaders = {
   "Access-Control-Allow-Origin": "*",

@@ -1,13 +1,13 @@
 // Tests for the recipient guard.
 //
-//   deno test supabase/functions/_shared/postmark.test.ts
+//   deno test supabase/functions/_shared/mail.test.ts
 //
 // This is the only thing standing between a signed-in account and using
 // VagaboNDE's own sending domain to deliver a ticket's pricing, or a 14-day
 // signed link to a private report, anywhere it likes. Worth pinning down.
 
 import { assertEquals, assertThrows } from "https://deno.land/std@0.224.0/assert/mod.ts";
-import { recipients, optionalRecipients, esc } from "./postmark.ts";
+import { recipients, optionalRecipients, esc } from "./mail.ts";
 
 Deno.test("a single address passes through", () => {
   assertEquals(recipients("rep@client.ca", "to"), "rep@client.ca");

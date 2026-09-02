@@ -6,7 +6,7 @@
 // password, which is the whole point: a client rep signs from their phone.
 
 import { createClient } from "https://esm.sh/@supabase/supabase-js@2";
-import { sendMail, corsHeaders, wrapEmail, esc, recipients, optionalRecipients } from "../_shared/postmark.ts";
+import { sendMail, corsHeaders, wrapEmail, esc, recipients, optionalRecipients } from "../_shared/mail.ts";
 import { invoicePage, GST_RATE } from "../_shared/invoice.ts";
 import { loadInvoice } from "../_shared/ticketInvoice.ts";
 
@@ -147,7 +147,7 @@ Deno.serve(async (req) => {
     // Send first, record second. The other way round — which this used to do —
     // leaves a ticket marked "Awaiting approval" holding a live token when the
     // send throws, so the tracker says it went out and the rep never got it.
-    // Postmark being unconfigured makes that the *normal* path, not the rare
+    // Resend being unconfigured makes that the *normal* path, not the rare
     // one. send-report already had this order; now they match.
     await sendMail({
       from: Deno.env.get("MAIL_FROM_BILLING") ?? "billing@vagabonde.ca",

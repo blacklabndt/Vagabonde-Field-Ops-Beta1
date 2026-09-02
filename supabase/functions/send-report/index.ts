@@ -4,13 +4,13 @@
 // straight into their turnover package) and as a secure link (survives size
 // limits, and can be re-opened if the attachment gets lost in a thread).
 //
-// Runs server-side because it holds the Postmark token and needs the
+// Runs server-side because it holds the Resend key and needs the
 // service-role key to read a private storage object. The caller's own JWT is
 // checked first, so this can't be used as an open relay.
 
 import { createClient } from "https://esm.sh/@supabase/supabase-js@2";
 import { sendMail, base64, corsHeaders, wrapEmail, esc, MAX_ATTACHMENT_BYTES,
-         recipients, optionalRecipients } from "../_shared/postmark.ts";
+         recipients, optionalRecipients } from "../_shared/mail.ts";
 
 Deno.serve(async (req) => {
   if (req.method === "OPTIONS") return new Response("ok", { headers: corsHeaders });

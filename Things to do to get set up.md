@@ -1,39 +1,33 @@
 # Things to do to get set up
 
 Everything here is work that has to happen in someone else's dashboard —
-Postmark, your DNS provider, Supabase — because it needs credentials or
+Resend, your DNS provider, Supabase — because it needs credentials or
 domain ownership that code can't grant itself. Work top to bottom; each
 section says what breaks if you skip it.
 
-Times are rough. The whole list is about an hour of clicking, plus waiting
-on DNS and on Postmark's account review.
+Times are rough. The whole list is under an hour of clicking, plus waiting
+on DNS.
 
 ---
 
-## 1. Postmark account and sending domain  (~15 min + waiting)
+## 1. Resend account and sending domain  (~15 min)
 
-Postmark sends the report emails and the billing approval links.
+Resend sends the report emails and the billing approval links. There is no
+account-review wait — a verified domain can send to anyone straight away.
 
-1. Create an account at https://postmarkapp.com — the free tier is 100
-   emails/month, which is fine for testing. A paid plan starts at $15/month
-   for 10,000, which is far more than this operation will send.
-2. Create a **Server** (Postmark's word for a project). Call it
-   `VagaboNDE Field Ops`. It gives you a **Server API Token** — copy it, you
-   need it in step 3.
-3. Go to **Sender Signatures → Add Domain** and enter `vagabonde.ca`.
-4. Postmark shows you **DKIM** and **Return-Path** DNS records. Add them at
-   whoever hosts your DNS (GoDaddy, Cloudflare, your web host). Also add an
-   **SPF** record if you don't have one:
-   ```
-   v=spf1 include:spf.mtasv.net ~all
-   ```
-   If you already have an SPF record, add `include:spf.mtasv.net` to the
-   existing one — **do not create a second SPF record**, that breaks both.
-5. Wait for DNS to propagate (usually minutes, up to 24 h), then click
-   **Verify** in Postmark.
-6. Ask Postmark to **approve your account for production sending**. New
-   accounts are sandboxed to your own verified addresses until you do. There
-   is a short form; they usually reply within a business day.
+1. Create an account at https://resend.com — the free tier is 3,000
+   emails/month (100/day), which comfortably covers this operation. Paid
+   starts at $20/month for 50,000 if it ever matters.
+2. Go to **Domains → Add Domain** and enter `vagabonde.ca`.
+3. Resend shows you **DKIM** and **SPF** DNS records (an MX and two TXT
+   records on a `send` subdomain). Add them at whoever hosts your DNS
+   (GoDaddy, Cloudflare, your web host). Because they live on a subdomain,
+   they can't collide with any SPF record the bare domain already has.
+4. Wait for DNS to propagate (usually minutes, up to 24 h), then press
+   **Verify DNS Records** in Resend.
+5. Go to **API Keys → Create API Key**, name it `VagaboNDE Field Ops`,
+   permission **Sending access**. Copy the key — you need it in step 3
+   below, and Resend only shows it once.
 
 **Skip this and:** emails either don't send at all, or land in your
 contractors' spam folders. This is the step that decides whether the
@@ -54,7 +48,7 @@ mailbox is worth setting so a contractor can just hit reply.
 ## 2. Supabase CLI on your computer  (~10 min)
 
 The email functions run on Supabase's servers, not in the browser, because
-they hold the Postmark token. Deploying them needs the CLI.
+they hold the Resend key. Deploying them needs the CLI.
 
 1. Install it: https://supabase.com/docs/guides/cli — on Mac
    `brew install supabase/tap/supabase`; on Windows use the Scoop or npm
@@ -74,13 +68,13 @@ still works; email just stays a button that does nothing.
 ## 3. Store the secrets  (~2 min)
 
 These live on Supabase's servers and are never sent to the browser. Put them
-in a file rather than on the command line — a token typed into a terminal
+in a file rather than on the command line — a key typed into a terminal
 stays in the shell's history file afterwards. Create `supabase/.env.secrets`
 (it's covered by `supabase/.gitignore`, so it can't be committed by
 accident):
 
 ```bash
-POSTMARK_TOKEN=your-server-api-token
+RESEND_API_KEY=your-resend-api-key
 MAIL_FROM_REPORTS=reports@vagabonde.ca
 MAIL_FROM_BILLING=billing@vagabonde.ca
 MAIL_REPLY_TO=office@vagabonde.ca
@@ -98,11 +92,11 @@ Functions → Secrets — works just as well and never touches a terminal.)
 `SUPABASE_URL` and `SUPABASE_SERVICE_ROLE_KEY` are provided to functions
 automatically — you don't set those.
 
-**Never put the Postmark token in `vite-app/src/config.js` or in a `VITE_`
+**Never put the Resend key in `vite-app/src/config.js` or in a `VITE_`
 environment variable.** Anything in either is
 visible to anyone who opens the app. The Supabase URL and anon key in there
 are fine — they're designed to be public and are backstopped by row-level
-security. A Postmark token is not.
+security. A Resend key is not.
 
 ---
 
@@ -189,7 +183,7 @@ Then test:
    to **Approved** in the billing tracker, and the link should refuse to work
    a second time.
 
-If something doesn't arrive, Postmark's **Activity** tab shows every attempt
+If something doesn't arrive, Resend's **Emails** page shows every attempt
 and exactly why it failed — check there before assuming the app is at fault.
 
 ---
@@ -275,7 +269,7 @@ security.
 
 **Waiting on this checklist:** sending email (steps 1–4). The functions and
 the public approval page are written and in `supabase/` — they just need your
-Postmark token and a deploy.
+Resend key and a deploy.
 
 **Built since:** the offline queue for the three field screens. A JHA, report
 or ticket raised with no signal is stored in the browser's IndexedDB and

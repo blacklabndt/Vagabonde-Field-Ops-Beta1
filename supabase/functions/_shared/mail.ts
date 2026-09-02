@@ -1,16 +1,22 @@
-// Shared Postmark helper for the email functions.
+// Shared mail helper for the email functions — the transport is Resend.
 //
-// Lives server-side only: it reads POSTMARK_TOKEN from the function's
+// Lives server-side only: it reads RESEND_API_KEY from the function's
 // environment, which is a Supabase secret and never reaches the browser.
-// Docs: https://postmarkapp.com/developer/api/email-api
+// Docs: https://resend.com/docs/api-reference/emails/send-email
+//
+// (This module carried Postmark before; only the transport changed. The
+// recipient guards, escaping and the email frame are provider-neutral.)
 
-const POSTMARK_URL = "https://api.postmarkapp.com/email";
+const RESEND_URL = "https://api.resend.com/emails";
 
-// Postmark rejects a message over 10 MB total, and base64 inflates a file by
-// ~33%. 7 MB of raw PDF is the largest that reliably fits — anything bigger
-// goes out as a link only, which the email copy accounts for.
+// Resend's own ceiling is 40 MB per message after encoding, but a 7 MB raw
+// PDF is deliberately still the cap: base64 inflates it by ~33%, corporate
+// inboxes start refusing well before 40, and anything bigger already goes
+// out as a link only — which the email copy accounts for.
 export const MAX_ATTACHMENT_BYTES = 7 * 1024 * 1024;
 
+// The shape the send functions build (unchanged from the Postmark era, so
+// the callers didn't have to move); sendMail translates it on the way out.
 export interface Attachment {
   Name: string;
   Content: string; // base64
@@ -28,35 +34,39 @@ export async function sendMail(opts: {
   attachments?: Attachment[];
   tag?: string;
 }) {
-  const token = Deno.env.get("POSTMARK_TOKEN");
-  if (!token) throw new Error("POSTMARK_TOKEN is not set — see 'Things to do to get set up', step 3.");
+  const key = Deno.env.get("RESEND_API_KEY");
+  if (!key) throw new Error("RESEND_API_KEY is not set — see 'Things to do to get set up', step 3.");
 
-  const res = await fetch(POSTMARK_URL, {
+  const replyTo = opts.replyTo || Deno.env.get("MAIL_REPLY_TO") || undefined;
+  const res = await fetch(RESEND_URL, {
     method: "POST",
     headers: {
       "Content-Type": "application/json",
-      "Accept": "application/json",
-      "X-Postmark-Server-Token": token
+      "Authorization": `Bearer ${key}`
     },
     body: JSON.stringify({
-      From: opts.from,
-      To: opts.to,
-      Cc: opts.cc || undefined,
-      ReplyTo: opts.replyTo || Deno.env.get("MAIL_REPLY_TO") || undefined,
-      Subject: opts.subject,
-      HtmlBody: opts.htmlBody,
-      TextBody: opts.textBody,
-      MessageStream: "outbound",
-      Tag: opts.tag,
-      Attachments: opts.attachments
+      from: opts.from,
+      // recipients() hands lists over comma-joined; Resend wants arrays.
+      to: opts.to.split(","),
+      cc: opts.cc ? opts.cc.split(",") : undefined,
+      reply_to: replyTo,
+      subject: opts.subject,
+      html: opts.htmlBody,
+      text: opts.textBody,
+      tags: opts.tag ? [{ name: "kind", value: opts.tag }] : undefined,
+      attachments: opts.attachments?.map(a => ({
+        filename: a.Name,
+        content: a.Content,
+        content_type: a.ContentType
+      }))
     })
   });
 
-  const body = await res.json();
-  // Postmark answers 200 with ErrorCode 0 on success; anything else carries a
-  // human-readable Message worth surfacing rather than swallowing.
-  if (!res.ok || body.ErrorCode) {
-    throw new Error(`Postmark ${body.ErrorCode ?? res.status}: ${body.Message ?? "send failed"}`);
+  // Success is 200 with an id; anything else carries a human-readable
+  // message worth surfacing rather than swallowing.
+  const body = await res.json().catch(() => ({}));
+  if (!res.ok) {
+    throw new Error(`Resend ${body.statusCode ?? res.status}: ${body.message ?? "send failed"}`);
   }
   return body;
 }

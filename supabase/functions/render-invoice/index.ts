@@ -16,7 +16,7 @@
 // never has to be persuaded to render the response itself.
 
 import { createClient } from "https://esm.sh/@supabase/supabase-js@2";
-import { corsHeaders } from "../_shared/postmark.ts";
+import { corsHeaders } from "../_shared/mail.ts";
 import { invoicePage } from "../_shared/invoice.ts";
 import { loadInvoice } from "../_shared/ticketInvoice.ts";
 

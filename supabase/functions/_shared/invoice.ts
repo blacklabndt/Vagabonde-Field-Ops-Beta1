@@ -16,7 +16,7 @@
 // the crew rate, and a second truck is a second ticket — so the labour block
 // lists who was there, and charges once.
 
-import { esc } from "./postmark.ts";
+import { esc } from "./mail.ts";
 import { wordmark } from "./wordmark.ts";
 
 export const GST_RATE = 0.05; // Alberta: federal only. Mirrors data.js.

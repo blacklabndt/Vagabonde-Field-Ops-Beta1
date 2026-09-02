@@ -13,7 +13,7 @@
 // deploy can't quietly turn verification back on and 401 every approval.
 
 import { createClient } from "https://esm.sh/@supabase/supabase-js@2";
-import { esc } from "../_shared/postmark.ts";
+import { esc } from "../_shared/mail.ts";
 import { renderInvoice, invoiceCss } from "../_shared/invoice.ts";
 import { loadInvoice, TICKET_INVOICE_SELECT } from "../_shared/ticketInvoice.ts";
 
