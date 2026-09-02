@@ -1226,6 +1226,39 @@ export const Db = {
     return data.html;
   },
 
+  // ── Email setup (Admin) ────────────────────────────────────────────────
+  // The single mail_settings row: Resend key and sending addresses. RLS
+  // keeps it Admin-only, so everyone else errors rather than reads blanks.
+  async getMailSettings() {
+    const { data, error } = await sbClient.from("mail_settings")
+      .select("resend_api_key, from_reports, from_billing, reply_to").maybeSingle();
+    if (error) throw error;
+    return data || {};
+  },
+
+  async saveMailSettings({ resendApiKey, fromReports, fromBilling, replyTo }) {
+    const { error } = await sbClient.from("mail_settings").upsert({
+      id: true,
+      resend_api_key: (resendApiKey || "").trim() || null,
+      from_reports: (fromReports || "").trim() || null,
+      from_billing: (fromBilling || "").trim() || null,
+      reply_to: (replyTo || "").trim() || null,
+      updated_at: new Date().toISOString()
+    });
+    if (error) throw error;
+  },
+
+  // One proof email through the real sending path, from the Email setup
+  // screen. The response names the from-address actually used, so the
+  // screen can say whether it went out under the test sender or the
+  // verified domain.
+  async sendTestEmail(to) {
+    const { data, error } = await sbClient.functions.invoke("mail-test", { body: { to } });
+    if (error) throw new Error(await readFnError(error));
+    if (data && data.error) throw new Error(data.error);
+    return data;
+  },
+
   async sendTicketApproval({ ticketId, to, cc }) {
     const { data, error } = await sbClient.functions.invoke("send-ticket-approval", {
       body: { ticketId, to, cc }
@@ -2890,6 +2923,10 @@ const SAVE_MESSAGES = {
   deleteTicket: "Ticket cancelled",
   sendTicketApproval: "Approval sent",
   withdrawTicketApproval: "Approval cancelled — the ticket is a draft again",
+
+  // Email setup
+  saveMailSettings: "Email settings saved",
+  sendTestEmail: "Test email sent",
 
   // Rates
   setRateLine: "Rate saved",

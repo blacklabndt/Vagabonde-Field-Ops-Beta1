@@ -127,7 +127,7 @@ Deno.serve(async (req) => {
     ].filter(Boolean).join("\n");
 
     await sendMail({
-      from: Deno.env.get("MAIL_FROM_REPORTS") ?? "reports@vagabonde.ca",
+      from: "reports",
       to: toList, cc: ccList, subject, htmlBody: html, textBody: text,
       attachments, tag: "report"
     });

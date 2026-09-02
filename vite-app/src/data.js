@@ -81,7 +81,8 @@ export const TABS = [
   { key: "timesheets", label: "Timesheets" },
   { key: "rates", label: "Rate admin" },
   { key: "tracker", label: "Billing tracker" },
-  { key: "users", label: "Users & access" }
+  { key: "users", label: "Users & access" },
+  { key: "mail", label: "Email setup" }
 ];
 
 // Screens that only make sense with a job under them. They never appear in
@@ -101,7 +102,7 @@ export const CONTEXT_TABS = ["job", "jha", "upload", "ticket"];
 // the signup trigger seeds a new account from — the two had drifted, leaving
 // accounts created in the app without the tabs this table promises them.
 export const ROLE_PRESETS = {
-  Admin: ["board", "job", "jha", "upload", "ticket", "mytickets", "files", "contacts", "equipment", "timesheets", "rates", "tracker", "users", "chat"],
+  Admin: ["board", "job", "jha", "upload", "ticket", "mytickets", "files", "contacts", "equipment", "timesheets", "rates", "tracker", "users", "mail", "chat"],
   Coordinator: ["board", "job", "jha", "upload", "ticket", "mytickets", "files", "contacts", "equipment", "timesheets", "tracker", "chat"],
   // Technicians get the directory read-write too: the person who finds out
   // the site rep's number is usually the one standing on the lease.

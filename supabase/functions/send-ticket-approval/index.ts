@@ -150,7 +150,7 @@ Deno.serve(async (req) => {
     // Resend being unconfigured makes that the *normal* path, not the rare
     // one. send-report already had this order; now they match.
     await sendMail({
-      from: Deno.env.get("MAIL_FROM_BILLING") ?? "billing@vagabonde.ca",
+      from: "billing",
       to: toList, cc: ccList,
       subject: `Field invoice ${ticket.id} for approval — ${job.project} (${money(grand)})`,
       htmlBody: html, textBody: text,

@@ -7,7 +7,32 @@
 // (This module carried Postmark before; only the transport changed. The
 // recipient guards, escaping and the email frame are provider-neutral.)
 
+import { createClient } from "https://esm.sh/@supabase/supabase-js@2";
+
 const RESEND_URL = "https://api.resend.com/emails";
+
+// Resend's universal test sender: works with any account, no domain
+// verification — but only delivers to the Resend account owner's own
+// address. It's how an admin proves the pipework before DNS is done.
+const TEST_SENDER = "VagaboNDE Field Ops <onboarding@resend.dev>";
+
+// The Email setup screen writes this row; the env vars remain as fallback
+// so an install configured the old way (Supabase secrets) keeps working.
+// Read with the service role — the table is Admin-only under RLS.
+export async function mailSettings() {
+  let row: Record<string, string | null> = {};
+  try {
+    const admin = createClient(Deno.env.get("SUPABASE_URL")!, Deno.env.get("SUPABASE_SERVICE_ROLE_KEY")!);
+    const { data } = await admin.from("mail_settings").select("resend_api_key, from_reports, from_billing, reply_to").maybeSingle();
+    row = data ?? {};
+  } catch { /* table missing or unreadable — the env fallbacks decide */ }
+  return {
+    apiKey: row.resend_api_key || Deno.env.get("RESEND_API_KEY") || "",
+    fromReports: row.from_reports || Deno.env.get("MAIL_FROM_REPORTS") || TEST_SENDER,
+    fromBilling: row.from_billing || Deno.env.get("MAIL_FROM_BILLING") || TEST_SENDER,
+    replyTo: row.reply_to || Deno.env.get("MAIL_REPLY_TO") || undefined
+  };
+}
 
 // Resend's own ceiling is 40 MB per message after encoding, but a 7 MB raw
 // PDF is deliberately still the cap: base64 inflates it by ~33%, corporate
@@ -24,7 +49,9 @@ export interface Attachment {
 }
 
 export async function sendMail(opts: {
-  from: string;
+  // Which sending identity, not a literal address: the Email setup screen
+  // (or the env fallbacks) decides what "reports" and "billing" mean.
+  from: "reports" | "billing";
   to: string;
   cc?: string;
   subject: string;
@@ -34,18 +61,20 @@ export async function sendMail(opts: {
   attachments?: Attachment[];
   tag?: string;
 }) {
-  const key = Deno.env.get("RESEND_API_KEY");
-  if (!key) throw new Error("RESEND_API_KEY is not set — see 'Things to do to get set up', step 3.");
+  const settings = await mailSettings();
+  if (!settings.apiKey) {
+    throw new Error("Email isn't set up yet — an Admin can add the Resend API key under Email setup.");
+  }
 
-  const replyTo = opts.replyTo || Deno.env.get("MAIL_REPLY_TO") || undefined;
+  const replyTo = opts.replyTo || settings.replyTo;
   const res = await fetch(RESEND_URL, {
     method: "POST",
     headers: {
       "Content-Type": "application/json",
-      "Authorization": `Bearer ${key}`
+      "Authorization": `Bearer ${settings.apiKey}`
     },
     body: JSON.stringify({
-      from: opts.from,
+      from: opts.from === "billing" ? settings.fromBilling : settings.fromReports,
       // recipients() hands lists over comma-joined; Resend wants arrays.
       to: opts.to.split(","),
       cc: opts.cc ? opts.cc.split(",") : undefined,

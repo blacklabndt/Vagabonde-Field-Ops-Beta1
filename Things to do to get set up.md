@@ -26,8 +26,13 @@ account-review wait — a verified domain can send to anyone straight away.
 4. Wait for DNS to propagate (usually minutes, up to 24 h), then press
    **Verify DNS Records** in Resend.
 5. Go to **API Keys → Create API Key**, name it `VagaboNDE Field Ops`,
-   permission **Sending access**. Copy the key — you need it in step 3
-   below, and Resend only shows it once.
+   permission **Sending access**. Copy the key — Resend only shows it once.
+6. Paste the key into the app: sign in as an Admin, open the drawer →
+   **Email setup**, paste it, save, and press **Send test email**. With
+   just the key (no domain yet), tests go out from Resend's onboarding
+   sender and can only reach the Resend account owner's own inbox — enough
+   to prove the pipework the same day. Once the domain verifies, fill in
+   the two sending addresses on that screen and mail goes anywhere.
 
 **Skip this and:** emails either don't send at all, or land in your
 contractors' spam folders. This is the step that decides whether the
@@ -65,13 +70,16 @@ still works; email just stays a button that does nothing.
 
 ---
 
-## 3. Store the secrets  (~2 min)
+## 3. Store the secrets  (~2 min, now mostly optional)
 
-These live on Supabase's servers and are never sent to the browser. Put them
-in a file rather than on the command line — a key typed into a terminal
-stays in the shell's history file afterwards. Create `supabase/.env.secrets`
-(it's covered by `supabase/.gitignore`, so it can't be committed by
-accident):
+The email settings live in the app now — drawer → **Email setup**, Admin
+only — so the key and addresses from step 1 normally never touch a
+terminal. The environment secrets below still work and act as fallback for
+anything the screen leaves blank; set them this way only if you prefer
+config outside the database. Put them in a file rather than on the command
+line — a key typed into a terminal stays in the shell's history file
+afterwards. Create `supabase/.env.secrets` (it's covered by
+`supabase/.gitignore`, so it can't be committed by accident):
 
 ```bash
 RESEND_API_KEY=your-resend-api-key
@@ -124,6 +132,7 @@ supabase db push
 supabase functions deploy send-report
 supabase functions deploy send-jha
 supabase functions deploy send-ticket-approval
+supabase functions deploy mail-test
 supabase functions deploy render-jha
 supabase functions deploy render-invoice
 supabase functions deploy gif-search
