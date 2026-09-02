@@ -9,6 +9,7 @@ import { OfflineQueue } from "./offlineQueue.js";
 import { OfflineCache } from "./offlineCache.js";
 import { SwUpdates } from "./swUpdates.js";
 import { restoreSession, IDENTITY_KEY } from "./session.js";
+import { Recovery } from "./recovery.js";
 import { SignInScreen, SetNewPasswordScreen } from "./components/auth.jsx";
 import { HomeScreen } from "./components/home.jsx";
 import { JobDetailScreen } from "./components/jobDetail.jsx";
@@ -84,7 +85,10 @@ class EggBoundary extends React.Component {
 function UpdateBanner({ onLater }) {
   return (
     <div role="status" style={{
-      position: "fixed", left: "50%", bottom: 18, transform: "translateX(-50%)",
+      // Same safe-area lesson the Toast in common.jsx already paid for:
+      // without the inset, the buttons sit in the iPhone home-indicator
+      // gesture zone and a tap swipes the app away instead of restarting.
+      position: "fixed", left: "50%", bottom: "calc(18px + env(safe-area-inset-bottom, 0px))", transform: "translateX(-50%)",
       zIndex: 55, width: "min(440px, calc(100vw - 24px))",
       background: "var(--color-bg)", border: "1px solid var(--color-accent)",
       boxShadow: "var(--shadow-md)", padding: "14px 16px"
@@ -108,16 +112,12 @@ export function App() {
   const [checkingSession, setCheckingSession] = useState(true);
   // A password-reset link lands here with recovery tokens in the URL hash;
   // the session it starts is only for choosing a new password, so the app
-  // gates on that screen instead of quietly opening. The hash check catches
-  // it at first paint (before supabase-js consumes the tokens); the auth
-  // event below is the backup for any timing the hash read misses.
-  const [recovering, setRecovering] = useState(() => window.location.hash.includes("type=recovery"));
-  useEffect(() => {
-    const { data: sub } = sbClient.auth.onAuthStateChange(event => {
-      if (event === "PASSWORD_RECOVERY") setRecovering(true);
-    });
-    return () => sub.subscription.unsubscribe();
-  }, []);
+  // gates on that screen instead of quietly opening. Detection lives in
+  // recovery.js at module scope — supabase-js can consume the hash and
+  // fire its one-shot PASSWORD_RECOVERY event before React mounts, so a
+  // component-level check here loses that race on slow devices.
+  const [recovering, setRecovering] = useState(Recovery.pending);
+  useEffect(() => Recovery.subscribe(setRecovering), []);
   // A push notification's tap lands on /?goto=chat — honoured here so
   // tapping "Kyle — Team chat" opens the room, not the board. The
   // service worker sends both the closed and the already-open app
@@ -304,41 +304,52 @@ export function App() {
 
   // Restore an existing session on load. Bounded at every step and tolerant of
   // having no network — see session.js for why each of those matters.
-  useEffect(() => {
-    (async () => {
-      try {
-        const { user, offline, reason } = await restoreSession({
+  //
+  // Not while a password reset is in flight, though: restoreSession treats
+  // "session with no usable profile" as something to sign out — and doing
+  // that to a recovery session destroys the single-use reset link while
+  // its owner is mid-typing on the set-password screen. The gate's onDone
+  // runs this same boot once the recovery is settled.
+  const bootSession = async () => {
+    try {
+      const { user, offline, reason } = await restoreSession({
           getSession: () => sbClient.auth.getSession(),
           fetchProfile: id => sbClient.from("profiles").select("*").eq("id", id).single(),
-          signOut: () => sbClient.auth.signOut(),
+          // Guarded: if a recovery landing is detected while this boot is
+          // already in flight, the "no usable profile" sign-out must not
+          // destroy the recovery session mid-reset.
+          signOut: () => Recovery.pending() ? Promise.resolve() : sbClient.auth.signOut(),
           readIdentity: () => OfflineCache.read(IDENTITY_KEY).then(hit => (hit ? hit.value : null)),
           writeIdentity: identity => OfflineCache.put(IDENTITY_KEY, identity),
-          isNetworkError: OfflineQueue.isNetworkError
-        });
-        if (offline) {
-          console.warn("Starting without a connection (" + reason + ")" + (user ? " — signed in from this device's last session." : "."));
-          if (user) {
-            OfflineCache.noteServingCached(Date.now());
-            restoredOffline.current = true;
-          }
-        }
+        isNetworkError: OfflineQueue.isNetworkError
+      });
+      if (offline) {
+        console.warn("Starting without a connection (" + reason + ")" + (user ? " — signed in from this device's last session." : "."));
         if (user) {
-          setCurrentUser(user);
-          // First screen: the first real tab — never a contextual one
-          // (job/ticket screens open from a job, and there is no job
-          // yet) — unless the URL already seeded the chat, which is how
-          // a tapped push notification cold-starts the installed app.
-          // Overwriting that seed here sent every notification tap on a
-          // restored session to the board instead of the room — exactly
-          // what the goto handling above exists to prevent.
-          const first = tabList(user.tabs).filter(t => !CONTEXT_TABS.includes(t))[0] || "board";
-          setScreen(s => (s === "chat" && tabList(user.tabs).includes("chat")) ? "chat" : first);
+          OfflineCache.noteServingCached(Date.now());
+          restoredOffline.current = true;
         }
-      } catch (e) {
-        console.error("Couldn't restore the session:", e.message);
       }
-      setCheckingSession(false);
-    })();
+      if (user) {
+        setCurrentUser(user);
+        // First screen: the first real tab — never a contextual one
+        // (job/ticket screens open from a job, and there is no job
+        // yet) — unless the URL already seeded the chat, which is how
+        // a tapped push notification cold-starts the installed app.
+        // Overwriting that seed here sent every notification tap on a
+        // restored session to the board instead of the room — exactly
+        // what the goto handling above exists to prevent.
+        const first = tabList(user.tabs).filter(t => !CONTEXT_TABS.includes(t))[0] || "board";
+        setScreen(s => (s === "chat" && tabList(user.tabs).includes("chat")) ? "chat" : first);
+      }
+    } catch (e) {
+      console.error("Couldn't restore the session:", e.message);
+    }
+    setCheckingSession(false);
+  };
+  useEffect(() => {
+    if (Recovery.pending()) { setCheckingSession(false); return; }
+    bootSession();
   }, []);
 
   const loadReferenceData = async () => {
@@ -422,11 +433,14 @@ export function App() {
   if (recovering) {
     return <SetNewPasswordScreen onDone={saved => {
       // Done either way (saved, or kept the old one): clear the recovery
-      // tokens from the URL so a reload doesn't reopen this screen, and
-      // fall through to wherever the session state leads.
+      // tokens from the URL so a reload doesn't reopen this screen, then
+      // run the boot this gate suppressed — the recovery session signs
+      // the person straight in, or its absence lands them at sign-in.
       window.history.replaceState({}, "", window.location.pathname);
+      Recovery.clear();
       setRecovering(false);
       if (saved) Toasts.show("Password updated");
+      bootSession();
     }} />;
   }
 

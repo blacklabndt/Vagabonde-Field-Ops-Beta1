@@ -22,14 +22,20 @@ export function AdminSetupScreen() {
     resendApiKey: "", fromReports: "", fromBilling: "", replyTo: "",
     klipyApiKey: "", approvalBaseUrl: ""
   });
-  const [loading, setLoading] = useState(true);
+  // "loading" | "ready" | "failed". Failed matters: saving writes the whole
+  // form over the whole row, so a save on top of a load that never arrived
+  // would null out every stored key. Save only unlocks once the row has
+  // genuinely been read.
+  const [loadState, setLoadState] = useState("loading");
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState("");
   const [testTo, setTestTo] = useState("");
   const [testing, setTesting] = useState(false);
   const [testResult, setTestResult] = useState(null);
 
-  useEffect(() => {
+  const load = () => {
+    setLoadState("loading");
+    setError("");
     let live = true;
     Db.getAppSettings()
       .then(row => {
@@ -42,11 +48,16 @@ export function AdminSetupScreen() {
           klipyApiKey: row.klipy_api_key || "",
           approvalBaseUrl: row.approval_base_url || ""
         });
+        setLoadState("ready");
       })
-      .catch(e => { if (live) setError(e.message || "Couldn't load the settings."); })
-      .finally(() => { if (live) setLoading(false); });
+      .catch(e => {
+        if (!live) return;
+        setError((e.message || "Couldn't load the settings.") + " Nothing can be saved until they load.");
+        setLoadState("failed");
+      });
     return () => { live = false; };
-  }, []);
+  };
+  useEffect(load, []);
 
   const set = (key, value) => { setForm(p => ({ ...p, [key]: value })); setError(""); };
 
@@ -69,7 +80,7 @@ export function AdminSetupScreen() {
 
   const emailTestingMode = !form.fromReports.trim();
 
-  if (loading) return <div className="page"><Loading label="Loading settings…" /></div>;
+  if (loadState === "loading") return <div className="page"><Loading label="Loading settings…" /></div>;
 
   return (
     <div className="page">
@@ -162,8 +173,9 @@ export function AdminSetupScreen() {
           </Field>
         </Blueprint>
 
-        <div style={{ display: "flex", justifyContent: "flex-end" }}>
-          <Btn variant="primary" disabled={saving} onClick={save}>{saving ? "Saving…" : "Save settings"}</Btn>
+        <div style={{ display: "flex", justifyContent: "flex-end", gap: 8 }}>
+          {loadState === "failed" && <Btn variant="secondary" onClick={load}>Try loading again</Btn>}
+          <Btn variant="primary" disabled={saving || loadState !== "ready"} onClick={save}>{saving ? "Saving…" : "Save settings"}</Btn>
         </div>
 
         <Blueprint style={{ padding: "18px 20px" }}>

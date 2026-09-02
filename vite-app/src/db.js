@@ -1238,6 +1238,20 @@ export const Db = {
   },
 
   async saveAppSettings({ resendApiKey, fromReports, fromBilling, replyTo, klipyApiKey, approvalBaseUrl }) {
+    // The approval link is built as `${base}/approve?t=…` and dropped into
+    // an email — a bare "app.example.com" renders as dead text in every
+    // client's inbox and errors nowhere. Refuse the shapes that can't work.
+    const base = (approvalBaseUrl || "").trim();
+    if (base) {
+      let parsed = null;
+      try { parsed = new URL(base); } catch { /* not a URL at all */ }
+      if (!parsed || !/^https?:$/.test(parsed.protocol)) {
+        throw new Error("The app address needs to be a full URL starting with https:// — for example https://app.example.com.");
+      }
+      if (parsed.search || (parsed.pathname && parsed.pathname !== "/")) {
+        throw new Error("The app address should be just the site's root — no path or ? on the end.");
+      }
+    }
     const { error } = await sbClient.from("app_settings").upsert({
       id: true,
       resend_api_key: (resendApiKey || "").trim() || null,

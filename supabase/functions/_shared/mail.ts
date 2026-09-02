@@ -20,12 +20,15 @@ const TEST_SENDER = "VagaboNDE Field Ops <onboarding@resend.dev>";
 // install configured the old way (Supabase secrets) keeps working. Read
 // with the service role — the table is Admin-only under RLS.
 export async function appSettings() {
-  let row: Record<string, string | null> = {};
-  try {
-    const admin = createClient(Deno.env.get("SUPABASE_URL")!, Deno.env.get("SUPABASE_SERVICE_ROLE_KEY")!);
-    const { data } = await admin.from("app_settings").select("resend_api_key, from_reports, from_billing, reply_to, klipy_api_key, approval_base_url").maybeSingle();
-    row = data ?? {};
-  } catch { /* table missing or unreadable — the env fallbacks decide */ }
+  const admin = createClient(Deno.env.get("SUPABASE_URL")!, Deno.env.get("SUPABASE_SERVICE_ROLE_KEY")!);
+  const { data, error } = await admin.from("app_settings").select("resend_api_key, from_reports, from_billing, reply_to, klipy_api_key, approval_base_url").maybeSingle();
+  // supabase-js reports failures in `error`, not by throwing. A transient
+  // read error must surface, not silently demote a configured install to
+  // the env fallbacks or the test sender — that sent mail under rotated
+  // keys once. (An absent row is fine: that's an unconfigured install,
+  // and exactly what the fallbacks are for.)
+  if (error) throw new Error(`Couldn't read the app settings: ${error.message}. Try again.`);
+  const row: Record<string, string | null> = data ?? {};
   return {
     apiKey: row.resend_api_key || Deno.env.get("RESEND_API_KEY") || "",
     fromReports: row.from_reports || Deno.env.get("MAIL_FROM_REPORTS") || TEST_SENDER,
@@ -67,6 +70,15 @@ export async function sendMail(opts: {
   if (!settings.apiKey) {
     throw new Error("Email isn't set up yet — an Admin can add the Resend API key on the Admin screen.");
   }
+  // Key set but no verified sending address: the fallback is Resend's
+  // onboarding sender, which only delivers to the Resend account owner's
+  // own inbox. Attempting a real send would 403 in the field an hour
+  // after the office saw a green test — refuse it with the reason
+  // instead. The test email (tag "test") is exactly what this mode is for.
+  const from = opts.from === "billing" ? settings.fromBilling : settings.fromReports;
+  if (from === TEST_SENDER && opts.tag !== "test") {
+    throw new Error("Email is still in testing mode — the sending domain isn't verified, so mail can only reach the Resend account's own inbox. An Admin can verify the domain and set the sending addresses on the Admin screen.");
+  }
 
   const replyTo = opts.replyTo || settings.replyTo;
   const res = await fetch(RESEND_URL, {
@@ -76,7 +88,7 @@ export async function sendMail(opts: {
       "Authorization": `Bearer ${settings.apiKey}`
     },
     body: JSON.stringify({
-      from: opts.from === "billing" ? settings.fromBilling : settings.fromReports,
+      from,
       // recipients() hands lists over comma-joined; Resend wants arrays.
       to: opts.to.split(","),
       cc: opts.cc ? opts.cc.split(",") : undefined,

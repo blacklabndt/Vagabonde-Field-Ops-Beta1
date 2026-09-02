@@ -42,9 +42,12 @@ delete from public.rate_overrides;
 delete from public.jobs;
 
 -- The directory, and every per-client rate card with it. The house card
--- (client_id is null) survives, placeholder prices and all.
-delete from public.rate_line_history
-  where schedule_id in (select id from public.rate_schedules where client_id is not null);
+-- (client_id is null) survives with its lines — but its edit HISTORY does
+-- not: history rows carry changed_by references to the seed profiles being
+-- deleted below (a plain foreign key, no cascade), so keeping any of them
+-- would abort this whole transaction at the account delete. A history of
+-- placeholder prices is worth nothing to the client anyway.
+delete from public.rate_line_history;
 delete from public.rate_lines
   where schedule_id in (select id from public.rate_schedules where client_id is not null);
 delete from public.rate_schedules where client_id is not null;
@@ -81,8 +84,10 @@ update public.app_settings set
   reply_to = null, klipy_api_key = null, approval_base_url = null,
   updated_at = now();
 
--- What's left, for the eyeball before commit: expect the owner's profile,
--- the house card, and zeroes everywhere else.
+-- The receipt: expect the owner's profile, the house card, and zeroes
+-- everywhere else. Run as one script this prints AFTER the commit is
+-- already in; to rehearse instead, run everything above this line, eyeball
+-- these counts, then type COMMIT or ROLLBACK yourself.
 select
   (select count(*) from public.profiles)       as profiles_expect_1,
   (select count(*) from public.jobs)           as jobs_expect_0,

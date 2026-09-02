@@ -61,7 +61,20 @@ Cloudflare Worker `solitary-snowflake-ee22` (assets + `/approve` proxy in
   pictures), fired nightly by the pg_cron job `chat-retention-nightly`.
   Message bodies are immutable by column grant — only pin columns are
   updatable, Admin-only. GIF search is KLIPY (Tenor's API is dead);
-  the key is the KLIPY_API_KEY secret, handed out by gif-search.
+  the key lives in app_settings (see below), handed out by gif-search.
+- App configuration lives in the app_settings table (one enforced row,
+  Admin-only RLS), edited from the Admin screen (tab key "mail", label
+  "Admin"): Resend key + sending addresses, the approval-link base URL,
+  the KLIPY key. Email rides Resend (shared module
+  supabase/functions/_shared/mail.ts). The old env secrets
+  (RESEND_API_KEY, MAIL_FROM_*, KLIPY_API_KEY, APPROVAL_BASE_URL) are
+  FALLBACKS only — a table value wins, so rotating a secret does nothing
+  while a table value exists. With a key but no verified sending address
+  the transport is in testing mode: only the test email (mail-test) may
+  use Resend's onboarding sender; real sends are refused with the reason.
+  The role→tabs defaults live in TWO places that must move together:
+  ROLE_PRESETS in vite-app/src/data.js and tabs_for_role() in the
+  database (create-user provisions from the latter).
 - Chat push: an insert trigger fires the chat-push function via pg_net;
   it sends Web Push (VAPID_* secrets) to push_subscriptions minus the
   sender and prunes endpoints answering 404/410. The handlers live in
