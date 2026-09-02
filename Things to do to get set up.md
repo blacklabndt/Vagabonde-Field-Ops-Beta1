@@ -28,7 +28,7 @@ account-review wait — a verified domain can send to anyone straight away.
 5. Go to **API Keys → Create API Key**, name it `VagaboNDE Field Ops`,
    permission **Sending access**. Copy the key — Resend only shows it once.
 6. Paste the key into the app: sign in as an Admin, open the drawer →
-   **Email setup**, paste it, save, and press **Send test email**. With
+   **Admin**, paste it, save, and press **Send test email**. With
    just the key (no domain yet), tests go out from Resend's onboarding
    sender and can only reach the Resend account owner's own inbox — enough
    to prove the pipework the same day. Once the domain verifies, fill in
@@ -72,8 +72,9 @@ still works; email just stays a button that does nothing.
 
 ## 3. Store the secrets  (~2 min, now mostly optional)
 
-The email settings live in the app now — drawer → **Email setup**, Admin
-only — so the key and addresses from step 1 normally never touch a
+The email settings live in the app now — drawer → **Admin**, Admin
+accounts only, along with the approval-link address and the chat GIF
+key — so the keys and addresses from step 1 normally never touch a
 terminal. The environment secrets below still work and act as fallback for
 anything the screen leaves blank; set them this way only if you prefer
 config outside the database. Put them in a file rather than on the command

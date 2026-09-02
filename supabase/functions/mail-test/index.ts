@@ -11,7 +11,7 @@
 // explain that.
 
 import { createClient } from "https://esm.sh/@supabase/supabase-js@2";
-import { sendMail, mailSettings, corsHeaders, wrapEmail, esc, recipients } from "../_shared/mail.ts";
+import { sendMail, appSettings, corsHeaders, wrapEmail, esc, recipients } from "../_shared/mail.ts";
 
 const json = (body: unknown, status = 200) =>
   new Response(JSON.stringify(body), { status, headers: { ...corsHeaders, "Content-Type": "application/json" } });
@@ -37,10 +37,10 @@ Deno.serve(async (req) => {
       return json({ error: "Only an Admin can send a test email" }, 403);
     }
 
-    const settings = await mailSettings();
+    const settings = await appSettings();
     const html = wrapEmail(`
 <h2 style="margin:0 0 10px;font-size:18px">Email is working</h2>
-<p>This is a test from VagaboNDE Field Ops, sent by ${esc(callerProfile.name)} from the Email setup screen.</p>
+<p>This is a test from VagaboNDE Field Ops, sent by ${esc(callerProfile.name)} from the Admin screen.</p>
 <p>It went out from <strong>${esc(settings.fromReports)}</strong> — if that is still Resend's onboarding address, the sending domain isn't verified yet and real recipients can't receive mail; once the domain is verified in Resend and the addresses are set, tests and real sends go anywhere.</p>`);
 
     await sendMail({
@@ -48,7 +48,7 @@ Deno.serve(async (req) => {
       to: toList,
       subject: "VagaboNDE Field Ops — test email",
       htmlBody: html,
-      textBody: `Email is working. Sent from ${settings.fromReports} via the Email setup screen.`,
+      textBody: `Email is working. Sent from ${settings.fromReports} via the Admin screen.`,
       tag: "test"
     });
 

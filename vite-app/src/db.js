@@ -1226,23 +1226,26 @@ export const Db = {
     return data.html;
   },
 
-  // ── Email setup (Admin) ────────────────────────────────────────────────
-  // The single mail_settings row: Resend key and sending addresses. RLS
-  // keeps it Admin-only, so everyone else errors rather than reads blanks.
-  async getMailSettings() {
-    const { data, error } = await sbClient.from("mail_settings")
-      .select("resend_api_key, from_reports, from_billing, reply_to").maybeSingle();
+  // ── Admin screen settings ──────────────────────────────────────────────
+  // The single app_settings row: every vendor key and deployment address
+  // the app needs (Resend, KLIPY, the approval-link base). RLS keeps it
+  // Admin-only, so everyone else errors rather than reads blanks.
+  async getAppSettings() {
+    const { data, error } = await sbClient.from("app_settings")
+      .select("resend_api_key, from_reports, from_billing, reply_to, klipy_api_key, approval_base_url").maybeSingle();
     if (error) throw error;
     return data || {};
   },
 
-  async saveMailSettings({ resendApiKey, fromReports, fromBilling, replyTo }) {
-    const { error } = await sbClient.from("mail_settings").upsert({
+  async saveAppSettings({ resendApiKey, fromReports, fromBilling, replyTo, klipyApiKey, approvalBaseUrl }) {
+    const { error } = await sbClient.from("app_settings").upsert({
       id: true,
       resend_api_key: (resendApiKey || "").trim() || null,
       from_reports: (fromReports || "").trim() || null,
       from_billing: (fromBilling || "").trim() || null,
       reply_to: (replyTo || "").trim() || null,
+      klipy_api_key: (klipyApiKey || "").trim() || null,
+      approval_base_url: (approvalBaseUrl || "").trim().replace(/\/+$/, "") || null,
       updated_at: new Date().toISOString()
     });
     if (error) throw error;
@@ -2925,7 +2928,7 @@ const SAVE_MESSAGES = {
   withdrawTicketApproval: "Approval cancelled — the ticket is a draft again",
 
   // Email setup
-  saveMailSettings: "Email settings saved",
+  saveAppSettings: "Settings saved",
   sendTestEmail: "Test email sent",
 
   // Rates

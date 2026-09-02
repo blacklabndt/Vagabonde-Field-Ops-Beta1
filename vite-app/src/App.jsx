@@ -31,7 +31,7 @@ const BillingTrackerScreen = lazy(() => import("./components/billingTracker.jsx"
 const TimesheetsScreen = lazy(() => import("./components/timesheets.jsx").then(m => ({ default: m.TimesheetsScreen })));
 const UsersAccessScreen = lazy(() => import("./components/usersAccess.jsx").then(m => ({ default: m.UsersAccessScreen })));
 const TeamChatScreen = lazy(() => import("./components/teamChat.jsx").then(m => ({ default: m.TeamChatScreen })));
-const EmailSetupScreen = lazy(() => import("./components/emailSetup.jsx").then(m => ({ default: m.EmailSetupScreen })));
+const AdminSetupScreen = lazy(() => import("./components/adminSetup.jsx").then(m => ({ default: m.AdminSetupScreen })));
 // Not screens. Each its own chunk so a technician on field data never
 // downloads a game they have not gone looking for — the first lives behind
 // the drawer-footer name, the second behind the top-bar one.
@@ -616,7 +616,7 @@ export function App() {
       body = <UsersAccessScreen currentUser={currentUser} />;
       break;
     case "mail":
-      body = <EmailSetupScreen />;
+      body = <AdminSetupScreen />;
       break;
     case "chat":
       body = <TeamChatScreen currentUser={currentUser} onOpenJob={openJob} onRead={() => setChatUnread(0)} />;

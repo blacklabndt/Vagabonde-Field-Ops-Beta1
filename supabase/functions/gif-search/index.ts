@@ -11,9 +11,11 @@
 // exposure as any client-side GIF key, and KLIPY's intended model. The
 // secret buys central rotation, not secrecy.
 //
-// Until the KLIPY_API_KEY secret is set, the picker shows this
-// function's own explanation instead of a grid — the same
-// build-now-configure-later shape as the mail sender.
+// Until a key is set — on the Admin screen, or as the KLIPY_API_KEY
+// secret — the picker shows this function's own explanation instead of
+// a grid: the same build-now-configure-later shape as the mail sender.
+
+import { appSettings } from "../_shared/mail.ts";
 
 const corsHeaders = {
   "Access-Control-Allow-Origin": "*",
@@ -24,9 +26,9 @@ Deno.serve(async (req) => {
   if (req.method === "OPTIONS") return new Response("ok", { headers: corsHeaders });
 
   try {
-    const key = Deno.env.get("KLIPY_API_KEY");
+    const key = (await appSettings()).klipyApiKey;
     if (!key) {
-      throw new Error("GIF search isn't set up yet — an admin needs to add the KLIPY_API_KEY secret in Supabase.");
+      throw new Error("GIF search isn't set up yet — an Admin can add the KLIPY key on the Admin screen.");
     }
     return new Response(JSON.stringify({ appKey: key }), {
       headers: { ...corsHeaders, "Content-Type": "application/json" },

@@ -82,7 +82,7 @@ export const TABS = [
   { key: "rates", label: "Rate admin" },
   { key: "tracker", label: "Billing tracker" },
   { key: "users", label: "Users & access" },
-  { key: "mail", label: "Email setup" }
+  { key: "mail", label: "Admin" }
 ];
 
 // Screens that only make sense with a job under them. They never appear in

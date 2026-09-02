@@ -6,7 +6,7 @@
 // password, which is the whole point: a client rep signs from their phone.
 
 import { createClient } from "https://esm.sh/@supabase/supabase-js@2";
-import { sendMail, corsHeaders, wrapEmail, esc, recipients, optionalRecipients } from "../_shared/mail.ts";
+import { sendMail, appSettings, corsHeaders, wrapEmail, esc, recipients, optionalRecipients } from "../_shared/mail.ts";
 import { invoicePage, GST_RATE } from "../_shared/invoice.ts";
 import { loadInvoice } from "../_shared/ticketInvoice.ts";
 
@@ -87,7 +87,7 @@ Deno.serve(async (req) => {
     // APPROVAL_BASE_URL is the app's origin, e.g. https://app.vagabonde.ca.
     // Falling back to the functions domain keeps the link working — as plain
     // text — rather than sending nothing at all if the secret is unset.
-    const appBase = (Deno.env.get("APPROVAL_BASE_URL") ?? "").replace(/\/+$/, "");
+    const appBase = ((await appSettings()).approvalBaseUrl ?? "").replace(/\/+$/, "");
     const link = appBase
       ? `${appBase}/approve?t=${token}`
       : `${(Deno.env.get("SUPABASE_URL") ?? "").replace(".supabase.co", ".functions.supabase.co")}/approve-ticket?t=${token}`;

@@ -16,21 +16,23 @@ const RESEND_URL = "https://api.resend.com/emails";
 // address. It's how an admin proves the pipework before DNS is done.
 const TEST_SENDER = "VagaboNDE Field Ops <onboarding@resend.dev>";
 
-// The Email setup screen writes this row; the env vars remain as fallback
-// so an install configured the old way (Supabase secrets) keeps working.
-// Read with the service role — the table is Admin-only under RLS.
-export async function mailSettings() {
+// The Admin screen writes this row; the env vars remain as fallback so an
+// install configured the old way (Supabase secrets) keeps working. Read
+// with the service role — the table is Admin-only under RLS.
+export async function appSettings() {
   let row: Record<string, string | null> = {};
   try {
     const admin = createClient(Deno.env.get("SUPABASE_URL")!, Deno.env.get("SUPABASE_SERVICE_ROLE_KEY")!);
-    const { data } = await admin.from("mail_settings").select("resend_api_key, from_reports, from_billing, reply_to").maybeSingle();
+    const { data } = await admin.from("app_settings").select("resend_api_key, from_reports, from_billing, reply_to, klipy_api_key, approval_base_url").maybeSingle();
     row = data ?? {};
   } catch { /* table missing or unreadable — the env fallbacks decide */ }
   return {
     apiKey: row.resend_api_key || Deno.env.get("RESEND_API_KEY") || "",
     fromReports: row.from_reports || Deno.env.get("MAIL_FROM_REPORTS") || TEST_SENDER,
     fromBilling: row.from_billing || Deno.env.get("MAIL_FROM_BILLING") || TEST_SENDER,
-    replyTo: row.reply_to || Deno.env.get("MAIL_REPLY_TO") || undefined
+    replyTo: row.reply_to || Deno.env.get("MAIL_REPLY_TO") || undefined,
+    klipyApiKey: row.klipy_api_key || Deno.env.get("KLIPY_API_KEY") || "",
+    approvalBaseUrl: row.approval_base_url || Deno.env.get("APPROVAL_BASE_URL") || ""
   };
 }
 
@@ -61,9 +63,9 @@ export async function sendMail(opts: {
   attachments?: Attachment[];
   tag?: string;
 }) {
-  const settings = await mailSettings();
+  const settings = await appSettings();
   if (!settings.apiKey) {
-    throw new Error("Email isn't set up yet — an Admin can add the Resend API key under Email setup.");
+    throw new Error("Email isn't set up yet — an Admin can add the Resend API key on the Admin screen.");
   }
 
   const replyTo = opts.replyTo || settings.replyTo;
