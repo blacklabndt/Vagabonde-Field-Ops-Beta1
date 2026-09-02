@@ -109,7 +109,14 @@ export async function sendMail(opts: {
   // message worth surfacing rather than swallowing.
   const body = await res.json().catch(() => ({}));
   if (!res.ok) {
-    throw new Error(`Resend ${body.statusCode ?? res.status}: ${body.message ?? "send failed"}`);
+    const msg = String(body.message ?? "send failed");
+    // The one refusal an admin can actually cause from inside the app: a
+    // sending address on a domain Resend hasn't verified. Name the fix,
+    // not just the vendor's error.
+    if (/not verified/i.test(msg)) {
+      throw new Error(`Resend refused the sending address ${from}: ${msg} On the Admin screen, clear the sending addresses to go back to testing mode, or use an address on the domain verified at resend.com/domains.`);
+    }
+    throw new Error(`Resend ${body.statusCode ?? res.status}: ${msg}`);
   }
   return body;
 }

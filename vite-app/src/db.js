@@ -1241,6 +1241,18 @@ export const Db = {
     // The approval link is built as `${base}/approve?t=…` and dropped into
     // an email — a bare "app.example.com" renders as dead text in every
     // client's inbox and errors nowhere. Refuse the shapes that can't work.
+    // The sending addresses must live on a domain verified in Resend, and
+    // personal-mail domains can never be — Resend 403s every send "from"
+    // gmail and friends. Refusing here, with the way out named, beats the
+    // trap found in testing: filling these with a personal address turns
+    // testing mode off and breaks all sending at once.
+    const FREEMAIL = /@(gmail|googlemail|hotmail|outlook|live|msn|yahoo|icloud|me\.com|aol|proton|protonmail|shaw|telus)\b/i;
+    for (const [label, v] of [["Reports come from", fromReports], ["Billing comes from", fromBilling]]) {
+      const a = (v || "").trim();
+      if (a && FREEMAIL.test(a)) {
+        throw new Error(`${label} can't be a personal ${a.split("@")[1] || ""} address — Resend only sends from a domain verified in your Resend account. Leave it blank to stay in testing mode, or use an address on the verified company domain.`);
+      }
+    }
     const base = (approvalBaseUrl || "").trim();
     if (base) {
       let parsed = null;

@@ -103,7 +103,9 @@ export function AdminSetupScreen() {
             sending access, and paste it here — that alone sends test emails to the Resend account&rsquo;s
             own inbox, today. To email clients for real: <strong>Domains → Add Domain</strong>, add the DNS
             records Resend shows you at your domain host, wait for it to verify, then fill in the two
-            sending addresses below.
+            sending addresses below — they must be on that verified domain (a personal
+            gmail/hotmail address can never send, and filling these too early turns off
+            the testing mode that can).
           </div>
           <div style={{ display: "flex", flexDirection: "column", gap: 12 }}>
             <Field label="Resend API key">
@@ -114,13 +116,13 @@ export function AdminSetupScreen() {
             <Field label="Reports come from">
               <input className="input" value={form.fromReports}
                 onChange={e => set("fromReports", e.target.value)}
-                placeholder="reports@your-domain.ca — blank until the domain is verified"
+                placeholder="reports@your-company-domain.ca — leave blank until the domain is verified; never a gmail/hotmail address"
                 style={{ width: "100%" }} />
             </Field>
             <Field label="Billing comes from">
               <input className="input" value={form.fromBilling}
                 onChange={e => set("fromBilling", e.target.value)}
-                placeholder="billing@your-domain.ca — blank until the domain is verified"
+                placeholder="billing@your-company-domain.ca — leave blank until the domain is verified; never a gmail/hotmail address"
                 style={{ width: "100%" }} />
             </Field>
             <Field label="Replies go to">
