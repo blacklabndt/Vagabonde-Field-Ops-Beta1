@@ -553,6 +553,87 @@ export const Db = {
   // `transferToId` moves everything to that job. `discard` destroys it with
   // the job. Neither one set, and the database refuses if anything is
   // attached — see 20260815000000.
+  // ── Archive ──────────────────────────────────────────────────────────
+  // Every job raised between two local days (inclusive), oldest first — the
+  // archive's job list. The boundaries are this device's local midnights,
+  // which for the crew is Edmonton: a job raised at 20:00 on 31 December
+  // belongs to that year, whatever UTC says.
+  async listJobsCreatedBetween(fromDay, toDay) {
+    const start = new Date(`${fromDay}T00:00:00`);
+    const end = new Date(`${toDay}T00:00:00`);
+    end.setDate(end.getDate() + 1);
+    const data = await fetchAllPages(async page => {
+      const { data: rows, error, count } = await sbClient
+        .from("jobs")
+        .select("id, job_number, project, lsd, afe, area, method, procedure, status, created_at, client_id, contractor_id, created_by, clients(name), contractors(name), profiles!jobs_created_by_fkey(name)", page === 0 ? { count: "exact" } : {})
+        .gte("created_at", start.toISOString())
+        .lt("created_at", end.toISOString())
+        .order("created_at").order("id")
+        .range(page * RESPONSE_ROW_CAP, (page + 1) * RESPONSE_ROW_CAP - 1);
+      if (error) throw error;
+      return { rows: rows || [], total: count ?? (rows || []).length };
+    });
+    return data.map(shapeJob);
+  },
+
+  // A ticket with everything the archive's text file says about it.
+  async getTicketForArchive(ticketId) {
+    const { data, error } = await sbClient.from("tickets")
+      .select("id, work_date, status, total, delays, client_contact, contractor_contact, approved_at, approved_by_email, approval_sent_at, approval_sent_to, invoiced_at, queried_at, query_text, query_by, profiles(name), ticket_lines(kind, label, unit, quantity, unit_rate, line_order)")
+      .eq("id", ticketId).single();
+    if (error) throw error;
+    const lines = [...(data.ticket_lines || [])].sort((a, b) => Number(a.line_order || 0) - Number(b.line_order || 0));
+    return {
+      id: data.id, workDate: data.work_date, status: data.status, total: Number(data.total || 0), delays: data.delays || "",
+      clientContact: data.client_contact ? data.client_contact.name : "",
+      contractorContact: data.contractor_contact ? data.contractor_contact.name : "",
+      approvedAt: data.approved_at, approvedBy: data.approved_by_email || "",
+      sentAt: data.approval_sent_at, sentTo: data.approval_sent_to || "",
+      invoicedAt: data.invoiced_at, queriedAt: data.queried_at, queryText: data.query_text || "", queryBy: data.query_by || "",
+      tech: data.profiles ? data.profiles.name : "",
+      lines
+    };
+  },
+
+  // A stored PDF, as bytes. Both buckets are private; the signed-in Admin's
+  // read is the RLS decision.
+  async downloadObject(bucket, key) {
+    const { data, error } = await sbClient.storage.from(bucket).download(key);
+    if (error) throw error;
+    return new Uint8Array(await data.arrayBuffer());
+  },
+
+  // The one bulk delete in the app: the archived jobs and everything filed
+  // against them, Admin-only in the database (archive_clear_jobs, definer),
+  // then their PDFs out of storage, then every cache that remembered them.
+  // Storage removal is best effort — the rows are gone by then, and an
+  // orphaned object in a private bucket is untidy, not a record.
+  async archiveClearJobs(jobIds) {
+    const { data, error } = await sbClient.rpc("archive_clear_jobs", { p_job_ids: jobIds });
+    if (error) throw error;
+    const result = data || {};
+    let filesLeft = 0;
+    const removeAll = async (bucket, keys) => {
+      for (let i = 0; i < keys.length; i += 100) {
+        const batch = keys.slice(i, i + 100);
+        const { error: rmErr } = await sbClient.storage.from(bucket).remove(batch);
+        if (rmErr) { filesLeft += batch.length; console.warn(`Couldn't remove ${batch.length} object(s) from ${bucket}:`, rmErr.message); }
+      }
+    };
+    await removeAll("jhas", result.jha_keys || []);
+    await removeAll("reports", result.report_keys || []);
+    invalidate("job_numbers");
+    invalidate("profiles");
+    const keys = await OfflineCache.keys("").catch(() => []);
+    await Promise.all(keys
+      .filter(k => k === "jobs.recent" || /^(job|jhas|reports|tickets|jha\.last|jobs\.client)\./.test(k))
+      .map(k => OfflineCache.remove(k)));
+    return {
+      jobs: Number(result.jobs || 0), tickets: Number(result.tickets || 0),
+      jhas: Number(result.jhas || 0), reports: Number(result.reports || 0), filesLeft
+    };
+  },
+
   async deleteJob({ jobId, transferToId = null, discard = false }) {
     const { data, error } = await sbClient.rpc("delete_job", {
       p_job_id: jobId,
@@ -3293,6 +3374,7 @@ const SAVE_MESSAGES = {
   sendTicketApproval: "Approval sent",
   withdrawTicketApproval: "Approval cancelled — the ticket is a draft again",
   sendPasswordReset: "Set-password link sent",
+  archiveClearJobs: "Archived jobs cleared",
 
   // Email setup
   saveAppSettings: "Settings saved",

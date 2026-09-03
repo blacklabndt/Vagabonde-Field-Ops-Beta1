@@ -184,6 +184,15 @@ session has set `app.confirm_total_wipe = 'yes'`.
   password-reset (Admin-gated) mails the same link to an existing account.
   Both land on the app's own set-password screen. The link's redirect is
   the approval base URL's origin, else the Auth Site URL.
+- Archive (Home, Admin-only dropdown): every job raised in a year or date
+  range, zipped in the browser (vite-app/src/archive.js — a folder per job
+  with Job details.txt, JHAs/, Reports/, Invoices/ as HTML, plus Index.csv
+  and README.txt). Then, behind a typed CLEAR, `archive_clear_jobs(ids)`
+  (Admin, definer) deletes those jobs and everything under them, approved
+  tickets included — unlike delete_job, which refuses them — and the client
+  removes the PDFs from the two buckets. Jobs are chosen by created_at on
+  local days. It is the one bulk delete in the app; keep it behind the
+  dialog's own confirmation.
 - `authenticated` has USAGE on schema `private` (migration 20260903055300).
   A policy expression is stored resolved and never needed it; a SQL or
   plpgsql function that runs as the caller and names `private.user_role()`
