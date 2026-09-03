@@ -1925,21 +1925,19 @@ export const Db = {
   },
 
   async listMyTickets(technicianId) {
-    // The Open tickets screen wants every unbilled ticket this tech raised,
-    // then filters out Invoiced client-side. Two hazards the old bare query
-    // had: Invoiced tickets dominate lifetime volume, and a technician past
-    // 1,000 lifetime tickets would hit the PostgREST cap — sorted newest
-    // first, the rows that vanish are the oldest non-Invoiced ones, exactly
-    // the forgotten Draft an Open-tickets view exists to surface. Filter
-    // Invoiced out at the server (so the working set stays far under the
-    // cap) and page the rest to be certain nothing is dropped.
+    // The Open tickets screen is the tickets this technician still has to
+    // send out: their drafts, per Kyle. Filtered at the server (the working
+    // set stays tiny; sent and billed tickets dominate lifetime volume) and
+    // paged anyway, so a forgotten draft past row 1,000 can never be the one
+    // that silently drops off — that draft is exactly what the screen exists
+    // to surface.
     const data = await fetchAllPages(async page => {
       const { data: rows, error, count } = await sbClient
         .from("tickets")
         .select("id, work_date, status, total, created_at, jobs(job_number, project, clients(name))",
           page === 0 ? { count: "exact" } : {})
         .eq("technician_id", technicianId)
-        .neq("status", "Invoiced")
+        .eq("status", "Draft")
         .order("created_at", { ascending: false }).order("id")
         .range(page * RESPONSE_ROW_CAP, (page + 1) * RESPONSE_ROW_CAP - 1);
       if (error) throw error;

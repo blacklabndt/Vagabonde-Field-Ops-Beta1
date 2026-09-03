@@ -2,23 +2,21 @@ import React from "react";
 import { Blueprint, Btn, TableScroll, StatusTag } from "./common.jsx";
 import { money } from "../data.js";
 
-// Open tickets — a technician's own tickets that haven't been sent out for
-// billing yet (anything short of Invoiced): drafts to finish, and tickets
-// awaiting the client's signature to chase. The admin-facing Billing tracker
-// covers every technician's tickets; this is the same idea narrowed to "my
-// tickets, my desk."
+// Open tickets — the tickets this person still has to send out to the
+// client: their drafts, and nothing else. Per Kyle. A ticket that has gone
+// out is the client's to sign and the office's to chase (the Billing tracker
+// covers every technician's tickets); once it has left the truck it has no
+// business on this list, and the drawer badge counts the same set.
 
 export function OpenTicketsScreen({ tickets, loading, onOpenTicket, currentUser }) {
-  const open = tickets.filter(t => t.status !== "Invoiced");
-  const drafts = open.filter(t => t.status === "Draft");
-  const awaiting = open.filter(t => t.status === "Awaiting approval");
-  const approved = open.filter(t => t.status === "Approved");
+  const open = tickets.filter(t => t.status === "Draft");
   // Integer-cents sum, per the house money rule (gstOn in data.js) — never
   // a running float of dollars, which drifts a half-cent low at some totals.
   const sum = arr => arr.reduce((s, t) => s + Math.round(t.amount * 100), 0) / 100;
-  // Amounts are an office concern (billing, chasing signatures) — a
-  // technician just needs to see what's open and finish it.
+  // Amounts are an office concern — a technician just needs to see what is
+  // still to send and finish it.
   const showAmounts = currentUser.role === "Admin" || currentUser.role === "Coordinator";
+  const oldest = open.reduce((m, t) => Math.max(m, t.age || 0), 0);
 
   return (
     <div className="page">
@@ -26,25 +24,20 @@ export function OpenTicketsScreen({ tickets, loading, onOpenTicket, currentUser 
         <div className="kicker">My tickets</div>
         <h2 style={{ fontSize: 34, margin: "2px 0 0" }}>Open tickets</h2>
         <div style={{ fontSize: 14, color: "color-mix(in srgb, var(--color-text) 60%, transparent)", marginTop: 4 }}>
-          Your tickets that haven't gone out for billing yet.
+          Your tickets that still have to go out to the client. Once a ticket is sent it leaves this list.
         </div>
       </div>
 
-      <div style={{ display: "grid", gridTemplateColumns: "repeat(3, 1fr)", gap: 16, marginBottom: 20 }} className="grid-2col">
+      <div style={{ display: "grid", gridTemplateColumns: "repeat(2, 1fr)", gap: 16, marginBottom: 20 }} className="grid-2col">
         <Blueprint className="stat-tile">
-          <div className="stat-label">Drafts</div>
-          <div className="stat-figure">{drafts.length}</div>
-          <div className="stat-note">still need to be finished</div>
+          <div className="stat-label">Still to send</div>
+          <div className="stat-figure" style={{ color: open.length ? "var(--color-accent-700)" : "inherit" }}>{open.length}</div>
+          <div className="stat-note">{showAmounts && open.length ? `${money(sum(open))} not yet sent` : "drafts waiting to go out"}</div>
         </Blueprint>
         <Blueprint className="stat-tile">
-          <div className="stat-label">Awaiting signature</div>
-          <div className="stat-figure" style={{ color: "var(--color-accent-700)" }}>{awaiting.length}</div>
-          <div className="stat-note">{showAmounts ? `${money(sum(awaiting))} waiting on the client` : "waiting on the client"}</div>
-        </Blueprint>
-        <Blueprint className="stat-tile">
-          <div className="stat-label">Approved</div>
-          <div className="stat-figure">{approved.length}</div>
-          <div className="stat-note">{showAmounts ? `${money(sum(approved))} ready for billing` : "ready for billing"}</div>
+          <div className="stat-label">Oldest</div>
+          <div className="stat-figure">{open.length ? (oldest === 0 ? "today" : `${oldest} d`) : "—"}</div>
+          <div className="stat-note">since the oldest draft was raised</div>
         </Blueprint>
       </div>
 
@@ -57,7 +50,7 @@ export function OpenTicketsScreen({ tickets, loading, onOpenTicket, currentUser 
           <tbody>
             {!loading && !open.length && (
               <tr><td colSpan={showAmounts ? 8 : 7} style={{ color: "color-mix(in srgb, var(--color-text) 55%, transparent)" }}>
-                Nothing open — every ticket you've raised is billed.
+                Nothing to send — every ticket you've raised has gone out to the client.
               </td></tr>
             )}
             {!loading && open.map(t => (
@@ -66,10 +59,10 @@ export function OpenTicketsScreen({ tickets, loading, onOpenTicket, currentUser 
                     Same shape as the ticket rows on Job detail: a button in
                     a cell, Enter or Space to open. */}
                 <td className="clickable" style={{ fontFamily: "var(--font-heading)", fontWeight: 600 }}
-                  title={t.status === "Draft" ? "Open this draft to finish it" : "Open the job this ticket is on"}
+                  title="Open this draft to finish and send it"
                   tabIndex={0}
                   role="button"
-                  aria-label={t.status === "Draft" ? `Open draft ticket ${t.id}` : `Open the job for ticket ${t.id}`}
+                  aria-label={`Open draft ticket ${t.id}`}
                   onKeyDown={e => { if (e.key === "Enter" || e.key === " ") { e.preventDefault(); onOpenTicket(t); } }}
                   onClick={() => onOpenTicket(t)}>{t.id}</td>
                 <td>{t.date}</td>
@@ -78,7 +71,7 @@ export function OpenTicketsScreen({ tickets, loading, onOpenTicket, currentUser 
                 <td>{t.project}<div style={{ fontSize: 11, color: "color-mix(in srgb, var(--color-text) 55%, transparent)" }}>{t.client}</div></td>
                 {showAmounts && <td className="tabular">{money(t.amount)}</td>}
                 <td><StatusTag status={t.status} /></td>
-                <td>{t.status === "Draft" && <Btn variant="secondary" onClick={() => onOpenTicket(t)}>Finish</Btn>}</td>
+                <td><Btn variant="secondary" onClick={() => onOpenTicket(t)}>Finish &amp; send</Btn></td>
               </tr>
             ))}
           </tbody>

@@ -476,7 +476,8 @@ export function App() {
   // …and again on arriving at the screen. Keyed on `screen` alone: keyed on
   // both, signing in ran this a second time for the same list.
   useEffect(() => { if (currentUser && screen === "mytickets") loadMyTickets(); }, [screen]);
-  const openMyTicketsCount = myTickets.filter(t => t.status !== "Invoiced").length;
+  // The same set Open tickets shows: drafts still to be sent to the client.
+  const openMyTicketsCount = myTickets.filter(t => t.status === "Draft").length;
 
   if (checkingSession) {
     return (
