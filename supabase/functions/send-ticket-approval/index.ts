@@ -7,7 +7,7 @@
 
 import { createClient } from "https://esm.sh/@supabase/supabase-js@2";
 import { sendMail, appSettings, corsHeaders, wrapEmail, esc, recipients, optionalRecipients } from "../_shared/mail.ts";
-import { invoicePage, GST_RATE } from "../_shared/invoice.ts";
+import { invoicePage, GST_RATE, invoiceTotals } from "../_shared/invoice.ts";
 import { loadInvoice, TICKET_LINES_ORDER } from "../_shared/ticketInvoice.ts";
 import { hashToken } from "../_shared/approvalToken.ts";
 
@@ -67,9 +67,12 @@ Deno.serve(async (req) => {
     // the cent, summed in integer cents: the same formula the database
     // stores (migration 20260818140051) and invoice.ts prints.
     const lineTotal = (l: any) => Math.round(Number(l.quantity || 0) * Number(l.unit_rate || 0) * 100) / 100;
-    const subtotal = lines.reduce((s: number, l: any) => s + Math.round(lineTotal(l) * 100), 0) / 100;
-    const gst = Math.round(Math.round(subtotal * 100) * GST_RATE) / 100;
-    const grand = Math.round((subtotal + gst) * 100) / 100;
+    // One formula, shared with the invoice and the approval page — a third
+    // hand-rolled copy here was a third number free to disagree.
+    const totals = invoiceTotals({ lines } as any);
+    const subtotal = totals.subtotal / 100;
+    const gst = totals.gst / 100;
+    const grand = totals.grand / 100;
 
     // Single-use token, 30 days. Long enough to survive a rep's holiday,
     // short enough that a stale forwarded email stops working.

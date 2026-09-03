@@ -19,7 +19,8 @@
 
 import { createClient } from "https://esm.sh/@supabase/supabase-js@2";
 import { esc } from "../_shared/mail.ts";
-import { renderInvoice, invoiceCss } from "../_shared/invoice.ts";
+import { renderInvoice, invoiceCss, invoiceTotals, moneyCents } from "../_shared/invoice.ts";
+import type { InvoiceData } from "../_shared/invoice.ts";
 import { loadInvoice, TICKET_INVOICE_SELECT } from "../_shared/ticketInvoice.ts";
 import { hashToken, invoiceFingerprint } from "../_shared/approvalToken.ts";
 
@@ -41,13 +42,24 @@ const page = (inner: string) => new Response(
 ${invoiceCss}
   .plain { width:min(560px,100%); margin:0 auto; background:var(--paper);
            border:1px solid var(--hard); padding:26px 24px }
-  .kicker { font-size:11px; letter-spacing:.12em; text-transform:uppercase; color:var(--accent) }
+  .kicker { font-size:12px; letter-spacing:.12em; text-transform:uppercase; color:var(--accent) }
   h1 { font-size:26px; margin:6px 0 4px; font-weight:600 }
   .meta { color:var(--mute); margin-bottom:20px; font-size:13px }
   /* Reads as the foot of the invoice rather than as something floating below
      it: same width, same paper, butted straight onto the sheet above. */
   .actions { width:min(940px,100%); margin:0 auto; background:var(--paper);
              border:1px solid var(--hard); border-top:0; padding:16px 22px 20px }
+  /* The ask, above the bill that justifies it. Same sheet width, butted onto
+     the TOP of the invoice the way .actions is butted onto the bottom, so
+     the three read as one document rather than as a banner over a page. */
+  .ask { width:min(940px,100%); margin:0 auto; background:var(--paper);
+         border:1px solid var(--hard); border-bottom:0; padding:13px 22px;
+         display:flex; flex-wrap:wrap; align-items:baseline; gap:4px 16px }
+  .ask .tkt { font-size:15px; font-weight:600 }
+  .ask .due { font-size:15px; font-variant-numeric:tabular-nums }
+  /* margin-left:auto parks the link at the right on a wide screen and, once
+     the strip wraps on a phone, on its own line under the amount. */
+  .ask .jump { margin-left:auto; font-size:15px; font-weight:600; color:var(--accent) }
   /* display:block on the input and a margin on the button. Without both the
      button painted over the name box — the input is inline by default, so it
      did not reserve its own line, and the button had no gap above it. */
@@ -65,6 +77,10 @@ ${invoiceCss}
            cursor:pointer }
   button:hover { background:#4a6d90 }
   button:disabled { opacity:.5; cursor:default }
+  /* Every note this page speaks in its own voice: the receipt lines and the
+     legal line under Approve. Deliberately NOT the invoice's .note, which is
+     9.5px fine print for a legend — what a rep is told they are agreeing to
+     has to be readable on the phone they are agreeing on. */
   .signnote { font-size:12px; color:var(--mute); margin-top:12px }
   /* The signing surface. touch-action:none or the page scrolls instead of
      inking on the one device most reps sign from. */
@@ -80,8 +96,9 @@ ${invoiceCss}
   button.dl { background:none; border:1px solid var(--accent); color:var(--accent) }
   button.dl:hover { background:var(--band); color:var(--accent) }
   /* Printing (or Save as PDF) keeps the bill and drops the buttons — the
-     invoice's own print rules already strip the grey backdrop. */
-  @media print { .actions { display:none } }
+     invoice's own print rules already strip the grey backdrop. The ask goes
+     with them: "Sign at the bottom" means nothing on paper. */
+  @media print { .actions, .ask { display:none } }
 </style></head><body>${inner}</body></html>`,
   { headers: { "Content-Type": "text/html; charset=utf-8" } }
 );
@@ -159,9 +176,16 @@ async function handle(req: Request): Promise<Response> {
   // What this page is asking the rep to sign for, as of right now.
   const fingerprint = await invoiceFingerprint(invoiceData!);
 
+  // The one-line ask that rides above the sheet. Built once, here, so it
+  // reaches every rendering that still wants a signature — the first view
+  // and each re-ask after a refused submit — and none of the ones that
+  // don't: the already-approved page returns above this, and the thank-you
+  // and race-lost pages below it are receipts, with nothing left to ask for.
+  const ask = askStrip(invoiceData!);
+
   if (req.method === "POST") {
     if (Number(req.headers.get("content-length") || 0) > MAX_BODY_BYTES) {
-      return page(header + `<div class="actions"><p style="color:#8a3b3b;font-size:13px">That signature image is too large — try a smaller photo, or just type your name.</p></div>` + signForm(fingerprint));
+      return page(ask + header + `<div class="actions"><p style="color:#8a3b3b;font-size:13px">That signature image is too large — try a smaller photo, or just type your name.</p></div>` + signForm(fingerprint));
     }
     const form = await req.formData();
     // The page the rep is submitting from showed a particular set of charges.
@@ -169,11 +193,11 @@ async function handle(req: Request): Promise<Response> {
     // show the current bill and ask again, rather than recording a signature
     // against figures the rep never saw.
     if (String(form.get("fp") ?? "") !== fingerprint) {
-      return page(header + `<div class="actions"><p style="color:#8a3b3b;font-size:13px">This ticket has changed since this page was opened. Please look over the charges above and sign again below.</p></div>` + signForm(fingerprint));
+      return page(ask + header + `<div class="actions"><p style="color:#8a3b3b;font-size:13px">This ticket has changed since this page was opened. Please look over the charges above and sign again below.</p></div>` + signForm(fingerprint));
     }
     const name = String(form.get("name") ?? "").trim().slice(0, MAX_NAME_CHARS);
     if (!name) {
-      return page(header + `<div class="actions"><p style="color:#8a3b3b;font-size:13px">Please type your name to sign.</p></div>` + signForm(fingerprint));
+      return page(ask + header + `<div class="actions"><p style="color:#8a3b3b;font-size:13px">Please type your name to sign.</p></div>` + signForm(fingerprint));
     }
     // The drawn/uploaded signature, if one came along. Validated to exactly
     // a small PNG data URL — anything else (oversized, wrong type, not a
@@ -236,7 +260,26 @@ async function handle(req: Request): Promise<Response> {
       ${downloadButton()}</div>`);
   }
 
-  return page(header + signForm(fingerprint));
+  return page(ask + header + signForm(fingerprint));
+}
+
+// What is being asked, in one line, before the document that justifies it.
+//
+// A phone opens this page on the invoice masthead — which says who is
+// billing, not what is wanted — and the Approve button is two or three
+// screens below the charge tables. Which ticket, how much, and where to
+// sign, before any of that.
+//
+// The amount comes from invoiceTotals, the same integer-cent arithmetic the
+// sheet underneath prints from: a formula of its own here would be a second
+// number free to disagree with the one being signed for, and the figure a
+// rep reads first is the figure they remember.
+function askStrip(d: InvoiceData) {
+  return `<div class="ask">
+    <span class="tkt">Ticket ${esc(d.ticket.id)}</span>
+    <span class="due">${esc(moneyCents(invoiceTotals(d).grand))} due</span>
+    <a class="jump" href="#signform">Sign at the bottom &darr;</a>
+  </div>`;
 }
 
 // The typed name remains the signature of record; the pad adds the rep's
@@ -260,7 +303,7 @@ function signForm(fingerprint: string) {
     </div>
     <input type="hidden" name="signature" id="sigdata">
     <button type="submit">Approve this ticket</button>
-    <p class="note">Approving records your name, the time, and your IP address as the signature. Questions before you sign? Reply to the email instead.</p>
+    <p class="signnote">Approving records your name, the time, and your IP address as the signature. Questions before you sign? Reply to the email instead.</p>
   </form>
   <script>
   (function () {
@@ -278,6 +321,54 @@ function signForm(fingerprint: string) {
       dirty = false;
     }
     reset();
+
+    // A canvas keeps its pixel buffer when its CSS box changes, so after a
+    // rotation the old bitmap is stretched across the new width while the
+    // drawing transform still describes the old one — every later stroke
+    // lands somewhere the finger isn't. Re-sizing is the only fix.
+    //
+    // Of the two ways to re-size, this one keeps the ink: the bitmap is
+    // copied to an offscreen canvas and redrawn into the new box, rather
+    // than cleared with dirty reset. Both leave the pad aligned; only this
+    // one leaves a rep who rotated the phone mid-signature still holding
+    // their signature. It stretches with the box it was drawn in, which is
+    // a mark slightly wider than it was, not a mark in the wrong place.
+    //
+    // Width only, and debounced. A phone collapsing its URL bar fires resize
+    // for a height change alone, and a pad that re-scales itself under a
+    // half-drawn signature every time the address bar moves is worse than
+    // the bug.
+    var lastWidth = pad.clientWidth;
+    var resizeTimer = 0;
+    function refit() {
+      var w = pad.clientWidth;
+      if (w <= 0 || w === lastWidth) return;
+      lastWidth = w;
+      // Ends any stroke caught mid-rotation. Its last point is in the old
+      // box's coordinates, and joining it to the next one would draw the one
+      // crooked line all of this exists to prevent.
+      drawing = false;
+      var keep = null;
+      if (dirty && pad.width > 0 && pad.height > 0) {
+        keep = document.createElement("canvas");
+        keep.width = pad.width; keep.height = pad.height;
+        keep.getContext("2d").drawImage(pad, 0, 0);
+      }
+      reset(); // re-sizes, and clears dirty along with the pad
+      if (keep) {
+        // reset() left the transform in CSS pixels, so the old ink goes back
+        // as the full box rather than as device pixels.
+        ctx.drawImage(keep, 0, 0, pad.clientWidth, pad.clientHeight);
+        dirty = true;
+      }
+    }
+    function onResize() {
+      clearTimeout(resizeTimer);
+      resizeTimer = setTimeout(refit, 150);
+    }
+    window.addEventListener("resize", onResize);
+    window.addEventListener("orientationchange", onResize);
+
     var drawing = false, lx = 0, ly = 0;
     function pos(e) { var r = pad.getBoundingClientRect(); return [e.clientX - r.left, e.clientY - r.top]; }
     pad.addEventListener("pointerdown", function (e) {

@@ -14,6 +14,11 @@ const PASSWORD = process.env.E2E_PASSWORD;
 // One client from the load-test seed with plenty of active jobs.
 const SEED_CLIENT = "Athabasca Energy";
 
+// This technician's ticket numbers today, by shape (initials-MMDD-YY-seq).
+const today = new Date();
+const mmdd = String(today.getMonth() + 1).padStart(2, "0") + String(today.getDate()).padStart(2, "0");
+const TICKET_RX = new RegExp(`AT-${mmdd}-\\d{2}-\\d{2}`);
+
 test.beforeEach(async ({ page }) => {
   test.skip(!EMAIL || !PASSWORD, "Set E2E_EMAIL and E2E_PASSWORD in vite-app/e2e/.env");
   // Already signed in — auth.setup.js banked the session into storageState.
@@ -118,4 +123,45 @@ test("an empty draft saves, reopens and cancels", async ({ page }, testInfo) => 
   page.once("dialog", d => d.accept());
   await page.getByRole("button", { name: "Cancel this ticket" }).click();
   await expect(page.getByText("Job detail")).toBeVisible({ timeout: 15_000 });
+});
+
+test("Create ticket on Job detail opens the editor without filing a draft", async ({ page }, testInfo) => {
+  test.skip(testInfo.project.name !== "desktop", "one writer is enough — mobile covers the picker");
+
+  // Borrow the + Ticket dialog's job list to learn a seed job number, then
+  // walk to that job from the board the way a technician would.
+  await page.getByRole("button", { name: "+ Ticket" }).click();
+  const list = page.locator("#ticket-client-list");
+  await expect(list).toBeVisible({ timeout: 10_000 });
+  await list.locator("[role='option']", { hasText: SEED_CLIENT }).first().click();
+  const jobSelect = page.getByLabel("Active jobs for this client");
+  await expect(async () => {
+    expect((await jobSelect.locator("option").count())).toBeGreaterThan(1);
+  }).toPass({ timeout: 10_000 });
+  const jobNumber = (await jobSelect.locator("option").nth(1).textContent()).trim().split(" — ")[0];
+  await page.getByRole("dialog").getByRole("button", { name: "Cancel" }).click();
+
+  const openJob = async () => {
+    await page.getByPlaceholder(/^Search /).fill(jobNumber);
+    const row = page.locator("table tbody tr", { hasText: jobNumber }).first();
+    await expect(row).toBeVisible({ timeout: 15_000 });
+    await row.click();
+    await expect(page.getByText("Job detail")).toBeVisible({ timeout: 15_000 });
+    await expect(page.getByText("Tickets raised")).toBeVisible({ timeout: 15_000 });
+  };
+  await openJob();
+  const before = await page.locator("tr", { hasText: TICKET_RX }).count();
+
+  // The dialog used to insert an empty draft on Create; now it only chooses
+  // the day and the reps and hands them to the editor.
+  await page.getByRole("button", { name: "+ Create ticket" }).click();
+  await page.getByRole("dialog").getByRole("button", { name: "Create ticket" }).click();
+  await expect(page.getByRole("button", { name: "Save draft" })).toBeEnabled({ timeout: 15_000 });
+  await expect(page.getByRole("button", { name: "Cancel this ticket" })).toHaveCount(0);
+
+  // Walk away without saving: nothing was filed, the job's list is as it was.
+  await page.getByRole("button", { name: "Sections" }).click();
+  await page.getByRole("navigation", { name: "Sections" }).getByRole("button", { name: "Home" }).first().click();
+  await openJob();
+  await expect(page.locator("tr", { hasText: TICKET_RX })).toHaveCount(before);
 });

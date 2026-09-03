@@ -138,6 +138,21 @@ session has set `app.confirm_total_wipe = 'yes'`.
   status changes are Admin-only, client changes Admin/Coordinator. There is
   no direct DELETE on jobs — `delete_job` is the only door, and a non-admin
   transfer may target only a job they raised.
+- Prices are for Admins and Technicians (per Kyle): rate_lines,
+  rate_overrides, rate_line_history and ticket_lines SELECT require the
+  role as well as the tab. Job detail hides amounts and the invoice view
+  from everyone else. A Coordinator cannot price a ticket until the role is
+  added to those four policies.
+- Invoicing is `mark_tickets_invoiced(ids, invoiced)` (Admin, definer) —
+  Approved ↔ Invoiced with `invoiced_at`; the approved-ticket immutability
+  policies are untouched and this RPC is the only door.
+- Idempotent saves: tickets.client_key / reports.client_key (unique). The
+  ticket editor mints a key per unsaved ticket (kept in its recovery copy
+  and the outbox payload); createTicket/uploadReport return the existing
+  row for a repeated key instead of inserting again.
+- Job detail's Create ticket dialog inserts nothing: it hands a seed (work
+  date, this ticket's reps) to the editor, which saves — and queues — like
+  a ticket started from Home.
 
 ## People
 

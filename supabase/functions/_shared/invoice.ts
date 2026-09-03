@@ -52,6 +52,10 @@ export interface InvoiceData {
 const money = (n: number | string) =>
   "$" + Number(n || 0).toLocaleString("en-CA", { minimumFractionDigits: 2, maximumFractionDigits: 2 });
 
+// The same, for an amount carried as integer cents — which is how every
+// total below is computed, and how it stays exact until the moment it prints.
+export const moneyCents = (cents: number) => money(cents / 100);
+
 const qty = (n: number | string) => {
   const v = Number(n || 0);
   return Number.isInteger(v) ? String(v) : String(Math.round(v * 100) / 100);
@@ -84,6 +88,28 @@ const sigImage = (v: string | null | undefined) =>
   v && SIG_SHAPE.test(v)
     ? `<img class="sigimg" src="${v}" alt="Signature">`
     : "";
+
+// A line's billable amount, in cents: its product rounded to the cent — the
+// same formula the database stores (sync_ticket_total, migration
+// 20260818140051), so the printed line totals sum to exactly the printed
+// subtotal, and both match the stored ticket total to the cent.
+const lineCents = (l: InvoiceLine) =>
+  Math.round(Number(l.quantity || 0) * Number(l.unit_rate || 0) * 100);
+
+// Subtotal, GST and grand total, all in integer cents — floats drift, cents
+// don't. GST is rounded on the cent subtotal, mirroring gstOn in
+// vite-app/src/data.js: rounding on dollars instead puts 408 of the first
+// 500,000 whole-cent subtotals a cent low, and this must match the app to
+// the cent.
+//
+// Exported because the approval page now quotes the amount due above the
+// sheet. A second copy of this arithmetic there would be a second number
+// free to disagree with the bill the client is being asked to sign.
+export function invoiceTotals(d: InvoiceData) {
+  const subtotal = (d.lines || []).reduce((s, l) => s + lineCents(l), 0);
+  const gst = Math.round(subtotal * GST_RATE);
+  return { subtotal, gst, grand: subtotal + gst };
+}
 
 export const invoiceCss = `
   :root{--ink:#1d1f20;--mute:#6b6d6e;--line:rgba(29,31,32,.30);--hard:rgba(29,31,32,.55);
@@ -151,23 +177,10 @@ export function renderInvoice(d: InvoiceData): string {
   const welds = (d.lines || []).filter(l => l.kind === "weld");
   const charges = (d.lines || []).filter(l => l.kind !== "weld");
 
-  // A line's billable amount is its product rounded to the cent — the same
-  // formula the database stores (sync_ticket_total, migration
-  // 20260818140051), so the printed line totals sum to exactly the printed
-  // subtotal, and both match the stored ticket total to the cent.
-  const lineTotal = (l: InvoiceLine) =>
-    Math.round(Number(l.quantity || 0) * Number(l.unit_rate || 0) * 100) / 100;
-
   // Computed from the lines, never trusted from the caller: the stored total
   // and the sum of what is printed must agree, and if they ever cannot, the
   // printed lines are the ones the client is being asked to sign for.
-  // Summed in integer cents — floats drift, cents don't.
-  const subtotal = (d.lines || []).reduce((s, l) => s + Math.round(lineTotal(l) * 100), 0) / 100;
-  // Rounded on integer cents — see gstOn in vite-app/src/data.js. Rounding
-  // on dollars puts 408 of the first 500,000 whole-cent subtotals a cent
-  // low, and this must match the app to the cent.
-  const gst = Math.round(Math.round(subtotal * 100) * GST_RATE) / 100;
-  const grand = Math.round((subtotal + gst) * 100) / 100;
+  const total = invoiceTotals(d);
 
   const signed = d.ticket.approved_at || d.ticket.status === "Approved" || d.ticket.status === "Invoiced";
 
@@ -176,7 +189,7 @@ export function renderInvoice(d: InvoiceData): string {
         <td>${esc(l.label)}</td>
         <td class="num">${qty(l.quantity)}${l.unit ? " " + esc(l.unit) : ""}</td>
         <td class="num">${money(l.unit_rate)}</td>
-        <td class="num">${money(lineTotal(l))}</td>
+        <td class="num">${moneyCents(lineCents(l))}</td>
       </tr>`).join("")
     : `<tr><td colspan="4" class="mute">None on this ticket.</td></tr>`;
 
@@ -259,9 +272,9 @@ export function renderInvoice(d: InvoiceData): string {
   <table><tr><td>${esc(d.ticket.delays).replace(/\n/g, "<br>")}</td></tr></table>` : ""}
 
   <table class="totals">
-    <tr><td class="k">Subtotal</td><td class="v">${money(subtotal)}</td></tr>
-    <tr><td class="k">GST @ ${(GST_RATE * 100).toFixed(0)}%</td><td class="v">${money(gst)}</td></tr>
-    <tr class="grand"><td>Total due</td><td class="v">${money(grand)}</td></tr>
+    <tr><td class="k">Subtotal</td><td class="v">${moneyCents(total.subtotal)}</td></tr>
+    <tr><td class="k">GST @ ${(GST_RATE * 100).toFixed(0)}%</td><td class="v">${moneyCents(total.gst)}</td></tr>
+    <tr class="grand"><td>Total due</td><td class="v">${moneyCents(total.grand)}</td></tr>
   </table>
 
   ${signed ? `

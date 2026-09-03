@@ -62,8 +62,15 @@ export function OpenTicketsScreen({ tickets, loading, onOpenTicket, currentUser 
             )}
             {!loading && open.map(t => (
               <tr key={t.id}>
+                {/* The way into a ticket, and it answered only to a mouse.
+                    Same shape as the ticket rows on Job detail: a button in
+                    a cell, Enter or Space to open. */}
                 <td className="clickable" style={{ fontFamily: "var(--font-heading)", fontWeight: 600 }}
                   title={t.status === "Draft" ? "Open this draft to finish it" : "Open the job this ticket is on"}
+                  tabIndex={0}
+                  role="button"
+                  aria-label={t.status === "Draft" ? `Open draft ticket ${t.id}` : `Open the job for ticket ${t.id}`}
+                  onKeyDown={e => { if (e.key === "Enter" || e.key === " ") { e.preventDefault(); onOpenTicket(t); } }}
                   onClick={() => onOpenTicket(t)}>{t.id}</td>
                 <td>{t.date}</td>
                 <td className="tabular">{t.age === 0 ? "today" : t.age + " d"}</td>

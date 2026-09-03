@@ -1,7 +1,7 @@
 import React, { useState, useEffect, useRef } from "react";
 import { TABS, CONTEXT_TABS, ROLE_PRESETS, TECH_LEVELS } from "../data.js";
 import { Db } from "../db.js";
-import { UNIVERSAL_TABS, tabList, Blueprint, Btn, CheckBox, TagX, Field, Dialog, ErrorBox, Switch, emailIn, useMissingFields, SearchSelect, Loading } from "./common.jsx";
+import { UNIVERSAL_TABS, tabList, Blueprint, Btn, CheckBox, TagX, Field, Dialog, ErrorBox, Switch, emailIn, useMissingFields, SearchSelect, Loading, RequiredLeft } from "./common.jsx";
 
 export function UsersAccessScreen({ currentUser }) {
   const [users, setUsers] = useState([]);
@@ -73,6 +73,10 @@ export function UsersAccessScreen({ currentUser }) {
       setError("That preset doesn't include Users & access, so resetting your own account would lock you out of this screen.");
       return;
     }
+    // It throws away every tick made by hand on this account, and the only
+    // way back is to remember what they were — so it asks, like the other
+    // one-tap undoings on this screen.
+    if (!confirm(`Reset ${account.displayName}'s access to the ${account.role} preset? Their sections are replaced by that role's defaults — this can't be undone.`)) return;
     setError("");
     const acctId = account.id;
     setUsers(p => p.map(u => u.id === acctId ? { ...u, tab_access: tabs } : u));
@@ -350,6 +354,16 @@ function NewUserDialog({ onClose, onCreated }) {
   const miss = useMissingFields();
   const set = (k, v) => { miss.fixed(k); setForm(p => ({ ...p, [k]: v })); };
 
+  // What submit() below is about to refuse, counted as it is typed. Every
+  // line here is one of its checks — including the password's length, which
+  // is why a half-typed one still counts as outstanding.
+  const requiredLeft = [
+    !form.firstName.trim(),
+    !form.lastName.trim(),
+    !form.email.trim() || !emailIn(form.email),
+    form.password.length < 8
+  ].filter(Boolean).length;
+
   const submit = async () => {
     // Named individually so the highlight lands on the empty one — the old
     // check tested all three together and could only say "all three".
@@ -378,24 +392,27 @@ function NewUserDialog({ onClose, onCreated }) {
   };
 
   return (
-    <Dialog title="New user" onClose={onClose} actions={<><Btn variant="secondary" onClick={onClose}>Cancel</Btn><Btn variant="primary" onClick={submit} disabled={saving}>{saving ? "Creating…" : "Create account"}</Btn></>}>
+    <Dialog title="New user" onClose={onClose} actions={<><RequiredLeft count={requiredLeft} style={{ marginRight: "auto", alignSelf: "center" }} /><Btn variant="secondary" onClick={onClose}>Cancel</Btn><Btn variant="primary" onClick={submit} disabled={saving}>{saving ? "Creating…" : "Create account"}</Btn></>}>
       <ErrorBox>{error}</ErrorBox>
       <div style={{ fontSize: 12, color: "color-mix(in srgb, var(--color-text) 60%, transparent)" }}>
         The account is ready the moment it's created — you made it, so there's no confirmation email; give them the password and they can sign in.
       </div>
       <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 12 }}>
-        <Field label="First name" missing={miss.is("firstName")}>
+        <Field label="First name" required missing={miss.is("firstName")}>
           <input {...miss.props("firstName")} value={form.firstName} onChange={e => set("firstName", e.target.value)} />
         </Field>
-        <Field label="Last name" missing={miss.is("lastName")}>
+        <Field label="Last name" required missing={miss.is("lastName")}>
           <input {...miss.props("lastName")} value={form.lastName} onChange={e => set("lastName", e.target.value)} />
         </Field>
       </div>
-      <Field label="Email" missing={miss.is("email")}>
+      <Field label="Email" required missing={miss.is("email")}>
         <input {...miss.props("email")} type="email" value={form.email} onChange={e => set("email", e.target.value)} />
       </Field>
-      <Field label="Temporary password" missing={miss.is("password")}>
-        <input {...miss.props("password")} type="password" value={form.password} onChange={e => set("password", e.target.value)} placeholder="min. 6 characters" />
+      {/* The floor is eight, and has been since the reset screen set it —
+          the placeholder said six, so a password the form was about to
+          refuse looked like it met the rule. */}
+      <Field label="Temporary password" required missing={miss.is("password")}>
+        <input {...miss.props("password")} type="password" value={form.password} onChange={e => set("password", e.target.value)} placeholder="min. 8 characters" />
       </Field>
       <Field label="Role">
         <select className="input" value={form.role} onChange={e => set("role", e.target.value)}>

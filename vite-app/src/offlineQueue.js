@@ -149,7 +149,13 @@ export const OfflineQueue = {
   // Who the outbox belongs to from now on — set at sign-in, cleared at
   // sign-out (App.jsx). Items queued while nobody is signed in carry no
   // owner, which the filter above reads as "whoever is here".
-  setOwner(profileId) { oqOwner = profileId || null; },
+  setOwner(profileId) {
+    oqOwner = profileId || null;
+    // The badge and the panel hold whatever list they were last handed;
+    // a new owner means a different list, so hand it out again — without
+    // this, the next person on a shared tablet saw the last one's outbox.
+    oqNotify();
+  },
 
   async enqueue(type, payload) {
     const id = (crypto.randomUUID ? crypto.randomUUID() : String(Date.now()) + Math.random());

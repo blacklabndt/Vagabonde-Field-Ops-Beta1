@@ -2,7 +2,7 @@ import React, { useState, useEffect, useRef } from "react";
 import { primaryContact } from "../data.js";
 import { Db } from "../db.js";
 import { OfflineQueue } from "../offlineQueue.js";
-import { Blueprint, Btn, TableScroll, TagX, Field, Dialog, ErrorBox, StatusTag, useMissingFields, RowsPerPage, useRowsPerPage, SearchSelect } from "./common.jsx";
+import { Blueprint, Btn, TableScroll, TagX, Field, Dialog, ErrorBox, StatusTag, useMissingFields, RowsPerPage, useRowsPerPage, SearchSelect, RequiredLeft } from "./common.jsx";
 
 // What the error box calls each field, kept in step with its label above the
 // box it points at — "Site · LSD is required" is no help if the label reads
@@ -207,7 +207,18 @@ export function HomeScreen({ onCreateJob, onOpenJob, onStartTicket, currentUser,
                 </td></tr>
               )}
               {rows.map(j => (
-                <tr key={j.id} className="clickable" onClick={() => onOpenJob(j)}>
+                // A row that only answers to a mouse leaves the board
+                // unusable from a keyboard, which is how the office works.
+                // Same shape as the ticket rows on Job detail: the row is
+                // the button, and only its own key presses count.
+                <tr key={j.id} className="clickable" onClick={() => onOpenJob(j)}
+                  tabIndex={0}
+                  role="button"
+                  aria-label={`Open job ${j.id} — ${j.project || "no project name"}`}
+                  onKeyDown={e => {
+                    if (e.target !== e.currentTarget) return;
+                    if (e.key === "Enter" || e.key === " ") { e.preventDefault(); onOpenJob(j); }
+                  }}>
                   <td><span style={{ fontFamily: "var(--font-heading)", fontWeight: 600, fontSize: 15 }}>{j.id}</span>
                     {/* Status rides along with the job number once its own
                         column is dropped on a phone. */}
@@ -493,6 +504,11 @@ function NewJobDialog({ currentUser, clients, contractors, contacts, onClose, on
     } else { setContractorChip(""); }
   };
 
+  // The same three conditions submit() is about to check, counted instead of
+  // reported — so the dialog can say how much is in the way before the button
+  // is pressed. Change one and the other has to move with it.
+  const requiredLeft = [!form.project.trim(), !form.client, !form.lsd.trim()].filter(Boolean).length;
+
   const submit = async () => {
     // Everything missing at once, rather than one box per attempt: the old
     // checks returned on the first failure, so an empty form had to be
@@ -583,6 +599,9 @@ function NewJobDialog({ currentUser, clients, contractors, contacts, onClose, on
   return (
     <Dialog title="New job" maxWidth={560} onClose={onClose}
       actions={<>
+        {/* Pushed to the left of the buttons by the auto margin — the row is
+            flex, right-aligned. */}
+        <RequiredLeft count={requiredLeft} style={{ marginRight: "auto", alignSelf: "center" }} />
         <Btn variant="secondary" onClick={onClose}>Cancel</Btn>
         <Btn variant="primary" onClick={submit} disabled={saving}>{saving ? "Creating…" : "Create job"}</Btn>
       </>}>
@@ -591,7 +610,7 @@ function NewJobDialog({ currentUser, clients, contractors, contacts, onClose, on
           under forty characters — and exist because beta testing saved a
           ten-thousand-character one, which the database accepted happily
           and every table and invoice then had to wear. */}
-      <Field label="Project name" missing={miss.is("project")}>
+      <Field label="Project name" required missing={miss.is("project")}>
         <input {...miss.props("project")} maxLength={140} value={form.project} onChange={e => set("project", e.target.value)} />
       </Field>
       {/* Flagged either because submit found it empty, or because the live
@@ -607,7 +626,7 @@ function NewJobDialog({ currentUser, clients, contractors, contacts, onClose, on
           </div>
         )}
       </Field>
-      <Field label="Client" missing={miss.is("client")}>
+      <Field label="Client" required missing={miss.is("client")}>
         <div style={{ display: "flex", gap: 6 }}>
           <select {...miss.props("client")} style={{ flex: 1 }} value={form.client}
             onChange={e => { miss.fixed("client"); pickClient(e.target.value); }}>
@@ -631,7 +650,7 @@ function NewJobDialog({ currentUser, clients, contractors, contacts, onClose, on
           </div>
         )}
       </Field>
-      <Field label="Site · LSD" missing={miss.is("lsd")}>
+      <Field label="Site · LSD" required missing={miss.is("lsd")}>
         <input {...miss.props("lsd")} maxLength={80} value={form.lsd} onChange={e => set("lsd", e.target.value)} placeholder="13-22-047-05 W5M" />
       </Field>
       <Field label="Created by"><input className="input" value={currentUser.name} disabled /></Field>

@@ -106,7 +106,10 @@ export const ROLE_PRESETS = {
   Coordinator: ["board", "job", "jha", "upload", "ticket", "mytickets", "files", "contacts", "equipment", "timesheets", "tracker", "chat"],
   // Technicians get the directory read-write too: the person who finds out
   // the site rep's number is usually the one standing on the lease.
-  Technician: ["board", "job", "jha", "upload", "ticket", "mytickets", "files", "contacts", "chat"],
+  // Timesheets too: the screen shows a technician their own hours and
+  // nobody else's, and "where are my hours?" was the first question a new
+  // hire asked. Mirrored in tabs_for_role() (migration "round two").
+  Technician: ["board", "job", "jha", "upload", "ticket", "mytickets", "files", "contacts", "timesheets", "chat"],
   // A helper assists a technician on site: they sign onto the JHA and appear
   // on the ticket crew for their hours and dose, but they do not raise
   // tickets or upload reports themselves, so those tabs stay off.

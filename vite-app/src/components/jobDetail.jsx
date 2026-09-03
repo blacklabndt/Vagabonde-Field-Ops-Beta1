@@ -3,9 +3,17 @@ import { money, todayLocal, localDate, dayMonth, initialsOf, ticketDateStamp, la
 import { Db } from "../db.js";
 import { OfflineCache } from "../offlineCache.js";
 import { OfflineQueue } from "../offlineQueue.js";
+
+// An idempotency key for a save (see Db.createTicket / uploadReport).
+const newClientKey = () => (crypto.randomUUID ? crypto.randomUUID() : null);
 import { Blueprint, Btn, TableScroll, TagX, Field, PdfGlyph, PdfLink, Dialog, ErrorBox, emailIn, contactLabel, splitContact, StatusTag, useMissingFields, SearchSelect, Loading, LoadingRow } from "./common.jsx";
 
-export function JobDetailScreen({ job, currentUser, onStartJha, onOpenTicket, jobRecord, setJobRecord, onJobChanged, onJobDeleted }) {
+export function JobDetailScreen({ job, currentUser, onStartJha, onOpenTicket, onStartTicket, jobRecord, setJobRecord, onJobChanged, onJobDeleted }) {
+  // Prices — rate cards, ticket lines, the amounts they add up to — are for
+  // Admins and Technicians (the database refuses the lines to anyone else,
+  // per the "round two" migration). Everyone else sees the ticket's number,
+  // date and status, which is what a Helper needs.
+  const seesPrices = currentUser.role === "Admin" || currentUser.role === "Technician";
   const [showUpload, setShowUpload] = useState(false);
   const [showTicket, setShowTicket] = useState(false);
   const [editingRecord, setEditingRecord] = useState(false);
@@ -353,10 +361,10 @@ export function JobDetailScreen({ job, currentUser, onStartJha, onOpenTicket, jo
                 : "Tap a draft to add the day's welds, hours and crew. Tap a sent ticket to read it."}
             </div>
             <TableScroll><table className="table">
-              <thead><tr><th>Ticket</th><th>Date</th><th>Technician</th><th>Amount</th><th>Status</th><th></th></tr></thead>
+              <thead><tr><th>Ticket</th><th>Date</th><th>Technician</th>{seesPrices && <th>Amount</th>}<th>Status</th><th></th></tr></thead>
               <tbody>
-                {loading && <LoadingRow cols={6} />}
-                {!loading && tickets.length === 0 && <tr><td colSpan={6} style={{ color: "color-mix(in srgb, var(--color-text) 55%, transparent)" }}>None raised yet.</td></tr>}
+                {loading && <LoadingRow cols={seesPrices ? 6 : 5} />}
+                {!loading && tickets.length === 0 && <tr><td colSpan={seesPrices ? 6 : 5} style={{ color: "color-mix(in srgb, var(--color-text) 55%, transparent)" }}>None raised yet.</td></tr>}
                 {tickets.map(t => {
                   // A draft on an open job is still being built, so its row
                   // opens the billing screen. Everything else opens read-only.
@@ -368,23 +376,25 @@ export function JobDetailScreen({ job, currentUser, onStartJha, onOpenTicket, jo
                   // where someone needs to look up what was billed, and chase
                   // a client who never signed. Reading is not editing.
                   const editable = t.status === "Draft" && !complete;
-                  const open = editable ? () => onOpenTicket(t.id) : () => setViewingTicket(t.id);
+                  // Reading a ticket is reading its bill; without the prices
+                  // the row is information enough and opens nothing.
+                  const open = editable ? () => onOpenTicket(t.id) : seesPrices ? () => setViewingTicket(t.id) : null;
                   // Sent but not signed: still ours to pull back. The same
                   // people the tickets update policy names — that technician,
                   // or an admin.
                   const canWithdraw = t.status === "Awaiting approval" && (isAdmin || t.techId === currentUser.id);
                   return (
-                    <tr key={t.id} onClick={open}
-                      tabIndex={0}
-                      role="button"
-                      title={editable ? "Open this draft to add the day's charges" : "Read this ticket"}
+                    <tr key={t.id} onClick={open || undefined}
+                      tabIndex={open ? 0 : undefined}
+                      role={open ? "button" : undefined}
+                      title={editable ? "Open this draft to add the day's charges" : open ? "Read this ticket" : undefined}
                       // Only the row's own key presses: an Enter on the cancel
                       // button bubbles up here too, and would open the ticket
                       // it just cancelled.
-                      onKeyDown={e => { if (e.target !== e.currentTarget) return; if (e.key === "Enter" || e.key === " ") { e.preventDefault(); open(); } }}
-                      style={{ cursor: "pointer" }}>
+                      onKeyDown={e => { if (!open || e.target !== e.currentTarget) return; if (e.key === "Enter" || e.key === " ") { e.preventDefault(); open(); } }}
+                      style={{ cursor: open ? "pointer" : "default" }}>
                       <td style={{ fontFamily: "var(--font-heading)", fontWeight: 600, color: "var(--color-accent)" }}>{t.id}</td>
-                      <td>{t.date}</td><td>{t.tech}</td><td className="tabular">{money(t.amount)}</td>
+                      <td>{t.date}</td><td>{t.tech}</td>{seesPrices && <td className="tabular">{money(t.amount)}</td>}
                       <td><StatusTag status={t.status} /></td>
                       <td style={{ textAlign: "right" }}>
                         {canWithdraw && (
@@ -403,9 +413,9 @@ export function JobDetailScreen({ job, currentUser, onStartJha, onOpenTicket, jo
                 })}
               </tbody>
             </table></TableScroll>
-            <div className="strip" style={{ gridTemplateColumns: "repeat(2, 1fr)", marginTop: 14 }}>
+            <div className="strip" style={{ gridTemplateColumns: seesPrices ? "repeat(2, 1fr)" : "1fr", marginTop: 14 }}>
               <div><div className="strip-label">Tickets raised</div><div className="strip-value">{tickets.length}</div></div>
-              <div><div className="strip-label">Ticket total</div><div className="strip-value">{money(ticketTotal)}</div></div>
+              {seesPrices && <div><div className="strip-label">Ticket total</div><div className="strip-value">{money(ticketTotal)}</div></div>}
             </div>
           </Blueprint>
         </div>
@@ -525,7 +535,7 @@ export function JobDetailScreen({ job, currentUser, onStartJha, onOpenTicket, jo
       )}
       {showTicket && (
         <CreateTicketDialog job={job} jobRecord={jobRecord} currentUser={currentUser} onClose={() => setShowTicket(false)}
-          onSubmit={async ticketId => { setShowTicket(false); await refreshTickets(); if (ticketId) onOpenTicket(ticketId); }} />
+          onSubmit={seed => { setShowTicket(false); onStartTicket(seed); }} />
       )}
       {deleting && (
         <DeleteJobDialog job={job} jhas={jhas} reports={reports} tickets={tickets} isAdmin={isAdmin}
@@ -1214,8 +1224,11 @@ function UploadReportDialog({ job, jobRecord, currentUser, onClose, onSubmit }) 
 
   // The stored row, once the upload has landed. A retry after the email
   // failed must not upload the same PDF again and file a second report —
-  // it only has to send. Cleared when a different file is picked.
+  // it only has to send. Cleared when a different file is picked. The key
+  // covers the other way a duplicate happened: an insert whose answer was
+  // lost — the database hands the first row back for the same key.
   const storedReport = useRef(null);
+  const uploadKey = useRef(newClientKey());
   const submit = async sent => {
     if (!file) { miss.flag("file"); setError("Attach the interpreted PDF first."); return; }
     if (!welds.trim()) { miss.flag("welds"); setError("Note which welds this report covers."); return; }
@@ -1227,7 +1240,7 @@ function UploadReportDialog({ job, jobRecord, currentUser, onClose, onSubmit }) 
       if (!storedReport.current) {
         storedReport.current = await Db.uploadReport({
           jobDbId: job.dbId, jobNumber: job.id, file, welds: welds.trim(), result: "Accept",
-          interpretedBy: currentUser.name, send: false, sendTo: to.trim()
+          interpretedBy: currentUser.name, send: false, sendTo: to.trim(), clientKey: uploadKey.current
         });
       }
       const report = storedReport.current;
@@ -1274,6 +1287,7 @@ function UploadReportDialog({ job, jobRecord, currentUser, onClose, onSubmit }) 
             miss.fixed("file");
             setFile(f);
             storedReport.current = null;
+            uploadKey.current = newClientKey();
             if (f) scanForNumbers(f);
             e.target.value = "";
           }} />
@@ -1338,32 +1352,21 @@ function CreateTicketDialog({ job, jobRecord, currentUser, onClose, onSubmit }) 
     return () => { live = false; };
   }, [initials, workDate]);
 
-  const submit = async () => {
+  const submit = () => {
     if (isNaN(d)) { miss.flag("workDate"); setError("Pick a valid work date."); return; }
     miss.clear();
-    setSaving(true);
     setError("");
-    try {
-      // An empty ticket to start — the billing-ticket screen (per-weld and
-      // other-charge lines) is where the amount actually gets built up;
-      // this dialog just opens the draft. The number comes back from the
-      // insert rather than being decided here, so what opens is whatever the
-      // database actually stored.
-      const { id } = await Db.createTicket({
-        initials, jobDbId: job.dbId, technicianId: currentUser.id, workDate,
-        clientContact: { name: contactLabel(clientRep) }, contractorContact: { name: contactLabel(contractorRep) },
-        lines: [], status: "Draft"
-      });
-      onSubmit(id);
-    } catch (e) {
-      setSaving(false);
-      // Creating the row needs signal — the number is minted by the
-      // database and nothing here queues. Say so, rather than a bare
-      // "Failed to fetch" under a hint that promised an offline number.
-      setError(OfflineQueue.isNetworkError(e)
-        ? "No connection — a ticket raised from here needs signal to reserve its number. Try again once you're back in range."
-        : (e.message || "Couldn't create the ticket — try again."));
-    }
+    // Nothing is inserted here. This dialog used to create an empty draft
+    // and hand its id to the billing screen, which left a ghost draft for
+    // every dialog abandoned after Create, and could not work without
+    // signal at all. Now it only chooses — the day and this ticket's own
+    // reps — and the billing screen does the saving, with its outbox and
+    // recovery copy behind it. The number is minted when it saves.
+    onSubmit({
+      workDate,
+      clientContact: contactLabel(clientRep) || "",
+      contractorContact: contactLabel(contractorRep) || ""
+    });
   };
 
   return (
@@ -1388,7 +1391,7 @@ function CreateTicketDialog({ job, jobRecord, currentUser, onClose, onSubmit }) 
           </div>
           {provisional && (
             <div style={{ color: "var(--color-accent-700)", marginTop: 2 }}>
-              Offline — creating the ticket needs signal
+              Provisional — offline, confirmed on sync
             </div>
           )}
         </div>

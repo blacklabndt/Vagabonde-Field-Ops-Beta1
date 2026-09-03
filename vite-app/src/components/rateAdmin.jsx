@@ -335,6 +335,10 @@ export function RateAdminScreen() {
   const removeSizeRow = async label => {
     const ids = ["rt_film", "rt_cr", "rt_dr"].map(k => line(k, label)).filter(Boolean).map(l => l.id);
     if (!ids.length) return;
+    // One × takes three priced lines with it, which is not what a single
+    // tap looks like. Restore brings a standard size back, but at zero —
+    // the rates typed against it are gone.
+    if (!confirm(`Delete the ${label} row? Its Film, CR and DR rates go with it. This can't be undone — "Restore removed lines" puts a standard size back unpriced.`)) return;
     try {
       await Promise.all(ids.map(id => Db.deleteRateLine(id)));
       setLines(p => p.filter(l => !ids.includes(l.id)));

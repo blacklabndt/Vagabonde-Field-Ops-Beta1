@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useRef, useCallback } from "react";
+import React, { useState, useEffect, useRef, useCallback, useId } from "react";
 import { createPortal } from "react-dom";
 import { Db } from "../db.js";
 import { nonNegative } from "../data.js";
@@ -106,14 +106,61 @@ export function TagX({ variant = "neutral", style, children, ...rest }) {
   return <span className={cls} style={style} {...rest}>{children}</span>;
 }
 
+// The elements a `<label for>` can actually name. Pointed at anything else —
+// a <div> holding a segmented control, say — the browser ignores it, so the
+// association would be a lie in the markup and a click that does nothing.
+const LABELABLE = new Set(["input", "select", "textarea", "button", "meter", "output", "progress"]);
+
 // `missing` tints the label to match the box below it, so the flagged field
 // is identifiable without relying on the border colour on its own.
-export function Field({ label, children, style, missing }) {
+//
+// `required` puts the word beside the label. Which boxes are compulsory was
+// only discoverable by filling the form in, pressing the button and reading
+// the sentence that came back.
+//
+// The label is also tied to its control. It was a bare <label> sitting above
+// a box, which is not an association: tapping the label did nothing, and a
+// screen reader announced the box with no name at all. Where the Field holds
+// one control it gets an id from useId and the label points at it. A Field
+// with several children — a picker above a box, a warning underneath — is
+// left alone, because guessing which of them the label names would be worse
+// than leaving it unsaid. A child that brought its own id keeps it.
+export function Field({ label, children, style, missing, required }) {
+  const autoId = useId();
+  // A fragment is several children wearing one wrapper, and it has no props
+  // of its own — handing it an id only earns a console warning.
+  const only = React.isValidElement(children) && children.type !== React.Fragment &&
+    (typeof children.type !== "string" || LABELABLE.has(children.type)) ? children : null;
+  const forId = only ? (only.props.id || autoId) : undefined;
   return (
     <div className="field" style={style}>
-      {label && <label className={missing ? "field-label-missing" : undefined}>{label}</label>}
-      {children}
+      {label && (
+        <label htmlFor={forId} className={missing ? "field-label-missing" : undefined}>
+          {label}
+          {required && (
+            <span style={{ marginLeft: 6, fontSize: 11, fontWeight: 400, opacity: 0.7 }}>required</span>
+          )}
+        </label>
+      )}
+      {only && !only.props.id ? React.cloneElement(only, { id: autoId }) : children}
     </div>
+  );
+}
+
+// How much of a form is still in the way, beside the button that will refuse
+// it. The count comes from the same conditions the submit checks, so the two
+// can't disagree — and it counts down as the boxes are filled, rather than
+// waiting for a press to say what is missing.
+//
+// Always rendered, hidden when there is nothing left, for the same reason as
+// ErrorBox: a node that appears out of nothing is announced less reliably
+// than one that changes.
+export function RequiredLeft({ count, style }) {
+  return (
+    <span aria-live="polite" hidden={!count}
+      style={{ fontSize: 12, color: "color-mix(in srgb, var(--color-text) 60%, transparent)", ...style }}>
+      {count} required field{count === 1 ? "" : "s"} left
+    </span>
   );
 }
 
@@ -180,10 +227,13 @@ export function useMissingFields() {
 // dropdown, the keyboard and the cap. `searchKey` is anything outside the
 // typed text that changes the results (a scope toggle, say) — change it and
 // the search re-runs.
+//
+// `id` is passed through to the input rather than dropped, so a Field
+// wrapping one of these can point its label at the box the label names.
 export function SearchSelect({
   search, renderOption, optionKey, onPick, onError,
   placeholder, ariaLabel, listId = "search-select-list",
-  searchKey = "", maxSuggestions = 25, style
+  searchKey = "", maxSuggestions = 25, style, id
 }) {
   const [text, setText] = useState("");
   const [open, setOpen] = useState(false);
@@ -296,6 +346,7 @@ export function SearchSelect({
     <div ref={boxRef} style={{ position: "relative", flex: "1 1 320px", maxWidth: 460, ...style }}>
       <input
         ref={inputRef}
+        id={id}
         className="input"
         role="combobox"
         aria-expanded={open}

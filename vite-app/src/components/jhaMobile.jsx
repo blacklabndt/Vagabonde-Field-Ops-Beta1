@@ -1,7 +1,7 @@
 import React, { useState, useEffect, useRef } from "react";
 import { JHA_TEMPLATES, SEED_HAZARDS, todayLocal, localDate, dayMonth, storageKeySafe } from "../data.js";
 import { Db } from "../db.js";
-import { Blueprint, Btn, CheckBox, TagX, Field, Dialog, ErrorBox, Switch, splitContact, hazardTagVariant, NoJobSelected, ConnectionBar, QueuedPanel, useMissingFields } from "./common.jsx";
+import { Blueprint, Btn, CheckBox, TagX, Field, Dialog, ErrorBox, Switch, splitContact, hazardTagVariant, NoJobSelected, ConnectionBar, QueuedPanel, useMissingFields, RequiredLeft } from "./common.jsx";
 import { OfflineQueue } from "../offlineQueue.js";
 import { OfflineCache } from "../offlineCache.js";
 
@@ -100,12 +100,57 @@ export function JhaBuilderScreen({ job, jobRecord, contacts, currentUser, onSubm
     if (!wipKey) return;
     try { const p = OfflineCache.remove(wipKey); if (p && p.catch) p.catch(() => {}); } catch { /* nothing to drop */ }
   };
+
+  // ── Day two of a job starts where day one left off ─────────────────────
+  // Muster point, communication, hospital, first aid, the H₂S serial and the
+  // kit switches are the same on the same lease the next morning, and were
+  // being retyped every day of a multi-day job. They come from the job's
+  // most recent assessment — only into boxes still blank, so a tech who
+  // typed first keeps what they typed — and the form says where they came
+  // from. Weather, temperature, the survey reading and the bump test are
+  // today's facts and start empty. `baseline` is what the prefill wrote, so
+  // the recovery copy counts only what the person changed themselves.
+  const [prefilledFrom, setPrefilledFrom] = useState(null);
+  const baseline = useRef({ site: BLANK_SITE, equip: BLANK_EQUIP });
+  // What the form holds right now, readable from inside the fetch's callback
+  // without a stale closure — a box typed into before the last assessment
+  // arrives keeps what was typed.
+  const siteRef = useRef(site); siteRef.current = site;
+  const equipRef = useRef(equip); equipRef.current = equip;
+  const prefillFromLastJha = () => {
+    if (!job || !job.dbId) return;
+    Db.lastJhaDetailsForJob(job.dbId).then(last => {
+      if (!last || (!last.site && !last.equipment)) return;
+      const ls = last.site || {}, le = last.equipment || {};
+      const p = siteRef.current, e = equipRef.current;
+      const nextSite = {
+        ...p,
+        communication: p.communication || ls.communication || "",
+        commOther: p.communication ? p.commOther : !!(ls.communication && !COMM_PRESETS.includes(ls.communication)),
+        muster: p.muster || ls.muster || "",
+        hospital: p.hospital === HOSPITAL_DEFAULT && ls.hospital ? ls.hospital : p.hospital,
+        firstAid: p.firstAid || ls.firstAid || ""
+      };
+      const nextEquip = {
+        ...e,
+        h2sSerial: e.h2sSerial || le.h2sSerial || "",
+        collimator: e.collimator || !!le.collimator,
+        emergencyKit: e.emergencyKit || !!le.emergencyKit
+      };
+      baseline.current = { site: nextSite, equip: nextEquip };
+      setSite(nextSite);
+      setEquip(nextEquip);
+      setPrefilledFrom(last.workDate || true);
+    }).catch(() => { /* first assessment on this job, or no signal and nothing cached */ });
+  };
+
   useEffect(() => {
     if (!wipKey) return;
     let live = true;
     OfflineCache.read(wipKey).then(hit => {
       if (!live) return;
       const w = hit && hit.value;
+      if (!(w && w.entered)) prefillFromLastJha();
       if (w && w.entered) {
         if (w.hazards) setHazards(w.hazards);
         if (w.extra) setExtra(w.extra);
@@ -125,10 +170,13 @@ export function JhaBuilderScreen({ job, jobRecord, contacts, currentUser, onSubm
     return () => { live = false; };
   }, [wipKey]);
   // Only what someone actually entered is worth keeping — the defaults, the
-  // remembered ratings and a derived kit are not.
+  // remembered ratings, a derived kit and what the last assessment prefilled
+  // are not.
+  const sameAs = (a, b) => JSON.stringify(a) === JSON.stringify(b);
   const entered = hazards.some(h => h.on) || extra.length > 0
-    || !!(site.weather || site.temperature || site.communication || site.muster || site.firstAid)
-    || !!(equip.h2sSerial || equip.redSurveyMr) || !!siteRepOther.trim()
+    || !sameAs(site, baseline.current.site)
+    || !sameAs({ ...equip, redSerial: "" }, { ...baseline.current.equip, redSerial: "" })
+    || !!siteRepOther.trim()
     || w1Touched.current || w2Touched.current;
   useEffect(() => {
     if (!wipKey || !wipReady.current) return;
@@ -157,6 +205,9 @@ export function JhaBuilderScreen({ job, jobRecord, contacts, currentUser, onSubm
     w2Touched.current = false;
     const me = people.find(p => p.id === currentUser.id);
     setW1(me ? kitOf(me, equipment) : BLANK_KIT);
+    baseline.current = { site: BLANK_SITE, equip: BLANK_EQUIP };
+    setPrefilledFrom(null);
+    prefillFromLastJha();
   };
 
   useEffect(() => {
@@ -221,6 +272,16 @@ export function JhaBuilderScreen({ job, jobRecord, contacts, currentUser, onSubm
   const selected = hazards.filter(h => h.on).concat(extra.filter(h => h.on));
   const onCount = selected.length;
   const helper = people.find(p => p.id === helperId);
+
+  // The four conditions submit() refuses on, counted as the form is filled
+  // in rather than reported after the button is pressed. Kept in step with
+  // the checks below — they are the same four, in the same order.
+  const requiredLeft = [
+    !onCount,
+    !siteRep.trim() && !siteRepOther.trim(),
+    !w1.tld.trim() && !w1.drd.trim() && !w1.alarm.trim(),
+    !!helper && !w2.tld.trim() && !w2.drd.trim() && !w2.alarm.trim()
+  ].filter(Boolean).length;
 
   const submit = async () => {
     if (!onCount) { setError("Tick at least one hazard before filing the JHA."); return; }
@@ -313,6 +374,11 @@ export function JhaBuilderScreen({ job, jobRecord, contacts, currentUser, onSubm
           )}
 
           <JhaSection title="Site information" />
+          {prefilledFrom && (
+            <div style={{ fontSize: 11, color: "color-mix(in srgb, var(--color-text) 60%, transparent)", marginTop: -2 }}>
+              Site details and kit switches carried over from this job's last assessment{prefilledFrom !== true ? ` (${dayMonth(localDate(prefilledFrom))})` : ""} — check they still hold today. Weather, survey and bump test start fresh.
+            </div>
+          )}
           <Field label="Date of this assessment">
             {/* Capped at today: an assessment can be written up after the
                 fact, never in advance of the work it covers. */}
@@ -361,6 +427,15 @@ export function JhaBuilderScreen({ job, jobRecord, contacts, currentUser, onSubm
           <Field label="Nearest hospital"><input className="input" value={site.hospital} onChange={e => setSite(p => ({ ...p, hospital: e.target.value }))} /></Field>
 
           <JhaSection title="Hazards" note={`${onCount} of ${hazards.length + extra.length} selected`} />
+          {/* The list is the one part of this form with no box to mark, and
+              filing refuses without a tick — so the rule is said here rather
+              than discovered at the bottom of the screen. Stated, not
+              flagged: nothing is ticked when the screen opens, and a red
+              line on arrival would be an accusation before anyone has done
+              anything. */}
+          <div style={{ fontSize: 11, color: "color-mix(in srgb, var(--color-text) 55%, transparent)", marginTop: -2 }}>
+            At least one hazard has to be ticked.
+          </div>
           {Object.keys(remembered).length > 0 && (
             <div style={{ fontSize: 11, color: "color-mix(in srgb, var(--color-text) 55%, transparent)", marginTop: -2 }}>
               Sev, Prob and Freq start from what you rated each hazard last time. Change any that are different today.
@@ -440,7 +515,7 @@ export function JhaBuilderScreen({ job, jobRecord, contacts, currentUser, onSubm
           {helper && <WorkerKit value={w2} onChange={editW2} prefix="w2" missing={miss.is} onFixed={miss.clear} />}
 
           <JhaSection title="Review" />
-          <Field label="Site rep name" missing={miss.is("siteRep")}>
+          <Field label="Site rep name" required missing={miss.is("siteRep")}>
             <input {...miss.props("siteRep")} value={siteRep} placeholder="Contractor rep"
               onChange={e => { miss.clear(); setSiteRep(e.target.value); }} />
           </Field>
@@ -454,6 +529,9 @@ export function JhaBuilderScreen({ job, jobRecord, contacts, currentUser, onSubm
           </div>
 
           <ErrorBox>{error}</ErrorBox>
+          {/* Above the button rather than beside it — the button is the full
+              width of the phone. */}
+          <RequiredLeft count={requiredLeft} />
           <Btn variant="primary" block style={{ minHeight: 56, fontSize: 15 }} onClick={submit} disabled={saving}>{saving ? "Filing…" : "File JHA"}</Btn>
           <Btn variant="ghost" block style={{ minHeight: 44, marginTop: 8 }} disabled={saving}
             onClick={() => { if (confirm("Discard this hazard assessment? Nothing has been filed yet.")) { dropWip(); onCancel(); } }}>
@@ -535,11 +613,20 @@ function WorkerKit({ value, onChange, missing, onFixed, prefix = "w1" }) {
     "aria-invalid": (missing && missing(prefix + k)) || undefined
   });
   const bad = k => !!(missing && missing(prefix + k));
+  // All three light together when filing found none of them filled in.
+  const anyBad = bad("tld") || bad("drd") || bad("alarm");
   return (
     <>
       <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 8 }}>
         <Field label="Unit #"><input className="input" value={value.unit} onChange={e => set("unit", e.target.value)} /></Field>
         <Field label="ID code"><input className="input" value={value.idCode} onChange={e => set("idCode", e.target.value)} /></Field>
+      </div>
+      {/* Said once over the group rather than "required" on each of the
+          three, which would claim all three are needed. Filing wants one.
+          Both workers get the line: the helper's kit is checked the same
+          way the moment one is picked. */}
+      <div style={{ fontSize: 11, color: anyBad ? "var(--color-accent-700)" : "color-mix(in srgb, var(--color-text) 55%, transparent)" }}>
+        At least one of these three serials is required — whichever dosimetry they're wearing.
       </div>
       <Field label="TLD / OSLD" missing={bad("tld")}>
         <input {...dos("tld")} value={value.tld} onChange={e => set("tld", e.target.value)} />
@@ -578,18 +665,25 @@ function HazardRow({ hazard, rating, onToggle, onRate }) {
         </div>
         <TagX variant={hazardTagVariant(hazard.level)}>{hazard.level}</TagX>
       </div>
-      {/* Rated only once it's on the sheet — three taps, not three text fields. */}
+      {/* Rated only once it's on the sheet — three taps, not three text fields.
+          The boxes are 40px, not the 28 they were: this is tapped on a phone,
+          often with a glove on, and 28 is under every touch-target guideline
+          going. Nine boxes that size cannot share one line at 390px, so each
+          Sev/Prob/Freq set wraps as a whole — flex:none on the sets and on
+          the boxes, or the row squeezes them into slivers instead. The gaps
+          are 2px rather than 4: it buys the few pixels that fit two sets on
+          a line, which is two lines per hazard instead of three. */}
       {hazard.on && (
-        <div style={{ display: "flex", gap: 12, flexWrap: "wrap", alignItems: "center", padding: "0 10px 10px" }}>
+        <div style={{ display: "flex", gap: 8, flexWrap: "wrap", alignItems: "center", padding: "0 10px 10px" }}>
           {[["s", "Sev"], ["p", "Prob"], ["f", "Freq"]].map(([key, label]) => (
-            <div key={key} style={{ display: "flex", alignItems: "center", gap: 4 }}>
-              <span style={{ fontSize: 10, textTransform: "uppercase", letterSpacing: ".06em", color: "color-mix(in srgb, var(--color-text) 55%, transparent)", width: 30 }}>{label}</span>
+            <div key={key} style={{ display: "flex", alignItems: "center", gap: 2, flex: "0 0 auto" }}>
+              <span style={{ fontSize: 10, textTransform: "uppercase", letterSpacing: ".06em", color: "color-mix(in srgb, var(--color-text) 55%, transparent)", width: 30, flex: "none" }}>{label}</span>
               {RATING_SCALE.map(n => (
                 <button key={n} type="button" onClick={() => onRate(key, n)}
                   aria-label={`${label} ${n} for ${hazard.name}`}
                   aria-pressed={r[key] === n}
                   style={{
-                    width: 28, height: 28, cursor: "pointer", fontSize: 12,
+                    width: 40, height: 40, flex: "none", cursor: "pointer", fontSize: 12,
                     fontFamily: "var(--font-heading)", fontWeight: 600,
                     border: "1px solid " + (r[key] === n ? "var(--color-accent)" : "var(--color-divider)"),
                     background: r[key] === n ? "var(--color-accent)" : "transparent",

@@ -174,6 +174,12 @@ export function App() {
   // The draft being edited on the billing screen, when it was opened from a
   // job rather than from the menu.
   const [activeTicket, setActiveTicket] = useState(null);
+  // What a NEW ticket starts with when Job detail's Create ticket dialog
+  // opened it: the work date and this ticket's own reps, plus a nonce that
+  // remounts the editor. Declared here, above the sign-in early return —
+  // a hook below it renders only once signed in, and React refuses a
+  // component whose hook count grows between renders.
+  const [ticketSeed, setTicketSeed] = useState(null);
   // A screen reached from a button inside another screen, which stays reachable
   // even when it isn't one of the sections in this account's menu.
   const [contextScreen, setContextScreen] = useState("");
@@ -211,7 +217,7 @@ export function App() {
         const report = await Db.uploadReport({
           jobDbId: payload.jobDbId, jobNumber: payload.jobNumber, file: payload.file,
           welds: payload.welds, result: "Accept", interpretedBy: payload.interpretedBy,
-          send: false, sendTo: payload.recipient
+          send: false, sendTo: payload.recipient, clientKey: payload.clientKey || null
         });
         reportId = report.id;
         await checkpoint({ reportId });
@@ -247,7 +253,8 @@ export function App() {
           const saved = await Db.createTicket({
             initials: payload.initials, jobDbId: payload.jobDbId, technicianId: payload.technicianId,
             workDate: payload.workDate, clientContact: payload.clientContact, contractorContact: payload.contractorContact,
-            lines: payload.lines, status: payload.status, delays: payload.delays
+            lines: payload.lines, status: payload.status, delays: payload.delays,
+            clientKey: payload.clientKey || null
           });
           id = saved.id;
           await checkpoint({ alreadyCreated: true, ticketId: id });
@@ -267,7 +274,9 @@ export function App() {
     if (!currentUser) return undefined;
     return OfflineQueue.attachAutoFlush(queueHandlers);
   }, [queueHandlers, currentUser ? currentUser.id : null]);
-  useEffect(() => OfflineQueue.subscribe(setQueued), []);
+  // Re-subscribed per signed-in account: the list is filtered to the owner,
+  // so a sign-in must re-read it, not keep the previous person's.
+  useEffect(() => OfflineQueue.subscribe(setQueued), [currentUser ? currentUser.id : null]);
   const [cacheState, setCacheState] = useState({ servingCached: false, at: null });
   useEffect(() => OfflineCache.subscribe(setCacheState), []);
   const retryQueue = () => OfflineQueue.flush(queueHandlers);
@@ -516,6 +525,13 @@ export function App() {
   // the next person to pick one up should not be able to page through the
   // last crew's jobs and rates without signing in.
   const signOut = async () => {
+    // The push subscription belongs to the device, and the row naming this
+    // person must not keep buzzing the tablet with the next person's chat.
+    // Best effort, before the session that RLS needs for the delete is gone;
+    // muted so the sign-out doesn't announce "Notifications off".
+    Toasts.mute();
+    try { await Db.disableChatPush(); } catch { /* no subscription, or no signal */ }
+    finally { Toasts.unmute(); }
     await sbClient.auth.signOut();
     // The remembered identity goes first, on its own: it is the one record
     // that lets the next person open this tablet as the last one with no
@@ -562,9 +578,15 @@ export function App() {
   // the same reason openTicket does it: going directly to a ticket skips the
   // job screen, which is what normally loads the record — and a stale one
   // would put the previous job's client rep on this ticket.
-  const startTicketForJob = async job => {
+  // `seed` is what Job detail's Create ticket dialog chose — the work date
+  // and this ticket's own reps (state declared with activeTicket above).
+  // Nothing is inserted until the editor saves, so the dialog no longer
+  // leaves empty drafts behind, and it works with no signal (the editor
+  // queues). The nonce remounts the editor per seed.
+  const startTicketForJob = async (job, seed = null) => {
     if (!job) return;
     setActiveJob(job);
+    setTicketSeed(seed ? { ...seed, nonce: Date.now() } : null);
     // Without the record, the ticket screen would carry whatever job was
     // opened last — its client rep, and so the address the approval goes
     // to. Better no ticket than one filed against the wrong client.
@@ -641,6 +663,7 @@ export function App() {
           job={activeJob} currentUser={currentUser}
           onStartJha={() => gotoContext("jha")}
           onOpenTicket={openTicketDraft}
+          onStartTicket={seed => startTicketForJob(activeJob, seed)}
           // The screen you are standing on has just been deleted. Move to the
           // job its contents went to if there was one — that is where the work
           // now lives — otherwise back to the board.
@@ -673,7 +696,7 @@ export function App() {
       body = <UploadMobileScreen job={activeJob} jobRecord={jobRecord} currentUser={currentUser} onSent={() => gotoContext("job")} />;
       break;
     case "ticket":
-      body = <TicketMobileScreen key={activeTicket || "new"} job={activeJob} jobRecord={jobRecord} currentUser={currentUser} ticket={activeTicket} onSaved={() => gotoContext("job")} />;
+      body = <TicketMobileScreen key={activeTicket || ("new-" + (ticketSeed ? ticketSeed.nonce : ""))} job={activeJob} jobRecord={jobRecord} currentUser={currentUser} ticket={activeTicket} seed={activeTicket ? null : ticketSeed} onSaved={() => gotoContext("job")} />;
       break;
     case "files":
       body = <FilesScreen currentUser={currentUser} />;

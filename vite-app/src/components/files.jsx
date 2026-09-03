@@ -197,17 +197,32 @@ export function FilesScreen({ currentUser }) {
               )}
 
               {shownFolders.map(f => (
-                <tr key={f.path} className="clickable">
-                  <td onClick={() => setPrefix(f.path)}>
+                // One handler on the row rather than one per cell, and one
+                // stop on the keyboard rather than three — the same shape the
+                // ticket rows on Job detail use. Only the row's own key
+                // presses open it, so Enter on the delete × can't also walk
+                // into the folder it just asked about.
+                <tr key={f.path} className="clickable"
+                  onClick={() => setPrefix(f.path)}
+                  tabIndex={0}
+                  role="button"
+                  aria-label={`Open folder ${f.name}`}
+                  onKeyDown={e => {
+                    if (e.target !== e.currentTarget) return;
+                    if (e.key === "Enter" || e.key === " ") { e.preventDefault(); setPrefix(f.path); }
+                  }}>
+                  <td>
                     <span style={{ display: "inline-flex", alignItems: "center", gap: 9 }}>
                       <FolderGlyph />
                       <span style={{ fontFamily: "var(--font-heading)", fontWeight: 600, fontSize: 15 }}>{f.name}</span>
                     </span>
                   </td>
-                  <td onClick={() => setPrefix(f.path)} style={{ color: "color-mix(in srgb, var(--color-text) 45%, transparent)" }}>Folder</td>
-                  <td onClick={() => setPrefix(f.path)}></td>
+                  <td style={{ color: "color-mix(in srgb, var(--color-text) 45%, transparent)" }}>Folder</td>
+                  <td></td>
                   <td style={{ textAlign: "right" }}>
-                    {canDeleteFolders && <button onClick={() => removeFolder(f)} aria-label={`Delete folder ${f.name}`} className="row-x">×</button>}
+                    {/* Stopped here, or the click that deletes a folder also
+                        opens it. */}
+                    {canDeleteFolders && <button onClick={e => { e.stopPropagation(); removeFolder(f); }} aria-label={`Delete folder ${f.name}`} className="row-x">×</button>}
                   </td>
                 </tr>
               ))}

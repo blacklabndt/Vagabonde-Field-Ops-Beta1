@@ -179,6 +179,10 @@ export function TimesheetsScreen({ currentUser }) {
 
   const toggleApproval = async () => {
     if (!person) return;
+    // Reopening takes the sign-off back and deletes the PDF it froze — the
+    // record of what was approved. Approving again builds a new one from
+    // whatever the tickets say then, so it is not the same document.
+    if (approved && !confirm(`Reopen ${person.name}'s timesheet for ${payPeriodLabel(period)}? The approval and its PDF are removed — this can't be undone, and approving again makes a fresh document.`)) return;
     // The load generation this action belongs to. If the admin switches
     // period mid-approval (the picker isn't disabled during the write), a
     // new load() bumps loadSeq, and the refresh below is skipped so it can't

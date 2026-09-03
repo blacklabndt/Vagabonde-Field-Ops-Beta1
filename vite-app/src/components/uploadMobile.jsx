@@ -77,10 +77,13 @@ export function UploadMobileScreen({ job, jobRecord, currentUser, onSent }) {
           // screen used to pass `send: true` and no email, so every report from
           // a phone was recorded as delivered to the contractor while nothing
           // ever left the building. Store first, then actually email.
+          // The row's key doubles as the save's idempotency key: a lost
+          // answer on the radio hands back the report that already landed
+          // instead of filing it twice.
           const report = await Db.uploadReport({
             jobDbId: job.dbId, jobNumber: job.id, file: it.file,
             welds: it.welds.join(", "), result: "Accept", interpretedBy: currentUser.name,
-            send: false, sendTo: recipient
+            send: false, sendTo: recipient, clientKey: it.key
           });
           if (recipient) {
             try {
@@ -93,7 +96,7 @@ export function UploadMobileScreen({ job, jobRecord, currentUser, onSent }) {
           if (!OfflineQueue.isNetworkError(e)) throw e;
           await OfflineQueue.enqueue("report", {
             jobDbId: job.dbId, jobNumber: job.id, file: it.file,
-            welds: it.welds.join(", "), interpretedBy: currentUser.name, recipient
+            welds: it.welds.join(", "), interpretedBy: currentUser.name, recipient, clientKey: it.key
           });
           queuedCount++;
         }

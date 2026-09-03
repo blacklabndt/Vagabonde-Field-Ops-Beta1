@@ -41,7 +41,10 @@ const hasEntries = (weldLines, otherLines, crew) =>
   otherLines.some(l => l.qty > 0) ||
   crew.some(c => CREW_FIGURES.some(k => c[k] > 0));
 
-export function TicketMobileScreen({ job, jobRecord, currentUser, onSaved, ticket }) {
+// `seed` is what Job detail's Create ticket dialog chose for a NEW ticket —
+// the work date and this ticket's own reps. Absent for a reopened draft and
+// for a ticket started from Home.
+export function TicketMobileScreen({ job, jobRecord, currentUser, onSaved, ticket, seed = null }) {
   const [rates, setRates] = useState(null);
   const [loadError, setLoadError] = useState("");
   // Both belong to the in-progress-ticket recovery further down, but they are
@@ -86,7 +89,13 @@ export function TicketMobileScreen({ job, jobRecord, currentUser, onSaved, ticke
   // name a different rep than the job's current primary — that is the whole
   // point of the per-ticket contacts — so the approval email follows the ticket,
   // not the job.
-  const [ticketClientContact, setTicketClientContact] = useState("");
+  const [ticketClientContact, setTicketClientContact] = useState((seed && seed.clientContact) || "");
+  const [ticketContractorContact, setTicketContractorContact] = useState((seed && seed.contractorContact) || "");
+  // The idempotency key for this unsaved ticket (Db.createTicket): minted
+  // once, kept with the recovery copy, so a save whose answer was lost on
+  // the radio — or replayed from the outbox — finds the row it already
+  // made instead of minting a second number.
+  const [clientKey, setClientKey] = useState(() => (crypto.randomUUID ? crypto.randomUUID() : null));
   // A JHA left open at the end of the day is the thing most easily forgotten,
   // and the moment someone closes out their billing is when they're thinking
   // about the day ending. Reminder only — it never blocks the ticket.
@@ -121,7 +130,7 @@ export function TicketMobileScreen({ job, jobRecord, currentUser, onSaved, ticke
   // opens, in local time, so a ticket built either side of midnight UTC still
   // carries the day the work was actually done. A reopened draft keeps the day
   // it was raised for, not today.
-  const [workDate, setWorkDate] = useState(todayLocal);
+  const [workDate, setWorkDate] = useState(() => (seed && seed.workDate) || todayLocal());
   // Standby, waiting on the line, road bans. Prints on the client's field
   // invoice, so it belongs to the day rather than to the job.
   const [delays, setDelays] = useState("");
@@ -206,6 +215,7 @@ export function TicketMobileScreen({ job, jobRecord, currentUser, onSaved, ticke
         if (row.work_date) setWorkDate(row.work_date);
         if (row.delays) setDelays(row.delays);
         if (row.client_contact && row.client_contact.name) setTicketClientContact(row.client_contact.name);
+        if (row.contractor_contact && row.contractor_contact.name) setTicketContractorContact(row.contractor_contact.name);
         // A draft raised from Job detail arrives with no crew rows at all,
         // and a ticket with nobody on it bills hours no one is paid for —
         // so an empty crew is seeded with the filer, exactly as a fresh
@@ -275,6 +285,9 @@ export function TicketMobileScreen({ job, jobRecord, currentUser, onSaved, ticke
           if (w.crew) setCrew(w.crew);
           if (w.workDate) setWorkDate(w.workDate);
           if (w.delays) setDelays(w.delays);
+          if (w.clientKey) setClientKey(w.clientKey);
+          if (w.clientContact) setTicketClientContact(w.clientContact);
+          if (w.contractorContact) setTicketContractorContact(w.contractorContact);
           setRecovered(hit.at || null);
         }
         wipReady.current = true;
@@ -290,7 +303,10 @@ export function TicketMobileScreen({ job, jobRecord, currentUser, onSaved, ticke
     // a phantom to recover next time.
     if (!hasEntries(weldLines, otherLines, crew)) { OfflineCache.remove(wipKey); return; }
     const t = setTimeout(() => {
-      OfflineCache.put(wipKey, { weldLines, otherLines, crew, workDate, delays });
+      OfflineCache.put(wipKey, {
+        weldLines, otherLines, crew, workDate, delays, clientKey,
+        clientContact: ticketClientContact, contractorContact: ticketContractorContact
+      });
     }, 700);
     return () => clearTimeout(t);
   }, [weldLines, otherLines, crew, workDate, delays, loadingTicket]);
@@ -334,6 +350,12 @@ export function TicketMobileScreen({ job, jobRecord, currentUser, onSaved, ticke
 
   const availableWeld = rates.welds.filter(w => !weldLines.some(l => l.key === w.key));
   const availableService = rates.others.filter(s => !otherLines.some(l => l.key === s.key));
+  // A line the card hasn't priced yet bills $0, which is the worst way for a
+  // number to be wrong: the ticket totals up short and nothing says so. It
+  // stays on the menu — the admin may price it before the day is billed —
+  // but it is badged, and the ticket cannot go to the client carrying one.
+  const unpriced = [...weldRows, ...otherRows].filter(r => !Number(r.item.rate));
+  const isUnpriced = item => !Number(item.rate);
   // The dropdown picks fall back to the first item still available, so the
   // selects are never pointing at something already added or off the card.
   const effServicePick = availableService.some(s => s.key === servicePick) ? servicePick : (availableService[0] || {}).key || "";
@@ -478,14 +500,17 @@ export function TicketMobileScreen({ job, jobRecord, currentUser, onSaved, ticke
       if (!inDb) {
         const saved = await Db.createTicket({
           initials: initialsOf(currentUser.name), jobDbId: job.dbId, technicianId: currentUser.id, workDate,
-          clientContact: { name: jobRecord.clientRep }, contractorContact: { name: jobRecord.contractorRep },
+          clientContact: { name: ticketClientContact || jobRecord.clientRep }, contractorContact: { name: ticketContractorContact || jobRecord.contractorRep },
           lines: buildLines(), status: "Draft",
-          delays
+          delays, clientKey
         });
         savedId = saved.id;
         setTicketId(savedId);
         inDb = true;
         setCreated(true);
+        // A row that already existed for this key (the first save's answer
+        // was lost) may hold an older set of lines: write today's over it.
+        if (saved.existing) await Db.updateTicket({ ticketId: savedId, lines: buildLines(), status: "Draft", delays });
         await Db.saveCrewForTicket(savedId, crew);
       } else {
         // Already in the database — either a reopened draft, or a retry after
@@ -512,9 +537,9 @@ export function TicketMobileScreen({ job, jobRecord, currentUser, onSaved, ticke
           ticketId: inDb ? savedId : null,
           initials: initialsOf(currentUser.name),
           jobDbId: job.dbId, technicianId: currentUser.id, workDate,
-          clientContact: { name: jobRecord.clientRep }, contractorContact: { name: jobRecord.contractorRep },
+          clientContact: { name: ticketClientContact || jobRecord.clientRep }, contractorContact: { name: ticketContractorContact || jobRecord.contractorRep },
           lines: buildLines(), status: "Draft",
-          crew, delays, alreadyCreated: inDb, sendForApproval, approvalTo: to
+          crew, delays, alreadyCreated: inDb, sendForApproval, approvalTo: to, clientKey
         });
         // Queued counts as safe: the work is on the device in the outbox now,
         // which is a better home for it than the recovery copy.
@@ -648,7 +673,7 @@ export function TicketMobileScreen({ job, jobRecord, currentUser, onSaved, ticke
               return (
                 <div key={r.key} style={{ display: "flex", alignItems: "center", gap: 8, borderBottom: "1px solid color-mix(in srgb, var(--color-text) 8%, transparent)", paddingBottom: 6 }}>
                   <div style={{ flex: 1, minWidth: 0 }}>
-                    <div style={{ fontSize: 15 }}>{r.item.label}</div>
+                    <div style={{ fontSize: 15 }}>{r.item.label} {isUnpriced(r.item) && <TagX variant="outline">unpriced</TagX>}</div>
                     <div className="tabular" style={{ fontSize: 10, color: "color-mix(in srgb, var(--color-text) 55%, transparent)" }}>{money(rate)} / weld</div>
                   </div>
                   {/* Typed, like Other charges below. These were − / + only,
@@ -671,7 +696,7 @@ export function TicketMobileScreen({ job, jobRecord, currentUser, onSaved, ticke
                 <span style={{ fontSize: 11, width: 52, flex: "none", textTransform: "uppercase", letterSpacing: ".04em", color: "color-mix(in srgb, var(--color-text) 60%, transparent)" }}>{g.title}</span>
                 <select className="input" value={pick} aria-label={`Add a ${g.title} line`}
                   onChange={e => setWeldPicks(p => ({ ...p, [g.id]: e.target.value }))} style={{ flex: 1, minWidth: 0 }}>
-                  {avail.map(w => <option key={w.key} value={w.key}>{shortWeldLabel(g.id, w.label)}</option>)}
+                  {avail.map(w => <option key={w.key} value={w.key}>{shortWeldLabel(g.id, w.label)}{isUnpriced(w) ? " (unpriced)" : ""}</option>)}
                 </select>
                 <Btn variant="secondary" onClick={() => {
                   setWeldLines(p => [...p, { key: pick, qty: 1 }]);
@@ -697,7 +722,7 @@ export function TicketMobileScreen({ job, jobRecord, currentUser, onSaved, ticke
               return (
                 <div key={r.key} style={{ display: "flex", alignItems: "center", gap: 8, borderBottom: "1px solid color-mix(in srgb, var(--color-text) 8%, transparent)", paddingBottom: 6 }}>
                   <div style={{ flex: 1, minWidth: 0 }}>
-                    <div style={{ fontSize: 14 }}>{r.item.label}</div>
+                    <div style={{ fontSize: 14 }}>{r.item.label} {isUnpriced(r.item) && <TagX variant="outline">unpriced</TagX>}</div>
                     <div className="tabular" style={{ fontSize: 10, color: "color-mix(in srgb, var(--color-text) 55%, transparent)" }}>{money(rate)} / {r.item.unit}</div>
                   </div>
                   <NumField style={{ width: 66, textAlign: "right" }} step={r.item.step || 1} value={r.qty}
@@ -712,7 +737,7 @@ export function TicketMobileScreen({ job, jobRecord, currentUser, onSaved, ticke
           {availableService.length > 0 && (
             <div style={{ display: "flex", gap: 6 }}>
               <select className="input" value={effServicePick} onChange={e => setServicePick(e.target.value)} style={{ flex: 1 }}>
-                {availableService.map(s => <option key={s.key} value={s.key}>{s.label}</option>)}
+                {availableService.map(s => <option key={s.key} value={s.key}>{s.label}{isUnpriced(s) ? " (unpriced)" : ""}</option>)}
               </select>
               <Btn variant="secondary" onClick={() => { const pick = effServicePick; if (!pick) return; setOtherLines(p => [...p, { key: pick, qty: 1 }]); const rest = availableService.filter(s => s.key !== pick); if (rest[0]) setServicePick(rest[0].key); }}>Add</Btn>
             </div>
@@ -830,12 +855,18 @@ export function TicketMobileScreen({ job, jobRecord, currentUser, onSaved, ticke
               : "No client rep on this ticket yet — add one when raising it, or in the job record, before sending for approval."}
           </div>
           <ErrorBox>{saveError}</ErrorBox>
+          {unpriced.length > 0 && (
+            <div style={{ border: "1px solid var(--color-accent-700)", padding: "10px 12px", fontSize: 12 }}>
+              {unpriced.length === 1 ? `${unpriced[0].item.label} isn't priced on this client's rate card yet` : `${unpriced.length} lines aren't priced on this client's rate card yet`} — the ticket can be saved, but it can't go to the client until an admin prices {unpriced.length === 1 ? "it" : "them"} in Rate admin, or {unpriced.length === 1 ? "it comes" : "they come"} off the ticket.
+            </div>
+          )}
           {openJha && (
             <div style={{ border: "1px solid var(--color-accent)", padding: "10px 12px", fontSize: 12 }}>
               The JHA for this job is still open. Close it out on Job detail once you have the end readings off the DRDs.
             </div>
           )}
-          <Btn variant="primary" block style={{ minHeight: 56, fontSize: 15 }} onClick={() => save(true)} disabled={saving || !ticketId || total <= 0}>
+          <Btn variant="primary" block style={{ minHeight: 56, fontSize: 15 }} onClick={() => save(true)} disabled={saving || !ticketId || total <= 0 || unpriced.length > 0}
+            title={unpriced.length ? "An unpriced line is on this ticket — see the note above" : undefined}>
             {saving ? "Saving…" : emailFailed ? "Retry approval email" : "Email for approval"}
           </Btn>
           {/* No total gate here, unlike sending: a draft with nothing on it

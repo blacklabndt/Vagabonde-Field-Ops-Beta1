@@ -601,11 +601,27 @@ export const Db = {
     return !!data;
   },
 
+  // A suggestion, never a claim: the highest number carrying the newest
+  // job's prefix, plus one. Job numbers are freeform — the newest job used
+  // to be read as "J-" + digits, so a card numbered S-1042 suggested J-1,
+  // and J-50 followed by J-12 suggested J-13.
   async getNextJobNumber() {
     const recent = await this.getMostRecentJob();
     if (!recent) return "J-1";
-    const n = parseInt(String(recent.id || "").replace("J-", ""), 10);
-    return "J-" + (isNaN(n) ? 1 : n + 1);
+    const m = /^(.*?)(\d+)$/.exec(String(recent.id || "").trim());
+    if (!m) return "";
+    const prefix = m[1];
+    const { data, error } = await sbClient.from("jobs").select("job_number")
+      .ilike("job_number", prefix.replace(/[%_]/g, "\\$&") + "%")
+      .order("created_at", { ascending: false }).limit(500);
+    if (error) throw error;
+    const width = m[2].length;
+    let top = parseInt(m[2], 10);
+    for (const row of data || []) {
+      const mm = /^(.*?)(\d+)$/.exec(String(row.job_number || ""));
+      if (mm && mm[1] === prefix) top = Math.max(top, parseInt(mm[2], 10));
+    }
+    return prefix + String(top + 1).padStart(width, "0");
   },
 
   // The dispatch board. Only the plain first page — no filter, no search — is
@@ -969,6 +985,24 @@ export const Db = {
   // are set independently and often partially — someone who only changed the
   // severity last time should still get their usual probability back, not a
   // blank next to it.
+  // The site information and equipment record of the job's most recent
+  // assessment — muster point, communication, hospital, first aid, the H₂S
+  // serial, the switches — so day two of a job doesn't retype day one.
+  // Cached per job like the rest of the job's paperwork.
+  async lastJhaDetailsForJob(jobDbId) {
+    if (!jobDbId) return null;
+    return OfflineCache.readThrough("jha.last." + jobDbId, async () => {
+      const { data, error } = await sbClient
+        .from("jhas").select("details, work_date, signed_at")
+        .eq("job_id", jobDbId)
+        .order("signed_at", { ascending: false })
+        .limit(1).maybeSingle();
+      if (error) throw error;
+      if (!data || !data.details) return null;
+      return { site: data.details.site || null, equipment: data.details.equipment || null, workDate: data.work_date || null };
+    });
+  },
+
   async lastHazardRatings(profileId) {
     if (!profileId) return {};
     return OfflineCache.readThrough("hazardratings." + profileId, async () => {
@@ -1146,8 +1180,8 @@ export const Db = {
     return { overdue: Number(r.overdue_count || 0), dueSoon: Number(r.due_soon_count || 0) };
   },
 
-  async searchEquipment({ page = 0, pageSize = 10, filter = "All" } = {}) {
-    const { data, error } = await sbClient.rpc("search_equipment", { filter_key: filter, page_num: page, page_size: pageSize });
+  async searchEquipment({ page = 0, pageSize = 10, filter = "All", search = "" } = {}) {
+    const { data, error } = await sbClient.rpc("search_equipment", { filter_key: filter, page_num: page, page_size: pageSize, search: String(search || "").trim() });
     if (error) throw error;
     const rows = (data || []).map(e => ({
       id: e.id, type: e.type, serial: e.serial_number,
@@ -1193,8 +1227,14 @@ export const Db = {
   // Uploads the actual PDF to the private `reports` bucket, then records
   // the row. Falls back to storing metadata only if the browser gave us no
   // File (the mobile screen's demo rows, or a same-name collision).
-  async uploadReport({ jobDbId, jobNumber, file, welds, result, interpretedBy, send, sendTo }) {
+  async uploadReport({ jobDbId, jobNumber, file, welds, result, interpretedBy, send, sendTo, clientKey = null }) {
     await this.assertJobOpen(jobDbId);
+    // The same idempotency key as createTicket: a report whose insert landed
+    // but whose answer was lost must not be filed — and emailed — twice.
+    if (clientKey) {
+      const { data: already } = await sbClient.from("reports").select("*").eq("client_key", clientKey).maybeSingle();
+      if (already) return already;
+    }
     let pdfKey = null;
     if (file) {
       // The key is sanitised, the display name is not: storage refuses
@@ -1214,9 +1254,22 @@ export const Db = {
     const { data, error } = await sbClient.from("reports").insert({
       job_id: jobDbId, filename: file ? file.name : "report.pdf", pdf_key: pdfKey,
       welds, result, interpreted_by: interpretedBy,
-      sent_at: send ? new Date().toISOString() : null, sent_to: send ? sendTo : null
+      sent_at: send ? new Date().toISOString() : null, sent_to: send ? sendTo : null,
+      client_key: clientKey
     }).select().single();
-    if (error) throw error;
+    if (error) {
+      // The row for this key exists after all — the first attempt's answer
+      // was lost. Hand that row back, and drop the copy of the PDF this
+      // attempt just stored so the bucket doesn't keep an orphan.
+      if (error.code === "23505" && clientKey && /client_key/.test(error.message || "")) {
+        const { data: already } = await sbClient.from("reports").select("*").eq("client_key", clientKey).maybeSingle();
+        if (already) {
+          if (pdfKey && pdfKey !== already.pdf_key) await sbClient.storage.from("reports").remove([pdfKey]).then(() => {}, () => {});
+          return already;
+        }
+      }
+      throw error;
+    }
     return data;
   },
 
@@ -1803,17 +1856,46 @@ export const Db = {
     };
   },
 
-  async searchTickets({ page = 0, pageSize = 10, status = "All" } = {}) {
-    const { data, error } = await sbClient.rpc("search_tickets", { status_filter: status, page_num: page, page_size: pageSize });
+  // `q` matches the ticket number, job number, project, client or technician;
+  // `from`/`to` bound the work date (YYYY-MM-DD, inclusive). All optional.
+  async searchTickets({ page = 0, pageSize = 10, status = "All", q = "", from = null, to = null } = {}) {
+    const { data, error } = await sbClient.rpc("search_tickets", {
+      status_filter: status, page_num: page, page_size: pageSize,
+      q: String(q || "").trim(), date_from: from || null, date_to: to || null
+    });
     if (error) throw error;
     const rows = (data || []).map(t => ({
-      id: t.id, date: dayMonth(localDate(t.work_date)),
+      id: t.id, date: dayMonth(localDate(t.work_date)), workDate: t.work_date,
       age: ageInDays(t.created_at),
       amount: Number(t.total), status: t.status, tech: t.technician_name || "",
-      job: t.job_number || "", project: t.project || "", client: t.client_name || ""
+      job: t.job_number || "", project: t.project || "", client: t.client_name || "",
+      chasedAt: t.chased_at || null, invoicedAt: t.invoiced_at || null
     }));
     const total = data && data.length ? Number(data[0].total_count) : 0;
     return { rows, total };
+  },
+
+  // Approved → Invoiced, and back for a slip. Admin-only in the database
+  // (mark_tickets_invoiced); the approved-ticket immutability policies are
+  // untouched, this RPC is the one door. Returns how many rows moved.
+  async markTicketsInvoiced(ticketIds) {
+    const { data, error } = await sbClient.rpc("mark_tickets_invoiced", { p_ids: ticketIds, p_invoiced: true });
+    if (error) throw error;
+    return Number(data || 0);
+  },
+  async unmarkTicketsInvoiced(ticketIds) {
+    const { data, error } = await sbClient.rpc("mark_tickets_invoiced", { p_ids: ticketIds, p_invoiced: false });
+    if (error) throw error;
+    return Number(data || 0);
+  },
+
+  // "Chased" is a fact about the ticket, not about the page: a reload used
+  // to forget which clients had been nudged.
+  async markTicketChased(ticketId) {
+    const { data, error } = await sbClient.from("tickets")
+      .update({ chased_at: new Date().toISOString() }).eq("id", ticketId).select("id");
+    if (error) throw error;
+    if (!data || !data.length) throw plainError(`Ticket ${ticketId} couldn't be flagged — it may have been approved or cancelled meanwhile.`);
   },
 
   // Every ticket matching a filter, for the accounting export — paged, because
@@ -1927,11 +2009,22 @@ export const Db = {
   // primary key is the arbiter: on a collision, mint again and retry. Two
   // technicians would have to submit inside the same few milliseconds to see
   // one retry, and nothing about it is visible to them.
-  async createTicket({ initials, jobDbId, technicianId, workDate, clientContact, contractorContact, lines, status, delays }) {
+  // `clientKey` is the idempotency key the screen minted for this unsaved
+  // ticket. A save whose response was lost on the radio used to replay as a
+  // second ticket with a second number; with the key, the unique index
+  // turns the repeat into a lookup of the row that already landed, which is
+  // handed back as `{ existing: true }` so the caller knows its lines and
+  // crew may still need writing.
+  async createTicket({ initials, jobDbId, technicianId, workDate, clientContact, contractorContact, lines, status, delays, clientKey = null }) {
     await this.assertJobOpen(jobDbId);
     lines = lines.map(cleanLine);
     const total = totalOf(lines);
     assertBillable(total);
+
+    if (clientKey) {
+      const { data: already } = await sbClient.from("tickets").select("id, total").eq("client_key", clientKey).maybeSingle();
+      if (already) return { id: already.id, total: Number(already.total), existing: true };
+    }
 
     let id = null;
     for (let attempt = 0; ; attempt++) {
@@ -1948,11 +2041,18 @@ export const Db = {
         id, job_id: jobDbId, technician_id: technicianId, work_date: workDate,
         status, client_contact: clientContact, contractor_contact: contractorContact,
         total: 0,
-        delays: delays || null
+        delays: delays || null,
+        client_key: clientKey
       });
       if (!error) break;
-      // 23505 = unique violation: somebody took this number between the mint
-      // and the insert. Anything else is a real failure.
+      // 23505 = unique violation. On the key: this very ticket landed a
+      // moment ago and the answer was lost — return it. On the number:
+      // somebody took it between the mint and the insert — mint again.
+      // Anything else is a real failure.
+      if (error.code === "23505" && clientKey && /client_key/.test(error.message || "")) {
+        const { data: already } = await sbClient.from("tickets").select("id, total").eq("client_key", clientKey).maybeSingle();
+        if (already) return { id: already.id, total: Number(already.total), existing: true };
+      }
       if (error.code !== "23505" || attempt >= 4) throw error;
     }
 
@@ -2368,7 +2468,7 @@ export const Db = {
 
     const [{ data: source }, { data: existing }] = await Promise.all([
       sbClient.from("rate_lines").select("*").eq("schedule_id", def.id),
-      sbClient.from("rate_lines").select("id, kind, label, rate").eq("schedule_id", scheduleId)
+      sbClient.from("rate_lines").select("id, kind, label, rate, position").eq("schedule_id", scheduleId)
     ]);
     if (!source || !source.length) throw new Error("The default schedule has nothing on it yet — set it up first.");
 
@@ -2377,6 +2477,7 @@ export const Db = {
 
     const toAdd = [];
     const toFill = [];
+    const toMove = [];
     for (const l of source) {
       const match = mine.get(key(l));
       // Structure copies whether or not the line is priced yet: the house
@@ -2386,9 +2487,18 @@ export const Db = {
       // The default's dragged order comes along with each line.
       if (!match) {
         toAdd.push({ schedule_id: scheduleId, kind: l.kind, label: l.label, unit: l.unit, rate: l.rate, position: l.position });
-      } else if (Number(l.rate) && !Number(match.rate)) {
-        toFill.push({ id: match.id, rate: l.rate });
+      } else {
+        if (Number(l.rate) && !Number(match.rate)) toFill.push({ id: match.id, rate: l.rate });
+        // The order comes along for lines the card already had, too — the
+        // ticket dropdowns and the invoice follow position, and a card that
+        // follows the house card should read in the house card's order,
+        // not half in its own.
+        if (l.position != null && match.position !== l.position) toMove.push({ id: match.id, position: l.position });
       }
+    }
+    for (const m of toMove) {
+      const { error } = await sbClient.from("rate_lines").update({ position: m.position }).eq("id", m.id);
+      if (error) throw error;
     }
 
     if (toAdd.length) {
@@ -2405,7 +2515,7 @@ export const Db = {
       });
       if (error) throw error;
     }
-    return toAdd.length + toFill.length;
+    return toAdd.length + toFill.length + toMove.length;
   },
 
   async listOverrides() {
@@ -2990,6 +3100,10 @@ export const Db = {
 // inserted". Deletes say so plainly — a disappearing row is exactly when you
 // want to be told it was on purpose.
 const SAVE_MESSAGES = {
+  // Billing
+  markTicketsInvoiced: "Marked invoiced",
+  unmarkTicketsInvoiced: "Back to approved",
+  markTicketChased: "Flagged as chased",
   // Contacts and organisations
   createContact: "Contact added",
   updateContact: "Contact saved",
@@ -3086,10 +3200,43 @@ for (const [method, message] of Object.entries(SAVE_MESSAGES)) {
     continue;
   }
   Db[method] = async function (...args) {
-    const result = await original.apply(this, args);
+    let result;
+    try {
+      result = await original.apply(this, args);
+    } catch (e) {
+      // The database's own words — "new row violates row-level security
+      // policy", "duplicate key value" — reach the screen otherwise. Said
+      // in the person's terms instead, at the one place every write passes.
+      throw humanizeError(e);
+    }
     // Only on the way out, so a write that throws says nothing — the screen
     // shows the real error instead of a confirmation that isn't true.
     Toasts.show(message);
     return result;
   };
+}
+
+// What a refused write means to the person who pressed the button. Errors
+// that already carry a sentence written for them (plainError, ticketGone,
+// the friendly line errors) pass through untouched; so do network failures,
+// whose message the offline queue recognises by its wording. Everything
+// else is matched on the Postgres/PostgREST code, never on the text.
+export function humanizeError(e) {
+  if (!e || e.plain || e.ticketGone || isNetworkError(e)) return e;
+  const code = String(e.code || "");
+  const said = {
+    "42501": "Your account isn't allowed to do that. An admin can grant the access in Users & access.",
+    "23505": "That already exists — the number or name is taken. Check the list and try a different one.",
+    "23503": "That's still in use by something else on file (a ticket, a job, an assessment), so it can't be removed.",
+    "23514": "That value isn't one this field accepts.",
+    "23502": "A required field is empty.",
+    "PGRST116": "That record isn't there any more — it may have been deleted on another device. Refresh and try again.",
+    "22003": "That number is too large to store — check the quantity or the rate."
+  }[code];
+  if (!said) return e;
+  const friendly = new Error(said);
+  friendly.code = e.code;
+  friendly.cause = e;
+  friendly.plain = true;
+  return friendly;
 }

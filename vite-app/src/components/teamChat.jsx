@@ -366,9 +366,21 @@ function PinThumb({ pin, onOpen }) {
 // puts the room back.
 function Lightbox({ src, onClose }) {
   useEffect(() => {
-    const onKey = e => { if (e.key === "Escape") onClose(); };
-    window.addEventListener("keydown", onKey);
-    return () => window.removeEventListener("keydown", onKey);
+    // Capture phase, and the Escape stops there. A picture opened from the
+    // pinned-message dialog put two listeners on window, and Dialog's — a
+    // bubble-phase one, see common.jsx — ran on the same key press, so one
+    // Escape closed the picture AND the dialog underneath it. Capture runs
+    // first, so stopping propagation here means the layer below never hears
+    // the key that was meant for this one. stopImmediatePropagation covers
+    // a second capture-phase listener on window as well.
+    const onKey = e => {
+      if (e.key !== "Escape") return;
+      e.stopPropagation();
+      e.stopImmediatePropagation();
+      onClose();
+    };
+    window.addEventListener("keydown", onKey, { capture: true });
+    return () => window.removeEventListener("keydown", onKey, { capture: true });
   }, [onClose]);
   return (
     <div
@@ -937,6 +949,9 @@ export function TeamChatScreen({ currentUser, onOpenJob, onRead }) {
 
   // Admin moderation: take a message out of the room.
   const remove = async id => {
+    // The × sits a few pixels from the reactions in the same little menu,
+    // and it deletes for the whole crew, not just this screen.
+    if (!confirm("Delete this message for everyone? This can't be undone.")) return;
     try {
       await Db.deleteChatMessage(id);
       setMessages(prev => prev.filter(m => m.id !== id));
