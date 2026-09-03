@@ -39,6 +39,9 @@ export function JobDetailScreen({ job, currentUser, onStartJha, onOpenTicket, on
   // be invisible — the link simply wouldn't open. This puts the function's
   // own error on screen and lets it be retried.
   const [rendering, setRendering] = useState(null);
+  // Which JHA row has its maintenance actions (send, re-render, delete)
+  // unfolded — one at a time.
+  const [moreJha, setMoreJha] = useState(null);
   // Keyed by row id (a JHA's or a report's), not a single string: one message
   // in screen state was drawn beside every row on the table, so a failure on
   // one assessment read as a failure on all of them.
@@ -275,26 +278,35 @@ export function JobDetailScreen({ job, currentUser, onStartJha, onOpenTicket, on
                       ? <TagX variant="outline">Open — no end readings</TagX>
                       : <TagX variant="neutral">Closed {j.closedAt}</TagX>}</td>
                     <td style={{ textAlign: "right" }}>
-                      <div style={{ display: "flex", gap: 8, justifyContent: "flex-end", alignItems: "center" }}>
+                      <div style={{ display: "flex", gap: 8, justifyContent: "flex-end", alignItems: "center", flexWrap: "wrap" }}>
                         {rowError[j.id] && <span style={{ fontSize: 11, color: "var(--color-accent-700)", maxWidth: 320, textAlign: "left" }}>{rowError[j.id]}</span>}
-                        <Btn variant="ghost" disabled={rendering === j.id} onClick={async () => {
-                          setRendering(j.id);
-                          setRowError(p => ({ ...p, [j.id]: "" }));
-                          try { await Db.renderJhaPdf(j.id); await refreshJhas(); }
-                          catch (e) { setRowError(p => ({ ...p, [j.id]: e.message || "The PDF didn't render." })); }
-                          setRendering(null);
-                        }}>{rendering === j.id ? "Rendering…" : "Re-render PDF"}</Btn>
+                        {/* The day's action stands alone; the maintenance
+                            ones (re-render, send, delete) sit behind "More"
+                            — four equal buttons in one cell didn't survive a
+                            phone, and "Re-render PDF" is not what anyone
+                            comes to this row for. */}
                         {j.status === "Open" && !complete && (
                           <Btn variant="secondary" onClick={() => setClosingJha(j)}>Close out</Btn>
                         )}
-                        <Btn variant="secondary" disabled={!j.pdfKey}
-                          title={j.pdfKey ? undefined : "Render the PDF first"}
-                          onClick={() => setSendingJha(j)}>Send to…</Btn>
-                        {canDeleteFiled && (
-                          <Btn variant="ghost" disabled={complete || deletingJhaId === j.id}
-                            title={complete ? "Reopen the job first" : undefined}
-                            onClick={() => deleteJha(j)}>{deletingJhaId === j.id ? "Deleting…" : "Delete"}</Btn>
-                        )}
+                        <Btn variant="ghost" aria-expanded={moreJha === j.id}
+                          onClick={() => setMoreJha(m => m === j.id ? null : j.id)}>{moreJha === j.id ? "Less" : "More…"}</Btn>
+                        {moreJha === j.id && (<>
+                          <Btn variant="secondary" disabled={!j.pdfKey}
+                            title={j.pdfKey ? undefined : "Render the PDF first"}
+                            onClick={() => setSendingJha(j)}>Send to…</Btn>
+                          <Btn variant="ghost" disabled={rendering === j.id} onClick={async () => {
+                            setRendering(j.id);
+                            setRowError(p => ({ ...p, [j.id]: "" }));
+                            try { await Db.renderJhaPdf(j.id); await refreshJhas(); }
+                            catch (e) { setRowError(p => ({ ...p, [j.id]: e.message || "The PDF didn't render." })); }
+                            setRendering(null);
+                          }}>{rendering === j.id ? "Rendering…" : "Re-render PDF"}</Btn>
+                          {canDeleteFiled && (
+                            <Btn variant="ghost" disabled={complete || deletingJhaId === j.id}
+                              title={complete ? "Reopen the job first" : undefined}
+                              onClick={() => deleteJha(j)}>{deletingJhaId === j.id ? "Deleting…" : "Delete"}</Btn>
+                          )}
+                        </>)}
                       </div>
                     </td>
                   </tr>
@@ -416,7 +428,7 @@ export function JobDetailScreen({ job, currentUser, onStartJha, onOpenTicket, on
             </table></TableScroll>
             <div className="strip" style={{ gridTemplateColumns: seesPrices ? "repeat(2, 1fr)" : "1fr", marginTop: 14 }}>
               <div><div className="strip-label">Tickets raised</div><div className="strip-value">{tickets.length}</div></div>
-              {seesPrices && <div><div className="strip-label">Ticket total</div><div className="strip-value">{money(ticketTotal)}</div></div>}
+              {seesPrices && <div><div className="strip-label">Ticket total · before GST</div><div className="strip-value">{money(ticketTotal)}</div></div>}
             </div>
           </Blueprint>
         </div>

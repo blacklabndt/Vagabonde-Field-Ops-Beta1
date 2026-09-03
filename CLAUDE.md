@@ -173,6 +173,17 @@ session has set `app.confirm_total_wipe = 'yes'`.
   passes the key too (it once didn't, on the one path that mattered).
 - contacts, equipment, timesheet_approvals and arcade_scores reads need
   `is_staff()` too, so a locked account's unexpired token reads nothing.
+- A client rep's "Query this ticket" (approval page) writes tickets.
+  queried_at/query_text/query_by with the service role; the tracker shows
+  it; send-ticket-approval clears it on resend. jobs.last_activity_at is
+  kept by definer triggers on tickets/jhas/reports (private.
+  touch_job_activity) and orders the board (search_jobs). search_tickets
+  also returns filtered_total (null for non-price roles).
+- Accounts: create-user with `invite: true` mints a password nobody knows
+  and mails Auth's recovery link through Resend (_shared/setPassword.ts);
+  password-reset (Admin-gated) mails the same link to an existing account.
+  Both land on the app's own set-password screen. The link's redirect is
+  the approval base URL's origin, else the Auth Site URL.
 - `authenticated` has USAGE on schema `private` (migration 20260903055300).
   A policy expression is stored resolved and never needed it; a SQL or
   plpgsql function that runs as the caller and names `private.user_role()`

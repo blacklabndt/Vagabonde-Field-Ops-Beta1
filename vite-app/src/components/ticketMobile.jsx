@@ -1,5 +1,5 @@
 import React, { useState, useEffect, useMemo, useRef } from "react";
-import { money, todayLocal, localDate, dayMonth, initialsOf, crewRoleFor, hours, lineTotal } from "../data.js";
+import { money, todayLocal, localDate, dayMonth, initialsOf, crewRoleFor, hours, lineTotal, gstOn } from "../data.js";
 import { Db } from "../db.js";
 import { Blueprint, Btn, TagX, Field, ErrorBox, emailIn, NoJobSelected, QueuedPanel, NumField , Loading } from "./common.jsx";
 import { OfflineQueue } from "../offlineQueue.js";
@@ -47,7 +47,7 @@ const hasEntries = (weldLines, otherLines, crew, delays = "") =>
 // `seed` is what Job detail's Create ticket dialog chose for a NEW ticket —
 // the work date and this ticket's own reps. Absent for a reopened draft and
 // for a ticket started from Home.
-export function TicketMobileScreen({ job, jobRecord, currentUser, onSaved, ticket, seed = null }) {
+export function TicketMobileScreen({ job, jobRecord, currentUser, onSaved, ticket, seed = null, onOpenJob = null }) {
   const [rates, setRates] = useState(null);
   const [loadError, setLoadError] = useState("");
   // Both belong to the in-progress-ticket recovery further down, but they are
@@ -137,6 +137,18 @@ export function TicketMobileScreen({ job, jobRecord, currentUser, onSaved, ticke
   // Standby, waiting on the line, road bans. Prints on the client's field
   // invoice, so it belongs to the day rather than to the job.
   const [delays, setDelays] = useState("");
+  // Changing where the approval goes: the box, and this client's people on
+  // file to pick from (fetched the first time the box opens).
+  const [editingTo, setEditingTo] = useState(false);
+  const [clientContacts, setClientContacts] = useState([]);
+  useEffect(() => {
+    if (!editingTo || !job || !job.clientId) return;
+    let live = true;
+    Db.listContactsForOrg("client", job.clientId)
+      .then(rows => { if (live) setClientContacts(rows || []); })
+      .catch(() => { /* the box still takes a typed address */ });
+    return () => { live = false; };
+  }, [editingTo, job ? job.clientId : null]);
   // A number worked out on this device rather than handed over by the
   // database. It usually matches what gets stored, but it can be overtaken,
   // so it must not read like a settled fact — this is the number a technician
@@ -475,6 +487,11 @@ export function TicketMobileScreen({ job, jobRecord, currentUser, onSaved, ticke
     if (sendForApproval) {
       try { to = approvalEmail(ticketClientContact || jobRecord.clientRep); }
       catch (e) { setSaveError(e.message); return; }
+      // PO = AFE is what the client's accounts payable pays against. A
+      // ticket without one can still go out — some jobs run on a verbal —
+      // but not without being asked.
+      if (!String(jobRecord.afe || "").trim()
+          && !confirm(`${job.id} has no AFE / PO on file. The client's accounts payable pays against it — send this ticket for approval anyway?`)) return;
     }
 
     setSaving(true);
@@ -637,7 +654,19 @@ export function TicketMobileScreen({ job, jobRecord, currentUser, onSaved, ticke
               </div>
             )}
             {/* The work date is on the face of the ticket now — it decides
-                which pay period the crew's hours land in. */}
+                which pay period the crew's hours land in. Until the ticket
+                exists it can be changed here (writing up yesterday at
+                06:00 used to be impossible from Home: the date was today,
+                full stop); once saved, the number carries the date and it
+                is fixed. The number re-mints when the day changes. */}
+            {!created && (
+              <label style={{ display: "flex", alignItems: "center", gap: 8, fontSize: 12, marginTop: 4 }}>
+                <span style={{ color: "color-mix(in srgb, var(--color-text) 55%, transparent)" }}>Work date</span>
+                <input type="date" className="input" value={workDate} max={todayLocal()} aria-label="Work date"
+                  style={{ minHeight: 36, width: "auto", fontSize: 14 }}
+                  onChange={e => { if (e.target.value) setWorkDate(e.target.value); }} />
+              </label>
+            )}
             <div className="tabular" style={{ fontSize: 12, color: "color-mix(in srgb, var(--color-text) 55%, transparent)" }}>
               {dayMonth(localDate(workDate))} · {job.client}{jobRecord.afe ? ` · ${jobRecord.afe}` : ""}{jobRecord.lsd ? ` · ${jobRecord.lsd}` : ""}
             </div>
@@ -761,9 +790,16 @@ export function TicketMobileScreen({ job, jobRecord, currentUser, onSaved, ticke
             </div>
           )}
 
+          {/* The figure the rep signs for is the one with tax on it; the
+              subtotal alone read as "the total" and a technician quoting
+              the screen was quoting a different number than the page the
+              client signs. Same integer-cent GST as the invoice. */}
           <Blueprint style={{ padding: "12px 14px", background: "color-mix(in srgb, var(--color-accent) 8%, transparent)" }}>
-            <div style={{ fontSize: 10, textTransform: "uppercase", color: "color-mix(in srgb, var(--color-text) 55%, transparent)" }}>Ticket total</div>
-            <div className="tabular" style={{ fontFamily: "var(--font-heading)", fontWeight: 600, fontSize: 30 }}>{money(total)}</div>
+            <div style={{ fontSize: 10, textTransform: "uppercase", color: "color-mix(in srgb, var(--color-text) 55%, transparent)" }}>Ticket total · including GST</div>
+            <div className="tabular" style={{ fontFamily: "var(--font-heading)", fontWeight: 600, fontSize: 30 }}>{money(Math.round(total * 100 + gstOn(total) * 100) / 100)}</div>
+            <div className="tabular" style={{ fontSize: 12, color: "color-mix(in srgb, var(--color-text) 60%, transparent)" }}>
+              {money(total)} before GST · GST {money(gstOn(total))}
+            </div>
           </Blueprint>
 
           <div style={{ display: "flex", alignItems: "center", marginTop: 6 }}>
@@ -798,14 +834,20 @@ export function TicketMobileScreen({ job, jobRecord, currentUser, onSaved, ticke
                     <NumField step="0.5" style={{ textAlign: "right" }} value={c.ot}
                       onChange={v => setCrewField(c.profileId, "ot", v)} />
                   </Field>
-                  <Field label="Solo reg hrs">
-                    <NumField step="0.5" style={{ textAlign: "right" }} value={c.solo}
-                      onChange={v => setCrewField(c.profileId, "solo", v)} />
-                  </Field>
-                  <Field label="Solo OT hrs">
-                    <NumField step="0.5" style={{ textAlign: "right" }} value={c.soloOt}
-                      onChange={v => setCrewField(c.profileId, "soloOt", v)} />
-                  </Field>
+                  {/* Solo hours are hours worked without an assistant; a
+                      helper is the assistant, so the two boxes are
+                      meaningless on their row — and four fewer fields on
+                      the longest form in the app. */}
+                  {c.role !== "Helper" && (<>
+                    <Field label="Solo reg hrs">
+                      <NumField step="0.5" style={{ textAlign: "right" }} value={c.solo}
+                        onChange={v => setCrewField(c.profileId, "solo", v)} />
+                    </Field>
+                    <Field label="Solo OT hrs">
+                      <NumField step="0.5" style={{ textAlign: "right" }} value={c.soloOt}
+                        onChange={v => setCrewField(c.profileId, "soloOt", v)} />
+                    </Field>
+                  </>)}
                   <Field label="Dose mR">
                     <NumField step="0.1" style={{ textAlign: "right" }} value={c.dose}
                       onChange={v => setCrewField(c.profileId, "dose", v)} />
@@ -867,11 +909,31 @@ export function TicketMobileScreen({ job, jobRecord, currentUser, onSaved, ticke
               style={{ marginTop: 6, resize: "vertical", fontFamily: "inherit" }} />
           </div>
 
-          <div style={{ fontSize: 11, color: "color-mix(in srgb, var(--color-text) 55%, transparent)" }}>
-            {(ticketClientContact || jobRecord.clientRep)
-              ? `Approval link will go to ${ticketClientContact || jobRecord.clientRep}`
-              : "No client rep on this ticket yet — add one when raising it, or in the job record, before sending for approval."}
+          {/* Where the approval goes is this ticket's rep — the job's by
+              default, and changeable right here: the rep on site today is
+              not always the job's rep, and leaving the screen to fix that
+              lost the entries. */}
+          <div style={{ fontSize: 11, color: "color-mix(in srgb, var(--color-text) 55%, transparent)", display: "flex", alignItems: "center", gap: 8, flexWrap: "wrap" }}>
+            <span>
+              {(ticketClientContact || jobRecord.clientRep)
+                ? `Approval link will go to ${ticketClientContact || jobRecord.clientRep}`
+                : "No client rep on this ticket yet — add one below, or in the job record, before sending for approval."}
+            </span>
+            <button type="button" onClick={() => setEditingTo(v => !v)}
+              style={{ background: "none", border: 0, padding: 0, font: "inherit", color: "var(--color-accent-700)", cursor: "pointer", textDecoration: "underline" }}>
+              {editingTo ? "Done" : "Change"}
+            </button>
           </div>
+          {editingTo && (
+            <Field label="Send the approval to">
+              <input className="input" list="ticket-rep-options" value={ticketClientContact} autoFocus
+                placeholder="Name <email@client.com>"
+                onChange={e => setTicketClientContact(e.target.value)} />
+              <datalist id="ticket-rep-options">
+                {clientContacts.map(c => <option key={c.id} value={`${c.name}${c.email ? ` <${c.email}>` : ""}`}>{c.title || ""}</option>)}
+              </datalist>
+            </Field>
+          )}
           <ErrorBox>{saveError}</ErrorBox>
           {unpriced.length > 0 && (
             <div style={{ border: "1px solid var(--color-accent-700)", padding: "10px 12px", fontSize: 12 }}>
@@ -879,8 +941,9 @@ export function TicketMobileScreen({ job, jobRecord, currentUser, onSaved, ticke
             </div>
           )}
           {openJha && (
-            <div style={{ border: "1px solid var(--color-accent)", padding: "10px 12px", fontSize: 12 }}>
-              The JHA for this job is still open. Close it out on Job detail once you have the end readings off the DRDs.
+            <div style={{ border: "1px solid var(--color-accent)", padding: "10px 12px", fontSize: 12, display: "flex", alignItems: "center", gap: 10, flexWrap: "wrap" }}>
+              <span style={{ flex: "1 1 200px" }}>The JHA for this job is still open. Close it out on Job detail once you have the end readings off the DRDs.</span>
+              {onOpenJob && <Btn variant="secondary" onClick={onOpenJob} style={{ minHeight: 36 }}>Go to Job detail</Btn>}
             </div>
           )}
           <Btn variant="primary" block style={{ minHeight: 56, fontSize: 15 }} onClick={() => save(true)} disabled={saving || !ticketId || total <= 0 || unpriced.length > 0}

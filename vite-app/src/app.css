@@ -118,6 +118,7 @@ input[type=range] { accent-color: var(--color-accent); }
 .phone-shell { display: flex; gap: 28px; align-items: flex-start; flex-wrap: wrap; }
 .phone-frame { width: 390px; padding: 14px; display: flex; flex-direction: column; gap: 12px; }
 .phone-explain { width: 280px; font-size: 13px; color: color-mix(in srgb, var(--color-text) 65%, transparent); padding-top: 10px; }
+.hazard-list { max-height: 460px; overflow-y: auto; }
 .hazard-row { min-height: 56px; display: flex; align-items: center; gap: 12px; padding: 8px 10px; border: 1px solid transparent; }
 .hazard-row.on { border-color: var(--color-accent); background: color-mix(in srgb, var(--color-accent) 7%, transparent); }
 .hazard-check {
@@ -326,8 +327,14 @@ tbody tr.clickable { cursor: pointer; }
   .row-x { width: 40px; height: 40px; font-size: 18px; }
   .pill { min-height: 40px; }
 
-  .topbar { gap: 12px; padding: 10px 14px; flex-wrap: nowrap; }
-  .topbar-brand { width: 116px; height: 26px; }
+  .topbar { gap: 10px; padding: 10px 12px; flex-wrap: nowrap; }
+  .topbar-brand { width: 116px; height: 26px; flex: none; }
+  /* The section name gives way before anything else does: on a 360px
+     phone "Users & access" plus the Offline tag, the queue badge and the
+     update chip overflowed the bar. It shrinks and truncates instead. */
+  .topbar-section { flex: 1 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  /* The hazard list rides the page's own scroll on a phone. */
+  .hazard-list { max-height: none; overflow: visible; }
   /* The bar keeps only what a thumb needs: menu, mark, theme. Name and sign
      out live in the drawer, where there is room for them. */
   .topbar-who { display: none; }

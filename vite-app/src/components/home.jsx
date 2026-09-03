@@ -356,7 +356,7 @@ function NewTicketDialog({ onClose, onChosen }) {
 
 function NewJobDialog({ currentUser, clients, contractors, contacts, onClose, onCreate }) {
   const [form, setForm] = useState({
-    project: "", jobNumber: "", client: "", lsd: "",
+    project: "", jobNumber: "", client: "", lsd: "", afe: "",
     clientRepId: "", clientRepName: "", clientRepEmail: "", clientRepPhone: "",
     contractor: "", contractorRepId: "", contractorRepName: "", contractorRepEmail: "", contractorRepPhone: ""
   });
@@ -557,6 +557,7 @@ function NewJobDialog({ currentUser, clients, contractors, contacts, onClose, on
 
     const details = {
       jobNumber: id, project: form.project.trim(), clientName: form.client, lsd: form.lsd.trim(),
+      afe: form.afe.trim(),
       createdBy: currentUser.id,
       clientRep: { name: form.clientRepName, email: form.clientRepEmail, phone: form.clientRepPhone },
       contractorName: form.contractor,
@@ -659,6 +660,13 @@ function NewJobDialog({ currentUser, clients, contractors, contacts, onClose, on
       </Field>
       <Field label="Site · LSD" required missing={miss.is("lsd")}>
         <input {...miss.props("lsd")} maxLength={80} value={form.lsd} onChange={e => set("lsd", e.target.value)} placeholder="13-22-047-05 W5M" />
+      </Field>
+      {/* PO = AFE: what the client's accounts payable pays against. It could
+          only be set on the job record after the fact, and a ticket sent
+          without one went out unflagged. */}
+      <Field label="AFE / PO">
+        <input className="input" maxLength={60} value={form.afe} onChange={e => set("afe", e.target.value)}
+          placeholder="Leave blank if the client hasn't issued one yet" />
       </Field>
       <Field label="Created by"><input className="input" value={currentUser.name} disabled /></Field>
 

@@ -171,6 +171,40 @@ export function recentPayPeriods(count = 12, from = new Date()) {
 
 export const hours = n => (Math.round((Number(n) || 0) * 100) / 100).toFixed(2);
 
+// ── Dose periods ───────────────────────────────────────────────────────
+// Calendar quarters and calendar years, newest first — the dose ledger's
+// pickers. The crew's dosimetry year is the calendar year, per Kyle.
+export function recentQuarters(count = 8, from = new Date()) {
+  const out = [];
+  let y = from.getFullYear();
+  let q = Math.floor(from.getMonth() / 3);
+  for (let i = 0; i < count; i++) {
+    const m1 = q * 3 + 1;
+    out.push({ kind: "quarter", label: `Q${q + 1} ${y}`, start: iso(y, m1, 1), end: iso(y, m1 + 2, lastDayOf(y, m1 + 2)) });
+    q -= 1;
+    if (q < 0) { q = 3; y -= 1; }
+  }
+  return out;
+}
+export function recentYears(count = 5, from = new Date()) {
+  const out = [];
+  for (let i = 0; i < count; i++) {
+    const y = from.getFullYear() - i;
+    out.push({ kind: "year", label: String(y), start: iso(y, 1, 1), end: iso(y, 12, 31) });
+  }
+  return out;
+}
+// Which quarter (1–4) a YYYY-MM-DD work date falls in.
+export const quarterOf = dateStr => Math.floor((Number(String(dateStr || "").slice(5, 7)) - 1) / 3) + 1;
+
+// Whether a timestamp is within the last `days` days — "chased on Tuesday"
+// is recent enough not to chase again on Thursday.
+export const withinDays = (ts, days) => {
+  if (!ts) return false;
+  const t = new Date(ts).getTime();
+  return !isNaN(t) && (Date.now() - t) < days * 86400000;
+};
+
 // Whole days between a timestamp and now. Counted from local midnight on each
 // side, so "2 days old" doesn't tick over at whatever time of day the row
 // happened to be written — which is what drove the "over 7 days" flag before.

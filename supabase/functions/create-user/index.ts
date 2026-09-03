@@ -14,6 +14,7 @@
 // the confirmation, and the new tech can sign in immediately.
 
 import { createClient } from "https://esm.sh/@supabase/supabase-js@2";
+import { sendSetPasswordLink } from "../_shared/setPassword.ts";
 
 const corsHeaders = {
   "Access-Control-Allow-Origin": "*",
@@ -31,8 +32,12 @@ Deno.serve(async (req) => {
   if (req.method === "OPTIONS") return new Response("ok", { headers: corsHeaders });
 
   try {
-    const { email, password, name, role, cert } = await req.json();
-    if (!email || !password) throw new Error("email and password are required");
+    const { email, password, name, role, cert, invite } = await req.json();
+    if (!email) throw new Error("email is required");
+    // An invited account gets a password nobody knows; the person chooses
+    // their own from the set-password link mailed below.
+    const secret = invite ? crypto.randomUUID() + crypto.randomUUID() : password;
+    if (!secret) throw new Error("email and password are required");
     if (!VALID_ROLES.includes(role)) throw new Error("role must be one of: " + VALID_ROLES.join(", "));
 
     const authHeader = req.headers.get("Authorization") ?? "";
@@ -57,7 +62,7 @@ Deno.serve(async (req) => {
     );
 
     const { data: created, error: cErr } = await admin.auth.admin.createUser({
-      email, password, email_confirm: true,
+      email, password: secret, email_confirm: true,
       user_metadata: { name, role, cert }
     });
     if (cErr) throw cErr;
@@ -73,7 +78,21 @@ Deno.serve(async (req) => {
       .update({ role, tab_access: tabs }).eq("id", userId);
     if (pErr) throw new Error("Account created, but its role could not be set: " + pErr.message);
 
-    return json({ ok: true, user: { id: userId, email } });
+    // The invitation. A mail failure is not a failed account — it exists
+    // and is provisioned — so it comes back as a warning that names the
+    // way out (the set-password button on the account's page).
+    if (invite) {
+      try {
+        await sendSetPasswordLink(admin, email, name, "invite");
+      } catch (e) {
+        return json({
+          ok: true, user: { id: userId, email },
+          warning: `The account was created, but the invitation email didn't go out (${(e as Error).message}). Open the account in the list and press "Email a set-password link".`
+        });
+      }
+    }
+
+    return json({ ok: true, user: { id: userId, email }, invited: !!invite });
   } catch (e) {
     await logError("create-user", (e as Error).message);
     return json({ error: (e as Error).message }, 400);

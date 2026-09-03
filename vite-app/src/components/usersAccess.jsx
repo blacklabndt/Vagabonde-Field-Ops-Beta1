@@ -19,6 +19,25 @@ export function UsersAccessScreen({ currentUser }) {
   useEffect(() => { load(); }, []);
 
   const account = users.find(u => u.id === selected) || users[0];
+  // Emailing an account a set-password link (Admin only; the function
+  // checks). The note under the button says where it went, or why not,
+  // and clears when another account is picked.
+  const [resetting, setResetting] = useState(false);
+  const [resetNote, setResetNote] = useState("");
+  useEffect(() => { setResetNote(""); }, [selected]);
+  const sendReset = async () => {
+    if (!account) return;
+    if (!confirm(`Email ${account.name} a link to set a new password? The link works once.`)) return;
+    setResetting(true);
+    setResetNote("");
+    try {
+      const r = await Db.sendPasswordReset(account.id);
+      setResetNote(`Sent to ${r && r.sentTo ? r.sentTo : "their email address"}.`);
+    } catch (e) {
+      setResetNote(e.message || "Couldn't send the link.");
+    }
+    setResetting(false);
+  };
 
   // Access writes send the whole tab array, so two of them landing out of
   // order would silently restore a tab the admin just removed. This chains
@@ -215,9 +234,15 @@ export function UsersAccessScreen({ currentUser }) {
                     <div style={{ fontSize: 11, color: "color-mix(in srgb, var(--color-text) 55%, transparent)", margin: "6px 0 0" }}>your own role is changed by another admin</div>
                   )}
                   <div style={{ fontSize: 12, color: "color-mix(in srgb, var(--color-text) 55%, transparent)", margin: "6px 0 10px" }}>
-                    Password resets happen through Supabase Auth (dashboard or the "Forgot password" flow) — not editable here.
+                    {currentUser.role === "Admin"
+                      ? "A set-password link goes to the account's email address and lands on the app's own set-password screen — the same one \"Forgot password\" uses. It works once."
+                      : "Password resets happen through the \"Forgot password\" flow on the sign-in screen, or an Admin can send a set-password link."}
                   </div>
+                  {resetNote && <div style={{ fontSize: 12, margin: "0 0 8px" }}>{resetNote}</div>}
                   <div style={{ display: "flex", flexDirection: "column", gap: 8, marginTop: 10 }}>
+                    {currentUser.role === "Admin" && !account.deactivated_at && (
+                      <Btn variant="secondary" disabled={resetting} onClick={sendReset}>{resetting ? "Sending…" : "Email a set-password link"}</Btn>
+                    )}
                     <Btn variant="secondary" onClick={resetPreset}>Reset to role preset</Btn>
                     <Btn variant="secondary" onClick={removeAccount}>Remove account</Btn>
                   </div>
@@ -348,7 +373,9 @@ function PersonFields({ account, onSaved, onError }) {
 }
 
 function NewUserDialog({ onClose, onCreated }) {
-  const [form, setForm] = useState({ firstName: "", lastName: "", email: "", password: "", role: "Technician", cert: "", level: "", isSubcontractor: false });
+  // `invite`: no temporary password to relay by voice — the person gets a
+  // set-password link by email and chooses their own.
+  const [form, setForm] = useState({ firstName: "", lastName: "", email: "", password: "", role: "Technician", cert: "", level: "", isSubcontractor: false, invite: true });
   const [error, setError] = useState("");
   const [saving, setSaving] = useState(false);
   const miss = useMissingFields();
@@ -361,7 +388,7 @@ function NewUserDialog({ onClose, onCreated }) {
     !form.firstName.trim(),
     !form.lastName.trim(),
     !form.email.trim() || !emailIn(form.email),
-    form.password.length < 8
+    !form.invite && form.password.length < 8
   ].filter(Boolean).length;
 
   const submit = async () => {
@@ -374,7 +401,7 @@ function NewUserDialog({ onClose, onCreated }) {
     if (gaps.length) { miss.flag(...gaps); setError("First name, last name and email are required."); return; }
     if (!emailIn(form.email)) { miss.flag("email"); setError("That doesn't look like an email address."); return; }
     // The same floor as the reset screen: an account can be created as Admin.
-    if (form.password.length < 8) { miss.flag("password"); setError("Password needs to be at least 8 characters."); return; }
+    if (!form.invite && form.password.length < 8) { miss.flag("password"); setError("Password needs to be at least 8 characters."); return; }
     miss.clear();
     setSaving(true);
     setError("");
@@ -382,7 +409,8 @@ function NewUserDialog({ onClose, onCreated }) {
       await Db.createUserAccount({
         firstName: form.firstName.trim(), lastName: form.lastName.trim(),
         email: form.email.trim(), password: form.password, role: form.role,
-        cert: form.cert.trim() || form.role, level: form.level || null, isSubcontractor: form.isSubcontractor
+        cert: form.cert.trim() || form.role, level: form.level || null, isSubcontractor: form.isSubcontractor,
+        invite: form.invite
       });
       onCreated();
     } catch (e) {
@@ -395,8 +423,14 @@ function NewUserDialog({ onClose, onCreated }) {
     <Dialog title="New user" onClose={onClose} actions={<><RequiredLeft count={requiredLeft} style={{ marginRight: "auto", alignSelf: "center" }} /><Btn variant="secondary" onClick={onClose}>Cancel</Btn><Btn variant="primary" onClick={submit} disabled={saving}>{saving ? "Creating…" : "Create account"}</Btn></>}>
       <ErrorBox>{error}</ErrorBox>
       <div style={{ fontSize: 12, color: "color-mix(in srgb, var(--color-text) 60%, transparent)" }}>
-        The account is ready the moment it's created — you made it, so there's no confirmation email; give them the password and they can sign in.
+        {form.invite
+          ? "The account is ready the moment it's created. They get an email with a link to choose their password, then sign in with this address."
+          : "The account is ready the moment it's created — you made it, so there's no confirmation email; give them the password and they can sign in."}
       </div>
+      <label style={{ display: "flex", alignItems: "center", gap: 8, fontSize: 13 }}>
+        <input type="checkbox" checked={form.invite} onChange={e => set("invite", e.target.checked)} />
+        Email them a link to set their own password
+      </label>
       <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 12 }}>
         <Field label="First name" required missing={miss.is("firstName")}>
           <input {...miss.props("firstName")} value={form.firstName} onChange={e => set("firstName", e.target.value)} />
@@ -411,9 +445,11 @@ function NewUserDialog({ onClose, onCreated }) {
       {/* The floor is eight, and has been since the reset screen set it —
           the placeholder said six, so a password the form was about to
           refuse looked like it met the rule. */}
-      <Field label="Temporary password" required missing={miss.is("password")}>
-        <input {...miss.props("password")} type="password" value={form.password} onChange={e => set("password", e.target.value)} placeholder="min. 8 characters" />
-      </Field>
+      {!form.invite && (
+        <Field label="Temporary password" required missing={miss.is("password")}>
+          <input {...miss.props("password")} type="password" value={form.password} onChange={e => set("password", e.target.value)} placeholder="min. 8 characters" />
+        </Field>
+      )}
       <Field label="Role">
         <select className="input" value={form.role} onChange={e => set("role", e.target.value)}>
           {Object.keys(ROLE_PRESETS).map(r => <option key={r}>{r}</option>)}

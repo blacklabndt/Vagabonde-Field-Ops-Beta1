@@ -180,6 +180,9 @@ export function App() {
   // a hook below it renders only once signed in, and React refuses a
   // component whose hook count grows between renders.
   const [ticketSeed, setTicketSeed] = useState(null);
+  // This person's hazard assessments still waiting for end readings, across
+  // every job — listed on Open tickets, loaded with the draft list.
+  const [myOpenJhas, setMyOpenJhas] = useState([]);
   // A screen reached from a button inside another screen, which stays reachable
   // even when it isn't one of the sections in this account's menu.
   const [contextScreen, setContextScreen] = useState("");
@@ -485,6 +488,9 @@ export function App() {
 
   const loadMyTickets = async () => {
     setMyTicketsLoading(true);
+    // The open assessments ride along, best effort — a failed read leaves
+    // the last list rather than blanking the drafts, which are the screen.
+    Db.listMyOpenJhas(currentUser.id).then(setMyOpenJhas).catch(e => console.warn("Couldn't load open JHAs:", e.message));
     try { setMyTickets(await Db.listMyTickets(currentUser.id)); }
     catch (e) { console.error("Failed to load your tickets:", e.message); }
     setMyTicketsLoading(false);
@@ -493,7 +499,7 @@ export function App() {
   // has been opened… The list is emptied first: it is the previous person's
   // until the read lands, and if the read fails (no signal is the ordinary
   // condition) it stayed theirs — their drafts, on the next person's screen.
-  useEffect(() => { setMyTickets([]); if (currentUser) loadMyTickets(); }, [currentUser]);
+  useEffect(() => { setMyTickets([]); setMyOpenJhas([]); if (currentUser) loadMyTickets(); }, [currentUser]);
   // …and again on arriving at the screen. Keyed on `screen` alone: keyed on
   // both, signing in ran this a second time for the same list.
   useEffect(() => { if (currentUser && screen === "mytickets") loadMyTickets(); }, [screen]);
@@ -605,6 +611,7 @@ export function App() {
     // the next session before, and the draft list in particular rendered
     // the last technician's tickets to the next until a refetch replaced it.
     setMyTickets([]);
+    setMyOpenJhas([]);
     setActiveJob(null);
     setJobRecord(EMPTY_JOB_RECORD);
     setActiveTicket(null);
@@ -624,6 +631,14 @@ export function App() {
   };
 
   const openJob = job => { setActiveJob(job); gotoContext("job"); };
+  // A job named by its number alone (the open-JHA list carries no job row).
+  const openJobByNumber = async number => {
+    try { openJob(await Db.getJobByNumber(number)); }
+    catch (e) {
+      console.error("Couldn't open that job:", e.message);
+      Toasts.show(`Couldn't open ${number}: ${e.message || "try again."}`, "error");
+    }
+  };
 
   // Straight from the board to a blank ticket for a chosen job.
   //
@@ -776,7 +791,8 @@ export function App() {
       body = <TicketMobileScreen key={activeTicket || ("new-" + (ticketSeed ? ticketSeed.nonce : ""))} job={activeJob} jobRecord={jobRecord} currentUser={currentUser} ticket={activeTicket} seed={activeTicket ? null : ticketSeed}
         // A save changes the draft list the badge counts; refresh it on the
         // way back rather than when the screen is next opened.
-        onSaved={() => { gotoContext("job"); loadMyTickets(); }} />;
+        onSaved={() => { gotoContext("job"); loadMyTickets(); }}
+        onOpenJob={() => gotoContext("job")} />;
       break;
     case "files":
       body = <FilesScreen currentUser={currentUser} />;
@@ -794,7 +810,8 @@ export function App() {
       body = <BillingTrackerScreen onOpenTicket={openTicket} currentUser={currentUser} />;
       break;
     case "mytickets":
-      body = <OpenTicketsScreen tickets={myTickets} loading={myTicketsLoading} onOpenTicket={openTicket} currentUser={currentUser} />;
+      body = <OpenTicketsScreen tickets={myTickets} loading={myTicketsLoading} onOpenTicket={openTicket} currentUser={currentUser}
+        openJhas={myOpenJhas} onOpenJob={j => openJobByNumber(j.job)} />;
       break;
     case "timesheets":
       body = <TimesheetsScreen currentUser={currentUser} />;
@@ -838,7 +855,8 @@ export function App() {
         />
         {/* The current section, named in the bar — with the tabs gone there is
             otherwise nothing telling you where you are. */}
-        <span style={{ fontFamily: "var(--font-heading)", fontWeight: 600, fontSize: 14, letterSpacing: ".04em", textTransform: "uppercase", color: "var(--color-accent)" }}>
+        <span className="topbar-section" title={(TABS.find(t => t.key === screen) || {}).label || ""}
+          style={{ fontFamily: "var(--font-heading)", fontWeight: 600, fontSize: 14, letterSpacing: ".04em", textTransform: "uppercase", color: "var(--color-accent)" }}>
           {(TABS.find(t => t.key === screen) || {}).label || ""}
         </span>
         {cacheState.servingCached && (

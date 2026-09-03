@@ -187,6 +187,11 @@ Deno.serve(async (req) => {
       approval_expires_at: expires,
       approval_sent_to: toList,
       approval_sent_by: user.id,
+      // A resend answers whatever the rep queried last time: the query is
+      // cleared with the fresh link, and the tracker stops showing it.
+      queried_at: null,
+      query_text: null,
+      query_by: null,
       status: "Awaiting approval"
     }).eq("id", ticketId);
     if (tokenErr) {

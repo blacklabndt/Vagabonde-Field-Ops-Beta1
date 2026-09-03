@@ -29,6 +29,19 @@ export function ContactsScreen({ currentUser }) {
   const [showNewOrg, setShowNewOrg] = useState(false);
   const [error, setError] = useState("");
   const [booting, setBooting] = useState(true);
+  // The person search: typed text, and who matched (a pause after typing,
+  // so each keystroke isn't a scan of the directory).
+  const [personQ, setPersonQ] = useState("");
+  const [people, setPeople] = useState([]);
+  useEffect(() => {
+    const q = personQ.trim();
+    if (!q) { setPeople([]); return undefined; }
+    let live = true;
+    const t = setTimeout(() => {
+      Db.searchPeople(q).then(rows => { if (live) setPeople(rows); }).catch(() => { if (live) setPeople([]); });
+    }, 200);
+    return () => { live = false; clearTimeout(t); };
+  }, [personQ]);
 
   // Opening the screen with nothing selected would be a blank panel and no
   // clue what to do, so it starts on the first organisation on file. This is
@@ -124,6 +137,28 @@ export function ContactsScreen({ currentUser }) {
         <OrgCombo scope={scope} selected={org}
           onPick={o => { setOrg(o); setAdding(false); }}
           onError={setError} />
+        {/* By person, not only by company: "who do I call at that lease?"
+            is usually a name. Picking one opens their organisation. */}
+        <div style={{ position: "relative", flex: "1 1 220px", minWidth: 200 }}>
+          <input className="input" value={personQ} onChange={e => setPersonQ(e.target.value)}
+            placeholder="Find a person — name, email or phone…" aria-label="Find a person"
+            style={{ width: "100%", minHeight: 38 }} />
+          {personQ.trim() && (
+            <div role="listbox" aria-label="People found" style={{ position: "absolute", zIndex: 5, left: 0, right: 0, top: "100%", marginTop: 4, background: "var(--color-bg)", border: "1px solid var(--color-accent)", maxHeight: 260, overflowY: "auto" }}>
+              {!people.length && <div style={{ padding: "8px 10px", fontSize: 12, color: "color-mix(in srgb, var(--color-text) 55%, transparent)" }}>Nobody on file matches “{personQ.trim()}”.</div>}
+              {people.map(p => (
+                <button key={p.id} type="button" role="option" aria-selected={false}
+                  onClick={() => { setOrg(p.org); setAdding(false); setPersonQ(""); }}
+                  style={{ display: "block", width: "100%", textAlign: "left", background: "none", border: 0, borderBottom: "1px solid color-mix(in srgb, var(--color-text) 10%, transparent)", padding: "8px 10px", cursor: "pointer", font: "inherit" }}>
+                  <div style={{ fontWeight: 600 }}>{p.name}{p.title ? <span style={{ fontWeight: 400, color: "color-mix(in srgb, var(--color-text) 60%, transparent)" }}> · {p.title}</span> : null}</div>
+                  <div style={{ fontSize: 12, color: "color-mix(in srgb, var(--color-text) 60%, transparent)" }}>
+                    {p.org.name || (p.org.type === "client" ? "Client" : "Contractor")}{p.email ? ` · ${p.email}` : ""}{p.phone ? ` · ${p.phone}` : ""}
+                  </div>
+                </button>
+              ))}
+            </div>
+          )}
+        </div>
       </div>
 
       {booting ? (

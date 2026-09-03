@@ -381,6 +381,28 @@ export const Db = {
   // the internal callers only ever `find()` in the result, so they don't care
   // either way. There were two of these for a while — this one and an
   // unordered twin — which is a coin-flip about which query you get.
+  // People by name, email, phone or title, across every organisation — the
+  // directory searched organisations only, and "who do I call at that
+  // lease?" is usually a name. Client-side over the cached lists the app
+  // already holds for its pickers, so it also answers with no signal.
+  async searchPeople(q, limit = 12) {
+    const needle = String(q || "").trim().toLowerCase();
+    if (!needle) return [];
+    const [contacts, clients, contractors] = await Promise.all([this.listContacts(), this.listClients(), this.listContractors()]);
+    const orgName = new Map([
+      ...(clients || []).map(c => ["client:" + c.id, c.name]),
+      ...(contractors || []).map(k => ["contractor:" + k.id, k.name])
+    ]);
+    return (contacts || [])
+      .filter(c => [c.name, c.email, c.phone, c.title].some(v => String(v || "").toLowerCase().includes(needle)))
+      .sort((a, b) => String(a.name || "").localeCompare(String(b.name || "")))
+      .slice(0, limit)
+      .map(c => ({
+        ...c,
+        org: { type: c.org_type, id: c.org_id, key: c.org_type + ":" + c.org_id, name: orgName.get(c.org_type + ":" + c.org_id) || "" }
+      }));
+  },
+
   async listContactsForOrg(orgType, orgId) {
     const { data, error } = await sbClient.from("contacts").select("*")
       .eq("org_type", orgType).eq("org_id", orgId).order("name");
@@ -830,7 +852,7 @@ export const Db = {
   // `id` is optional and normally left to Postgres. A job created offline
   // supplies its own (see queueNewJob) so that the id it was given in the
   // field is the id it keeps once it syncs.
-  async createJob({ id, jobNumber, project, clientName, lsd, createdBy, clientRep, contractorName, contractorRep }) {
+  async createJob({ id, jobNumber, project, clientName, lsd, afe, createdBy, clientRep, contractorName, contractorRep }) {
     // Replaying a queued job has to be safe to do twice. The insert can
     // succeed and a later step fail — filing the reps into the directory, say
     // — which leaves the item queued; without this, every retry from then on
@@ -858,7 +880,7 @@ export const Db = {
 
     const row = {
       job_number: jobNumber, project, client_id: client.id, contractor_id: contractorId,
-      lsd, status: "Active", created_by: createdBy
+      lsd, afe: String(afe || "").trim() || null, status: "Active", created_by: createdBy
     };
     if (id) row.id = id;
     const { data: job, error } = await sbClient.from("jobs").insert(row).select().single();
@@ -901,7 +923,7 @@ export const Db = {
   // UNIQUE and nothing on this device knows what the office has issued. So it
   // is typed, not suggested, and a collision surfaces in the queue panel as a
   // refusal to sync rather than being silently resolved.
-  async queueNewJob({ jobNumber, project, clientId, clientName, lsd, createdBy, createdByName, clientRep, contractorName, contractorRep }) {
+  async queueNewJob({ jobNumber, project, clientId, clientName, lsd, afe, createdBy, createdByName, clientRep, contractorName, contractorRep }) {
     const id = crypto.randomUUID ? crypto.randomUUID() : String(Date.now()) + Math.random();
 
     const contractors = await this.listContractors().catch(() => []);
@@ -911,13 +933,13 @@ export const Db = {
       dbId: id, id: jobNumber, project,
       client: clientName || "", clientId: clientId || null,
       contractor: contractorName || "", contractorId: known ? known.id : null,
-      lsd, afe: null, area: null, method: null, procedure: null,
+      lsd, afe: String(afe || "").trim() || null, area: null, method: null, procedure: null,
       scope: "RT · scope TBD", status: "Active",
       createdBy: createdByName || "", createdAt: stamp(new Date().toISOString())
     };
 
     await OfflineQueue.enqueue("job", {
-      id, jobNumber, project, clientName, lsd, createdBy,
+      id, jobNumber, project, clientName, lsd, afe, createdBy,
       clientRep, contractorName, contractorRep
     });
 
@@ -1619,6 +1641,26 @@ export const Db = {
     }
   },
 
+  // Every file in every folder whose name (or path) contains `q` — "where
+  // does the RT procedure live?" shouldn't need knowing the folder. Walks
+  // the tree one listing per folder (a few dozen at most) and keeps the walk
+  // for the session; the Files screen forgets it after any change it makes.
+  async searchFiles(q) {
+    const needle = String(q || "").trim().toLowerCase();
+    if (!needle) return [];
+    if (!this._fileTree) {
+      this._fileTree = this._walkFiles("").catch(e => { this._fileTree = null; throw e; });
+    }
+    const all = await this._fileTree;
+    return all.filter(f => f.name.toLowerCase().includes(needle) || f.path.toLowerCase().includes(needle));
+  },
+  async _walkFiles(prefix) {
+    const { folders, files } = await this.listFiles(prefix);
+    const nested = await Promise.all(folders.map(f => this._walkFiles(f.path)));
+    return files.concat(...nested);
+  },
+  forgetFileTree() { this._fileTree = null; },
+
   async listFiles(prefix = "") {
     const data = await this.listAllEntries(prefix);
 
@@ -1909,10 +1951,14 @@ export const Db = {
       age: ageInDays(t.created_at),
       amount: Number(t.total), status: t.status, tech: t.technician_name || "",
       job: t.job_number || "", project: t.project || "", client: t.client_name || "",
-      chasedAt: t.chased_at || null, invoicedAt: t.invoiced_at || null
+      chasedAt: t.chased_at || null, invoicedAt: t.invoiced_at || null,
+      queriedAt: t.queried_at || null, queryText: t.query_text || "", queryBy: t.query_by || ""
     }));
     const total = data && data.length ? Number(data[0].total_count) : 0;
-    return { rows, total };
+    // The money across every matching ticket, not only this page's — null
+    // for roles that don't see prices (the function nulls it).
+    const filteredTotal = data && data.length && data[0].filtered_total != null ? Number(data[0].filtered_total) : null;
+    return { rows, total, filteredTotal };
   },
 
   // Approved → Invoiced, and back for a slip. Admin-only in the database
@@ -1954,14 +2000,38 @@ export const Db = {
     // dialog reported the truncated count as the whole job done.
     const data = await fetchAllPages(async page => {
       const { data: rows, error, count } = await sbClient
-        .from("tickets").select("id, client_contact", page === 0 ? { count: "exact" } : {})
+        .from("tickets").select("id, client_contact, chased_at", page === 0 ? { count: "exact" } : {})
         .eq("status", "Awaiting approval")
         .order("id")
         .range(page * RESPONSE_ROW_CAP, (page + 1) * RESPONSE_ROW_CAP - 1);
       if (error) throw error;
       return { rows: rows || [], total: count ?? (rows || []).length };
     });
-    return data.map(t => ({ id: t.id, contactLabel: t.client_contact ? t.client_contact.name : "" }));
+    return data.map(t => ({ id: t.id, contactLabel: t.client_contact ? t.client_contact.name : "", chasedAt: t.chased_at || null }));
+  },
+
+  // The hazard assessments this person filed and has not closed out yet,
+  // across every job — an open JHA is a dose record with no end reading,
+  // and until now nothing listed them anywhere but the job's own page.
+  async listMyOpenJhas(profileId) {
+    const data = await fetchAllPages(async page => {
+      const { data: rows, error, count } = await sbClient
+        .from("jhas")
+        .select("id, work_date, signed_at, status, job_id, jobs(job_number, project, clients(name))",
+          page === 0 ? { count: "exact" } : {})
+        .eq("signed_by", profileId)
+        .eq("status", "Open")
+        .order("signed_at", { ascending: false }).order("id")
+        .range(page * RESPONSE_ROW_CAP, (page + 1) * RESPONSE_ROW_CAP - 1);
+      if (error) throw error;
+      return { rows: rows || [], total: count ?? (rows || []).length };
+    });
+    return data.map(j => ({
+      id: j.id, jobDbId: j.job_id,
+      job: j.jobs ? j.jobs.job_number : "", project: j.jobs ? j.jobs.project : "",
+      client: j.jobs && j.jobs.clients ? j.jobs.clients.name : "",
+      workDate: j.work_date, filedAt: j.signed_at, age: ageInDays(j.signed_at)
+    }));
   },
 
   async listMyTickets(technicianId) {
@@ -2714,10 +2784,22 @@ export const Db = {
   // caps metadata roles to the field ones, and the function writes the
   // real rank itself. Accounts arrive email-confirmed — the admin standing
   // there is the confirmation — so the new tech signs in immediately.
-  async createUserAccount({ firstName, lastName, email, password, role, cert, level, isSubcontractor }) {
+  // Emails an account a link to set its password — the same set-password
+  // screen "Forgot password" lands on. Admin only; the password-reset
+  // function checks, and looks the address up itself from the account.
+  async sendPasswordReset(userId) {
+    const { data, error } = await sbClient.functions.invoke("password-reset", { body: { userId } });
+    if (error) throw new Error(await readFnError(error));
+    if (data && data.error) throw new Error(data.error);
+    return data;
+  },
+
+  // `invite`: no temporary password — the function mints one nobody knows
+  // and emails the person a set-password link instead.
+  async createUserAccount({ firstName, lastName, email, password, role, cert, level, isSubcontractor, invite = false }) {
     const name = [firstName, lastName].filter(Boolean).join(" ").trim();
     const { data, error } = await sbClient.functions.invoke("create-user", {
-      body: { email, password, name, role, cert }
+      body: { email, password: invite ? "" : password, name, role, cert, invite: !!invite }
     });
     if (error) throw new Error(await readFnError(error));
     if (data && data.error) throw new Error(data.error);
@@ -2739,6 +2821,9 @@ export const Db = {
         throw new Error(`The account was created, but the name, level and subcontractor flag didn't save (${e.message || "the save failed"}). Close this, open the account in the list, and fill them in there.`);
       }
     }
+    // The account exists either way; an invitation that didn't send is
+    // said in the same voice as the half-saved profile above.
+    if (data && data.warning) throw new Error(data.warning);
     return data;
   },
 
@@ -3207,6 +3292,7 @@ const SAVE_MESSAGES = {
   deleteTicket: "Ticket cancelled",
   sendTicketApproval: "Approval sent",
   withdrawTicketApproval: "Approval cancelled — the ticket is a draft again",
+  sendPasswordReset: "Set-password link sent",
 
   // Email setup
   saveAppSettings: "Settings saved",

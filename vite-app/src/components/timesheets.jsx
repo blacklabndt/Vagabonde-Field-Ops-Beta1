@@ -1,7 +1,7 @@
 import React, { useState, useEffect, useMemo, useRef } from "react";
-import { localDate, dayMonth, payPeriodLabel, recentPayPeriods, hours } from "../data.js";
+import { localDate, dayMonth, payPeriodLabel, recentPayPeriods, hours, recentQuarters, recentYears, quarterOf } from "../data.js";
 import { Db } from "../db.js";
-import { Blueprint, Btn, TableScroll, TagX, ErrorBox, RowsPerPage, useRowsPerPage , Loading, PdfLink } from "./common.jsx";
+import { Blueprint, Btn, TableScroll, TagX, ErrorBox, RowsPerPage, useRowsPerPage , Loading, PdfLink, StatusTag, downloadCsv } from "./common.jsx";
 import { makeZip, safeFilename, saveBlob } from "../zip.js";
 
 // Timesheets — hours per person per pay period, built from ticket crew rows.
@@ -18,7 +18,51 @@ export function TimesheetsScreen({ currentUser }) {
   const [period, setPeriod] = useState(periods[0]);
   const [entries, setEntries] = useState([]);
   const [approvals, setApprovals] = useState([]);
-  const [view, setView] = useState("period");      // period | approved
+  const [view, setView] = useState("period");      // period | approved | awaiting | dose
+
+  // ── The dose ledger ────────────────────────────────────────────────────
+  // Dose is recorded per person per ticket day (the crew block). Summed here
+  // by calendar quarter and calendar year — the figures a nuclear energy
+  // worker's record needs — for everyone (Admin) or for yourself. The
+  // entries come through the same read as the timesheet, so the same
+  // privacy holds: a technician's own rows and nobody else's.
+  const [doseKind, setDoseKind] = useState("quarter");
+  const doseOptions = useMemo(() => doseKind === "quarter" ? recentQuarters(8) : recentYears(5), [doseKind]);
+  const [dosePeriod, setDosePeriod] = useState(null);
+  const effDose = dosePeriod && dosePeriod.kind === doseKind ? dosePeriod : doseOptions[0];
+  const [doseRows, setDoseRows] = useState([]);
+  const [doseLoading, setDoseLoading] = useState(false);
+  const doseSeq = useRef(0);
+  useEffect(() => {
+    if (view !== "dose") return;
+    const mine = ++doseSeq.current;
+    setDoseLoading(true);
+    Db.listTimesheetEntries({ start: effDose.start, end: effDose.end })
+      .then(rows => { if (mine === doseSeq.current) setDoseRows(rows.filter(r => r.dose > 0)); })
+      .catch(e => { if (mine === doseSeq.current) setError(e.message || "Couldn't load the dose entries."); })
+      .finally(() => { if (mine === doseSeq.current) setDoseLoading(false); });
+  }, [view, effDose.start, effDose.end]);
+  const doseLedger = useMemo(() => {
+    const byId = new Map();
+    for (const e of doseRows) {
+      if (currentUser.role !== "Admin" && e.profileId !== currentUser.id) continue;
+      let p = byId.get(e.profileId);
+      if (!p) { p = { profileId: e.profileId, name: e.name, entries: [], total: 0, quarters: [0, 0, 0, 0] }; byId.set(e.profileId, p); }
+      p.entries.push(e);
+      // Tenths of a mR, summed as integers — the DRDs read to one decimal.
+      p.total += Math.round(e.dose * 10);
+      p.quarters[quarterOf(e.date) - 1] += Math.round(e.dose * 10);
+    }
+    return [...byId.values()].sort((a, b) => b.total - a.total || a.name.localeCompare(b.name));
+  }, [doseRows, currentUser.role, currentUser.id]);
+  const mr = tenths => (tenths / 10).toFixed(1);
+  const exportDose = () => downloadCsv(`Dose ${effDose.label}.csv`, [
+    ["Person", "Date", "Job", "Ticket", "Dose (mR)"],
+    ...doseLedger.flatMap(p => p.entries.map(e => [p.name, e.date, e.job, e.ticketId, (Math.round(e.dose * 10) / 10).toFixed(1)])),
+    [],
+    ["Person", "Days with dose", `Total mR · ${effDose.label}`, ...(doseKind === "year" ? ["Q1", "Q2", "Q3", "Q4"] : [])],
+    ...doseLedger.map(p => [p.name, p.entries.length, mr(p.total), ...(doseKind === "year" ? p.quarters.map(mr) : [])])
+  ]);
   const [selected, setSelected] = useState(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState("");
@@ -267,6 +311,7 @@ export function TimesheetsScreen({ currentUser }) {
       <div style={{ display: "flex", gap: 6, marginBottom: 16 }}>
         <button className={"pill" + (view === "period" ? " active" : "")} onClick={() => setView("period")}>Timesheet</button>
         <button className={"pill" + (view === "approved" ? " active" : "")} onClick={() => setView("approved")}>Approved timesheets</button>
+        <button className={"pill" + (view === "dose" ? " active" : "")} onClick={() => setView("dose")}>Dose ledger</button>
         {/* The count is this period's outstanding work, so an admin opening
             the screen knows whether payroll is ready without hunting. */}
         {isAdmin && (
@@ -276,7 +321,60 @@ export function TimesheetsScreen({ currentUser }) {
         )}
       </div>
 
-      {view === "approved" ? (
+      {view === "dose" ? (
+        <div>
+          <ErrorBox>{error}</ErrorBox>
+          <div style={{ display: "flex", gap: 8, alignItems: "center", flexWrap: "wrap", marginBottom: 14 }}>
+            <div className="seg" role="group" aria-label="Period type">
+              {[["quarter", "Quarter"], ["year", "Year"]].map(([k, label]) => (
+                <button key={k} type="button" className={`seg-opt${doseKind === k ? " active" : ""}`}
+                  aria-pressed={doseKind === k} onClick={() => setDoseKind(k)}>{label}</button>
+              ))}
+            </div>
+            <select className="input" aria-label="Dose period" style={{ width: "auto", minHeight: 38 }} value={effDose.start}
+              onChange={e => setDosePeriod(doseOptions.find(o => o.start === e.target.value) || doseOptions[0])}>
+              {doseOptions.map(o => <option key={o.start} value={o.start}>{o.label}</option>)}
+            </select>
+            {isAdmin && (
+              <Btn variant="secondary" style={{ minHeight: 38, marginLeft: "auto" }} onClick={exportDose} disabled={!doseLedger.length || doseLoading}>
+                Export dose report (.csv)
+              </Btn>
+            )}
+          </div>
+          <Blueprint style={{ padding: "6px 18px 14px" }}>
+            {doseLoading && <div style={{ padding: "12px 4px", fontSize: 13, color: "color-mix(in srgb, var(--color-text) 55%, transparent)" }}>Loading dose entries…</div>}
+            <TableScroll><table className="table table-wide">
+              <thead>
+                <tr>
+                  <th>Person</th>
+                  <th style={{ width: 120 }}>Days with dose</th>
+                  {doseKind === "year" && <><th style={{ width: 80 }}>Q1</th><th style={{ width: 80 }}>Q2</th><th style={{ width: 80 }}>Q3</th><th style={{ width: 80 }}>Q4</th></>}
+                  <th style={{ width: 110 }}>Total mR</th>
+                </tr>
+              </thead>
+              <tbody>
+                {!doseLoading && !doseLedger.length && (
+                  <tr><td colSpan={doseKind === "year" ? 7 : 3} style={{ color: "color-mix(in srgb, var(--color-text) 55%, transparent)" }}>
+                    No dose recorded for {effDose.label}.
+                  </td></tr>
+                )}
+                {!doseLoading && doseLedger.map(p => (
+                  <tr key={p.profileId}>
+                    <td style={{ fontFamily: "var(--font-heading)", fontWeight: 600 }}>{p.name}</td>
+                    <td className="tabular">{p.entries.length}</td>
+                    {doseKind === "year" && p.quarters.map((q, i) => <td key={i} className="tabular">{mr(q)}</td>)}
+                    <td className="tabular" style={{ fontWeight: 600 }}>{mr(p.total)}</td>
+                  </tr>
+                ))}
+              </tbody>
+            </table></TableScroll>
+            <div style={{ fontSize: 11, color: "color-mix(in srgb, var(--color-text) 60%, transparent)", marginTop: 8 }}>
+              Dose is what each person recorded on the ticket's crew block for the day, in mR, summed by calendar quarter and calendar year.
+              {isAdmin ? " The export lists every entry, then a total per person." : " You see your own record."}
+            </div>
+          </Blueprint>
+        </div>
+      ) : view === "approved" ? (
         <ApprovedList currentUser={currentUser} />
       ) : view === "awaiting" ? (
         <div>
@@ -385,6 +483,10 @@ export function TimesheetsScreen({ currentUser }) {
                     <tr>
                       <th style={{ width: 90 }}>Date</th>
                       <th style={{ width: 120 }}>Ticket</th>
+                      {/* A pay period approved on drafts is approved on
+                          hours that can still change; the status was loaded
+                          and printed on the export, but not shown here. */}
+                      <th style={{ width: 120 }}>Status</th>
                       <th>Job · project</th>
                       <th style={{ width: 70 }}>Reg</th>
                       <th style={{ width: 60 }}>OT</th>
@@ -399,6 +501,7 @@ export function TimesheetsScreen({ currentUser }) {
                       <tr key={e.id}>
                         <td className="tabular">{dayMonth(localDate(e.date))}</td>
                         <td className="tabular" style={{ fontFamily: "var(--font-heading)", fontWeight: 600 }}>{e.ticketId}</td>
+                        <td>{e.ticketStatus ? <StatusTag status={e.ticketStatus} /> : "—"}</td>
                         <td>
                           <div>{e.project}</div>
                           <div style={{ fontSize: 11, color: "color-mix(in srgb, var(--color-text) 50%, transparent)" }}>{e.job} · {e.client}</div>

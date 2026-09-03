@@ -29,6 +29,7 @@ import { hashToken, invoiceFingerprint } from "../_shared/approvalToken.ts";
 // the lot before anything here could object.
 const MAX_BODY_BYTES = 1_000_000;
 const MAX_NAME_CHARS = 120;
+const MAX_QUERY_CHARS = 2000;
 
 // The invoice supplies its own .sheet and its own table styling, so this adds
 // only what sits around it: the sign form, notices, and the stamp. The old
@@ -139,7 +140,7 @@ async function readBounded(req: Request, max: number): Promise<Uint8Array | null
 // is the auth user's), plus the configured reply-to as the office copy.
 // Nothing to send to is not an error; it is an install with no addresses.
 // deno-lint-ignore no-explicit-any
-async function notifyApproval(admin: any, row: any, d: InvoiceData, signer: string, approvedAt: string) {
+async function officeRecipients(admin: any, row: any) {
   const settings = await appSettings();
   let to = "";
   if (row?.approval_sent_by) {
@@ -147,6 +148,36 @@ async function notifyApproval(admin: any, row: any, d: InvoiceData, signer: stri
     to = data?.user?.email ?? "";
   }
   const office = settings.replyTo && settings.replyTo !== to ? settings.replyTo : "";
+  return { to, office };
+}
+
+// The rep pressed "Query this ticket": the same people who hear about an
+// approval hear what was asked, with the way forward spelled out.
+// deno-lint-ignore no-explicit-any
+async function notifyQuery(admin: any, row: any, who: string, text: string) {
+  const { to, office } = await officeRecipients(admin, row);
+  if (!to && !office) return;
+  const job = row?.jobs ?? {};
+  const lines = [
+    `${who} has a query on ticket ${row.id} instead of signing it:`,
+    text,
+    job.job_number ? `Job ${job.job_number}${job.project ? ` · ${job.project}` : ""}${job.clients?.name ? ` · ${job.clients.name}` : ""}` : "",
+    "The ticket shows as Queried in the billing tracker. Put right what needs it and email it for approval again — a resend clears the query and sends a fresh link — or reply to the rep directly."
+  ].filter(Boolean);
+  await sendMail({
+    from: "billing",
+    to: to || office,
+    cc: to && office ? office : undefined,
+    subject: `Ticket ${row.id} queried by ${who}`,
+    htmlBody: wrapEmail(lines.map(l => `<p>${esc(l)}</p>`).join("")),
+    textBody: lines.join("\n\n"),
+    tag: "approval-query"
+  });
+}
+
+// deno-lint-ignore no-explicit-any
+async function notifyApproval(admin: any, row: any, d: InvoiceData, signer: string, approvedAt: string) {
+  const { to, office } = await officeRecipients(admin, row);
   if (!to && !office) return;
   const job = row?.jobs ?? {};
   const totals = invoiceTotals(d);
@@ -246,6 +277,26 @@ async function handle(req: Request): Promise<Response> {
     const raw = await readBounded(req, MAX_BODY_BYTES);
     if (raw === null) return tooLarge();
     const form = await new Request(req.url, { method: "POST", headers: req.headers, body: raw }).formData();
+    // "Query this ticket" instead of signing: what the rep said goes onto
+    // the ticket for the tracker to show, the office is told, and the
+    // link stays live — once the ticket is put right the rep signs here,
+    // or a resend brings a fresh link and clears the query.
+    if (String(form.get("action") ?? "") === "query") {
+      const who = String(form.get("name") ?? "").trim().slice(0, MAX_NAME_CHARS);
+      const text = String(form.get("query") ?? "").trim().slice(0, MAX_QUERY_CHARS);
+      if (!who || !text) {
+        return page(ask + header + `<div class="actions"><p style="color:#8a3b3b;font-size:13px">Please give your name and say what needs looking at.</p></div>` + signForm(fingerprint) + queryForm(fingerprint, who, text));
+      }
+      const { error: qErr } = await admin.from("tickets")
+        .update({ queried_at: new Date().toISOString(), query_text: text, query_by: who })
+        .eq("id", ticket.id).is("approved_at", null);
+      if (qErr) throw qErr;
+      try { await notifyQuery(admin, row, who, text); }
+      catch (e) { await logError("approve-ticket", "Queried, but the office wasn't told: " + (e as Error).message, { ticket: ticket.id }); }
+      return page(ask + header + `
+        <div class="actions"><p class="signnote">Thank you — your query has been sent to VagaboNDE. This link stays live:
+        once the ticket has been looked at, you can come back here and sign it, or you'll be sent a fresh one.</p></div>`);
+    }
     // The page the rep is submitting from showed a particular set of charges.
     // If the ticket has been edited since — or the page predates this check —
     // show the current bill and ask again, rather than recording a signature
@@ -327,7 +378,7 @@ async function handle(req: Request): Promise<Response> {
       ${downloadButton()}</div>`);
   }
 
-  return page(ask + header + signForm(fingerprint));
+  return page(ask + header + signForm(fingerprint) + queryForm(fingerprint));
 }
 
 // What is being asked, in one line, before the document that justifies it.
@@ -356,6 +407,26 @@ function askStrip(d: InvoiceData) {
 //
 // `fingerprint` is the digest of the charges this page shows; the POST
 // handler refuses a submit whose digest no longer matches the ticket.
+// The way out for a rep who won't sign: say what is wrong, here, rather
+// than letting the ticket age into "over 7 days" with no reason recorded.
+function queryForm(fingerprint: string, who = "", text = "") {
+  return `<details class="actions" id="queryblock" style="margin-top:10px"${who || text ? " open" : ""}>
+    <summary style="cursor:pointer;font-size:13px">Something not right? Query this ticket instead of signing</summary>
+    <form method="POST" style="margin-top:10px">
+      <input type="hidden" name="fp" value="${esc(fingerprint)}">
+      <input type="hidden" name="action" value="query">
+      <label class="signbox">Your name
+        <input name="name" autocomplete="name" maxlength="${MAX_NAME_CHARS}" required value="${esc(who)}">
+      </label>
+      <label class="signbox" style="margin-top:10px">What needs looking at
+        <textarea name="query" rows="4" maxlength="${MAX_QUERY_CHARS}" required style="width:100%;font:inherit;padding:8px;box-sizing:border-box">${esc(text)}</textarea>
+      </label>
+      <button type="submit" class="ghost" style="margin-top:10px">Send the query</button>
+      <p class="signnote">VagaboNDE is told straight away. This link stays live, so you can sign once it's sorted.</p>
+    </form>
+  </details>`;
+}
+
 function signForm(fingerprint: string) {
   return `<form method="POST" class="actions" id="signform">
     <input type="hidden" name="fp" value="${esc(fingerprint)}">

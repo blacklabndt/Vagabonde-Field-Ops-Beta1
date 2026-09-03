@@ -462,7 +462,10 @@ export function JhaBuilderScreen({ job, jobRecord, contacts, currentUser, onSubm
               Sev, Prob and Freq start from what you rated each hazard last time. Change any that are different today.
             </div>
           )}
-          <div style={{ maxHeight: 460, overflowY: "auto", display: "flex", flexDirection: "column", gap: 4 }}>
+          {/* Scrolls inside its box on a desk, where the page is a mockup
+              frame; on a phone the page itself scrolls (app.css), so the
+              list and the page don't fight over every swipe. */}
+          <div className="hazard-list" style={{ display: "flex", flexDirection: "column", gap: 4 }}>
             {hazards.map((h, i) => (
               <HazardRow key={h.name} hazard={h} rating={ratings[h.name]} onToggle={() => toggle(i)}
                 onRate={(k, v) => rate(h.name, k, v)} />

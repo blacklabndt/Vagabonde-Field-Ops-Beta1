@@ -1,5 +1,5 @@
 import React, { useState, useEffect, useRef } from "react";
-import { todayLocal, money, seesPrices } from "../data.js";
+import { todayLocal, money, seesPrices, withinDays } from "../data.js";
 import { Db } from "../db.js";
 import { Blueprint, Btn, TableScroll, StatusTag, TagX, ErrorBox, downloadCsv, emailIn, RowsPerPage, useRowsPerPage } from "./common.jsx";
 import { Toasts } from "../toastBus.js";
@@ -36,6 +36,9 @@ export function BillingTrackerScreen({ onOpenTicket, currentUser }) {
   const [pageSize, setPageSize] = useRowsPerPage();
   const [rows, setRows] = useState([]);
   const [total, setTotal] = useState(0);
+  // The money across everything the filter matches — what "how much is this
+  // client's month?" wants, which the page's own sum never answered.
+  const [filteredTotal, setFilteredTotal] = useState(null);
   const [loading, setLoading] = useState(true);
   const [stats, setStats] = useState(null);
   const [error, setError] = useState("");
@@ -62,10 +65,11 @@ export function BillingTrackerScreen({ onOpenTicket, currentUser }) {
     setLoading(true);
     setError("");
     try {
-      const { rows: r, total: t } = await Db.searchTickets({ page: p, pageSize, status: f, q: search, from: dFrom, to: dTo });
+      const { rows: r, total: t, filteredTotal: ft } = await Db.searchTickets({ page: p, pageSize, status: f, q: search, from: dFrom, to: dTo });
       if (mine !== loadSeq.current) return;
       setRows(r);
       setTotal(t);
+      setFilteredTotal(ft == null ? null : ft);
       setPicked({});
     } catch (e) {
       if (mine !== loadSeq.current) return;
@@ -163,7 +167,7 @@ export function BillingTrackerScreen({ onOpenTicket, currentUser }) {
     setError("");
     try {
       const list = await Db.listUnsignedTicketContacts();
-      let sent = 0, skipped = 0, failed = 0;
+      let sent = 0, skipped = 0, failed = 0, recent = 0;
       // Muted around the loop: sendTicketApproval fires an "Approval sent"
       // toast per call, so chasing N tickets would stack N toasts over the
       // one summary line this button is meant to show. Same pattern as
@@ -171,6 +175,9 @@ export function BillingTrackerScreen({ onOpenTicket, currentUser }) {
       Toasts.mute();
       try {
         for (const t of list) {
+          // Chased in the last three days is chased: a client nudged on
+          // Tuesday does not need the same email again on Thursday.
+          if (withinDays(t.chasedAt, 3)) { recent++; continue; }
           const to = emailIn(t.contactLabel);
           if (!to) { skipped++; continue; }
           try {
@@ -184,6 +191,7 @@ export function BillingTrackerScreen({ onOpenTicket, currentUser }) {
         }
       } finally { Toasts.unmute(); }
       const parts = [`Sent to ${sent} of ${list.length}`];
+      if (recent) parts.push(`${recent} left alone — chased in the last 3 days`);
       if (skipped) parts.push(`${skipped} skipped — no client email on file`);
       if (failed) parts.push(`${failed} failed to send`);
       setChaseResult(parts.join(" · "));
@@ -330,6 +338,15 @@ export function BillingTrackerScreen({ onOpenTicket, currentUser }) {
                   {priced && <td className="tabular">{money(t.amount)}</td>}
                   <td>
                     <StatusTag status={t.status} />
+                    {/* The rep pressed "Query this ticket" instead of
+                        signing: what they said, in the office's face until
+                        the ticket is fixed and resent (a resend clears it). */}
+                    {t.queriedAt && t.status !== "Approved" && t.status !== "Invoiced" && (
+                      <div style={{ marginTop: 4 }}>
+                        <TagX variant="accent" title={`Queried ${new Date(t.queriedAt).toLocaleString("en-CA")}`}>Queried{t.queryBy ? ` by ${t.queryBy}` : ""}</TagX>
+                        {t.queryText && <div style={{ fontSize: 11, marginTop: 3, maxWidth: 320, whiteSpace: "pre-wrap" }}>{t.queryText}</div>}
+                      </div>
+                    )}
                     {t.status === "Invoiced" && t.invoicedAt && (
                       <div style={{ fontSize: 11, color: "color-mix(in srgb, var(--color-text) 55%, transparent)" }}>{shortDate(t.invoicedAt)}</div>
                     )}
@@ -366,7 +383,9 @@ export function BillingTrackerScreen({ onOpenTicket, currentUser }) {
           </div>
         )}
         <div style={{ fontSize: 12, color: "color-mix(in srgb, var(--color-text) 55%, transparent)", marginTop: 10 }}>
-          {total} ticket{total === 1 ? "" : "s"}{(q || from || to) ? " matching" : ""}{priced ? ` · ${money(sum(rows))} on this page` : ""}
+          {total} ticket{total === 1 ? "" : "s"}{(q || from || to) ? " matching" : ""}{priced ? (filteredTotal != null && total > rows.length
+            ? ` · ${money(filteredTotal)} across all ${total} · ${money(sum(rows))} on this page`
+            : ` · ${money(filteredTotal != null ? filteredTotal : sum(rows))} in total`) : ""}
           {flaggedCount > 0 && ` · ${flaggedCount} chased`}
         </div>
       </Blueprint>

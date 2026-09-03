@@ -46,6 +46,8 @@ export function FilesScreen({ currentUser }) {
     const mine = ++loadSeq.current;
     setLoading(true);
     setError("");
+    // Anything that reloads may have changed the tree the search walks.
+    Db.forgetFileTree();
     try {
       const { folders, files } = await Db.listFiles(at);
       if (mine !== loadSeq.current) return;
@@ -119,6 +121,26 @@ export function FilesScreen({ currentUser }) {
   const shownFiles = files.filter(f => !q || f.name.toLowerCase().includes(q));
   const empty = !loading && !shownFolders.length && !shownFiles.length;
 
+  // The same search, everywhere else: files in other folders whose name
+  // matches, each with a way to its folder. Finding a procedure used to mean
+  // knowing where it lived.
+  const [elsewhere, setElsewhere] = useState([]);
+  useEffect(() => {
+    if (!q) { setElsewhere([]); return undefined; }
+    let live = true;
+    const t = setTimeout(() => {
+      Db.searchFiles(q)
+        .then(hits => {
+          if (!live) return;
+          const here = prefix ? prefix + "/" : "";
+          setElsewhere(hits.filter(f => !f.path.startsWith(here) || f.path.slice(here.length).includes("/")));
+        })
+        .catch(() => { if (live) setElsewhere([]); });
+    }, 250);
+    return () => { live = false; clearTimeout(t); };
+  }, [q, prefix]);
+  const folderOf = path => path.includes("/") ? path.slice(0, path.lastIndexOf("/")) : "";
+
   return (
     <div className="page">
       <div style={{ display: "flex", alignItems: "flex-end", marginBottom: 20, gap: 16, flexWrap: "wrap" }}>
@@ -148,9 +170,25 @@ export function FilesScreen({ currentUser }) {
           </span>
         ))}
         <input className="input" value={query} onChange={e => setQuery(e.target.value)}
-          placeholder="Search this folder…" aria-label="Search files"
+          placeholder="Search all folders…" aria-label="Search files"
           style={{ marginLeft: "auto", width: 220, minHeight: 34 }} />
       </div>
+
+      {q && elsewhere.length > 0 && (
+        <Blueprint style={{ padding: "8px 18px 10px", marginBottom: 12 }}>
+          <div style={{ fontSize: 12, color: "color-mix(in srgb, var(--color-text) 60%, transparent)", marginBottom: 6 }}>
+            Also found in other folders
+          </div>
+          {elsewhere.slice(0, 20).map(f => (
+            <div key={f.path} style={{ display: "flex", alignItems: "center", gap: 10, padding: "4px 0", fontSize: 13, flexWrap: "wrap" }}>
+              <span style={{ fontWeight: 600 }}>{f.name}</span>
+              <span style={{ fontSize: 12, color: "color-mix(in srgb, var(--color-text) 55%, transparent)" }}>{folderOf(f.path) || "All files"}</span>
+              <Btn variant="ghost" style={{ marginLeft: "auto", minHeight: 30 }} onClick={() => { setPrefix(folderOf(f.path)); setQuery(""); }}>Open folder</Btn>
+            </div>
+          ))}
+          {elsewhere.length > 20 && <div style={{ fontSize: 12, color: "color-mix(in srgb, var(--color-text) 55%, transparent)" }}>…and {elsewhere.length - 20} more — narrow the search.</div>}
+        </Blueprint>
+      )}
 
       {adding && (
         <div style={{ display: "flex", gap: 8, marginBottom: 12 }}>
