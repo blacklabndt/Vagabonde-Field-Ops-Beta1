@@ -227,8 +227,29 @@ export const TECH_LEVELS = [
 // "1,5" is how half the world's keyboards type one and a half, and a bare
 // parseFloat silently reads it as 1.
 export const nonNegative = value => {
-  const n = typeof value === "number" ? value : parseFloat(String(value).replace(",", "."));
+  const n = typeof value === "number" ? value : parseFloat(decimalString(value));
   return Number.isFinite(n) && n > 0 ? n : 0;
+};
+
+// What a typed number means. "1,5" is one and a half; "1,200" is twelve
+// hundred — on this crew's keyboards a comma before exactly three trailing
+// digits is a thousands separator, and reading it as the decimal point
+// turned a $1,200 day rate into $1.20 on the published card. With both
+// marks present the last one is the decimal point and the rest are
+// grouping ("1,234.5"). Anything else is left to parseFloat.
+export const decimalString = value => {
+  const s = String(value ?? "").trim();
+  const lastDot = s.lastIndexOf("."), lastComma = s.lastIndexOf(",");
+  if (lastDot >= 0 && lastComma >= 0) {
+    const dec = Math.max(lastDot, lastComma);
+    return s.slice(0, dec).replace(/[.,]/g, "") + "." + s.slice(dec + 1).replace(/[.,]/g, "");
+  }
+  if (lastComma >= 0) {
+    const parts = s.split(",");
+    const grouping = parts.length > 2 || /^\d{3}$/.test(parts[1]);
+    return grouping ? parts.join("") : parts.join(".");
+  }
+  return s;
 };
 
 // A line's billable amount: quantity × rate, rounded to the cent. The one

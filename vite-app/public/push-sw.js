@@ -6,12 +6,25 @@
 self.addEventListener("push", event => {
   let data = {};
   try { data = event.data ? event.data.json() : {}; } catch (_) { /* an unreadable payload still buzzes */ }
-  // A dot on the app's icon until the room is read — the app itself
-  // replaces it with the real count (or clears it) when opened.
-  if ("setAppBadge" in self.navigator) {
-    event.waitUntil(self.navigator.setAppBadge().catch(() => {}));
-  }
-  event.waitUntil(self.registration.showNotification(data.title || "Team chat", {
+  event.waitUntil((async () => {
+    // With the app on screen, a banner over it (and a dot on its icon that
+    // nothing then clears) is noise: the page is told instead and moves
+    // its own badge. Out of sight, it buzzes as before.
+    const wins = await clients.matchAll({ type: "window", includeUncontrolled: true });
+    const visible = wins.filter(c => c.visibilityState === "visible");
+    if (visible.length) {
+      visible.forEach(c => { try { c.postMessage({ type: "chat-push" }); } catch (_) { /* older page */ } });
+      return;
+    }
+    // A dot on the app's icon until the room is read — the app itself
+    // replaces it with the real count (or clears it) when opened.
+    if ("setAppBadge" in self.navigator) await self.navigator.setAppBadge().catch(() => {});
+    await showChatNotification(data);
+  })());
+});
+
+function showChatNotification(data) {
+  return self.registration.showNotification(data.title || "Team chat", {
     body: data.body || "New message",
     icon: "/icons/icon-192.png",
     // The status-bar icon. Android renders only its alpha silhouette —
@@ -28,8 +41,8 @@ self.addEventListener("push", event => {
     // miss the rest.
     renotify: true,
     data: { url: data.url || "/" }
-  }));
-});
+  });
+}
 
 self.addEventListener("notificationclick", event => {
   event.notification.close();

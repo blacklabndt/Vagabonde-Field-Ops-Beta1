@@ -17,9 +17,17 @@ import { LEVEL_LEGEND } from "./levels.ts";
 
 // Everything the invoice prints, and nothing else.
 export const TICKET_INVOICE_SELECT =
-  "id, work_date, total, status, delays, client_contact, approved_at, approved_by_email, approved_signature, " +
+  "id, work_date, total, status, delays, client_contact, approved_at, approved_by_email, approved_signature, approval_sent_to, " +
   "jobs(job_number, project, lsd, afe, area, clients(name), contractors(name)), " +
   "ticket_lines(kind, label, unit, quantity, unit_rate)";
+
+// The embed above comes back in whatever order the heap holds the rows,
+// which drifts once vacuum reuses the space a re-saved ticket's old lines
+// left behind. line_order is the insertion sequence — the app saves lines
+// in the rate card's order — so ordering by it keeps the printed bill in
+// the order the client agreed the card in. Every reader of the select
+// applies this; a copy that forgets prints the charges shuffled.
+export const TICKET_LINES_ORDER = ["line_order", { referencedTable: "ticket_lines" }] as const;
 
 const CREW_SELECT =
   "straight_hours, ot_hours, mileage_km, profiles(name, level, id_code)";
@@ -35,6 +43,7 @@ export async function loadInvoice(
   const { data: ticket, error } = await client
     .from("tickets")
     .select(TICKET_INVOICE_SELECT)
+    .order(...TICKET_LINES_ORDER)
     .eq("id", ticketId)
     .maybeSingle();
 

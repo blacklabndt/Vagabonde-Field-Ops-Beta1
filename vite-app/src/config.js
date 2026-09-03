@@ -20,13 +20,22 @@ export const VAPID_PUBLIC_KEY = "BCnt_FGpoYIxJsp4q2YCK6xfKMazrrCYVmfkRDRpLoLIak2
 // how "Creating…" or "Loading rates…" turns into a permanent state rather
 // than a failure the offline queue could catch.
 //
-// 30 seconds is deliberately generous: a report upload on a bad link is slow
-// but legitimate, and killing it would be worse than waiting. Genuinely
-// offline, fetch rejects immediately anyway — this ceiling is for the case
-// where the radio is technically connected but nothing is getting through.
+// 30 seconds is generous for a database or auth call. It is not for a file:
+// supabase-js routes Storage and Edge Function traffic through this same
+// fetch, and a 15 MB interpreted report on one bar of LTE needs minutes, not
+// thirty seconds — cut off, it read as "no connection", went to the offline
+// queue, and the queue's retry cut it off again, forever, with four bars
+// showing. So uploads and function calls run unbounded; the token refresh
+// that precedes them still goes to /auth/v1 and is still bounded, which is
+// the hang this ceiling exists for. Genuinely offline, fetch rejects
+// immediately anyway.
 const REQUEST_TIMEOUT_MS = 30000;
+const UNBOUNDED = /\/storage\/v1\/|\/functions\/v1\//;
 
 function fetchWithCeiling(input, init = {}) {
+  const url = typeof input === "string" ? input : (input && input.url) || "";
+  if (UNBOUNDED.test(url)) return fetch(input, init);
+
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), REQUEST_TIMEOUT_MS);
 

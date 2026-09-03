@@ -35,6 +35,9 @@ export interface InvoiceData {
     delays?: string | null;
     approved_by_email?: string | null; approved_at?: string | null;
     approved_signature?: string | null;
+    // Where the approval link was emailed. Printed on the stamp so a signed
+    // ticket says who was asked, not only who typed a name.
+    approval_sent_to?: string | null;
   };
   job: {
     job_number?: string; project?: string; lsd?: string; afe?: string;
@@ -264,7 +267,8 @@ export function renderInvoice(d: InvoiceData): string {
   ${signed ? `
   <div class="stamp">${sigImage(d.ticket.approved_signature)}<strong>Approved</strong><br>
     Signed by ${esc(d.ticket.approved_by_email || "")}${d.ticket.approved_at
-      ? " on " + esc(new Date(d.ticket.approved_at).toLocaleString("en-CA")) : ""}
+      ? " on " + esc(new Date(d.ticket.approved_at).toLocaleString("en-CA")) : ""}${d.ticket.approval_sent_to
+      ? `<br><span class="mute">Approval link sent to ${esc(d.ticket.approval_sent_to)}</span>` : ""}
   </div>` : `
   <div class="wrap"><table style="margin-top:14px">
     <thead><tr><th>Client representative</th><th>Signature</th><th>Date</th></tr></thead>

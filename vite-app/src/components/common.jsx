@@ -128,8 +128,14 @@ export function Field({ label, children, style, missing }) {
 // input, and pass missing={is(key)} to its Field.
 export function useMissingFields() {
   const [missing, setMissing] = useState({});
+  // Bumped only by flag(): the jump-to-field effect below keys on this, so
+  // it runs when a submit lights fields up — never when fixed() clears one.
+  const [flagSeq, setFlagSeq] = useState(0);
 
-  const flag = (...keys) => setMissing(Object.fromEntries(keys.filter(Boolean).map(k => [k, true])));
+  const flag = (...keys) => {
+    setMissing(Object.fromEntries(keys.filter(Boolean).map(k => [k, true])));
+    setFlagSeq(n => n + 1);
+  };
   const clear = () => setMissing({});
   // Drops the highlight the moment a field is filled, rather than leaving it
   // lit until the next submit — otherwise fixing the problem looks like it
@@ -145,14 +151,20 @@ export function useMissingFields() {
   // Jumps to the first flagged field. On a phone the offending box is often
   // below the fold, so the error box appears at the top and nothing visibly
   // happens where the user is looking.
+  //
+  // Keyed on flagSeq, not on `missing`: this used to re-run every time
+  // fixed() cleared a field, so the first keystroke into the project box
+  // cleared its flag, the effect re-ran, found the client select was now
+  // the first invalid field, and moved focus there — the rest of the name
+  // went into the select as type-ahead and picked a client.
   useEffect(() => {
-    if (!Object.values(missing).some(Boolean)) return;
+    if (!flagSeq) return;
     const el = document.querySelector(".input.invalid");
     if (!el) return;
     el.scrollIntoView({ block: "center", behavior: "smooth" });
     // preventScroll so focus doesn't fight the smooth scroll above.
     if (el.focus) el.focus({ preventScroll: true });
-  }, [missing]);
+  }, [flagSeq]);
 
   return { is, props, flag, clear, fixed };
 }
@@ -700,7 +712,14 @@ export function QueuedPanel({ what, onDone }) {
 // CSV rather than a print view: it opens in Excel, which is where these
 // exports end up anyway. Quotes are doubled per RFC 4180 so a project name
 // with a comma in it doesn't shift every column after it.
-const csvCell = v => `"${String(v == null ? "" : v).replace(/"/g, '""')}"`;
+// A cell that begins with = + - @ or a tab is a formula to Excel, quotes or
+// not — a project named "=HYPERLINK(...)" would run when accounting opened
+// the export. A leading apostrophe makes it text, which is what it is.
+const csvCell = v => {
+  const s = String(v == null ? "" : v);
+  const safe = /^[=+\-@\t\r]/.test(s) ? "'" + s : s;
+  return `"${safe.replace(/"/g, '""')}"`;
+};
 
 export function downloadCsv(filename, rows) {
   // The BOM is what makes Excel read this as UTF-8 — without it, accented

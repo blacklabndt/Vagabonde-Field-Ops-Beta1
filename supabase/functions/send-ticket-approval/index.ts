@@ -8,7 +8,8 @@
 import { createClient } from "https://esm.sh/@supabase/supabase-js@2";
 import { sendMail, appSettings, corsHeaders, wrapEmail, esc, recipients, optionalRecipients } from "../_shared/mail.ts";
 import { invoicePage, GST_RATE } from "../_shared/invoice.ts";
-import { loadInvoice } from "../_shared/ticketInvoice.ts";
+import { loadInvoice, TICKET_LINES_ORDER } from "../_shared/ticketInvoice.ts";
+import { hashToken } from "../_shared/approvalToken.ts";
 
 const money = (n: number) =>
   "$" + Number(n).toLocaleString("en-CA", { minimumFractionDigits: 2, maximumFractionDigits: 2 });
@@ -36,6 +37,7 @@ Deno.serve(async (req) => {
     const { data: ticket, error: tErr } = await asUser
       .from("tickets")
       .select("id, technician_id, work_date, total, status, delays, client_contact, jobs(job_number, project, lsd, afe, area, clients(name), contractors(name)), ticket_lines(kind, label, unit, quantity, unit_rate)")
+      .order(...TICKET_LINES_ORDER)
       .eq("id", ticketId).single();
     if (tErr || !ticket) throw new Error("Ticket not found, or you don't have access to it");
     if (ticket.status === "Approved" || ticket.status === "Invoiced") {
@@ -84,13 +86,17 @@ Deno.serve(async (req) => {
     // the shared functions domain, so a rep following a link straight here is
     // shown the page's source instead of the page. See worker/index.js.
     //
-    // APPROVAL_BASE_URL is the app's origin, e.g. https://app.vagabonde.ca.
-    // Falling back to the functions domain keeps the link working — as plain
-    // text — rather than sending nothing at all if the secret is unset.
+    // The app address is the Worker's origin, e.g. https://app.vagabonde.ca —
+    // set on the Admin screen, or the APPROVAL_BASE_URL secret as fallback.
+    // Without it the only link that could go out points at the functions
+    // domain, where the page arrives as source code; a rep handed that
+    // cannot sign, and the ticket would still sit as "Awaiting approval".
+    // Refuse instead, and say what to set.
     const appBase = ((await appSettings()).approvalBaseUrl ?? "").replace(/\/+$/, "");
-    const link = appBase
-      ? `${appBase}/approve?t=${token}`
-      : `${(Deno.env.get("SUPABASE_URL") ?? "").replace(".supabase.co", ".functions.supabase.co")}/approve-ticket?t=${token}`;
+    if (!appBase) {
+      throw new Error("The app address isn't set, so an approval link can't be built — an Admin can set it on the Admin screen (App address).");
+    }
+    const link = `${appBase}/approve?t=${token}`;
 
     const rows = lines.map(l =>
       `<tr><td style="padding:6px 0">${esc(l.label)}</td>
@@ -166,10 +172,18 @@ Deno.serve(async (req) => {
     // the emailed link points at a token no row holds — approve-ticket would
     // tell the rep the link was already used — so a failure here has to
     // surface as one, not vanish behind ok:true.
+    //
+    // Stored hashed (see _shared/approvalToken.ts): the row is readable by
+    // every staff account, and the raw token is the whole credential. Who it
+    // went to and who sent it are recorded beside it — a signed ticket then
+    // says which inbox was asked, which is the only thing that separates a
+    // genuine approval from one a technician mailed to themselves.
     const { error: tokenErr } = await admin.from("tickets").update({
-      approval_token: token,
+      approval_token: await hashToken(token),
       approval_sent_at: new Date().toISOString(),
       approval_expires_at: expires,
+      approval_sent_to: toList,
+      approval_sent_by: user.id,
       status: "Awaiting approval"
     }).eq("id", ticketId);
     if (tokenErr) {

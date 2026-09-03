@@ -105,6 +105,10 @@ export function BillingTrackerScreen({ onOpenTicket }) {
   // ticket with no client email on file is skipped and counted separately
   // — it can't be chased until a rep is added, but the rest shouldn't wait.
   const chaseAllUnsigned = async () => {
+    // One tap emails every client with an unsigned ticket, and the only undo
+    // is a phone call — so it asks first, like every other outward action.
+    const n = stats && stats.unsigned ? stats.unsigned.count : 0;
+    if (!confirm(`Email an approval reminder for ${n} unsigned ticket${n === 1 ? "" : "s"} now? Each client rep on file gets a fresh link.`)) return;
     setChasing(true);
     setChaseResult("");
     setError("");

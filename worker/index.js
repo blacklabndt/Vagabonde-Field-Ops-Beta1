@@ -37,6 +37,10 @@ const ALLOWED_METHODS = new Set(["GET", "HEAD", "POST"]);
 // holding an open socket because the function is wedged.
 const UPSTREAM_TIMEOUT_MS = 15000;
 
+// The form carries a typed name and a small PNG at most; the function caps
+// the same. Refused here so an oversized body never reaches it.
+const MAX_BODY_BYTES = 1_000_000;
+
 export default {
   async fetch(request, env) {
     const url = new URL(request.url);
@@ -47,6 +51,9 @@ export default {
         return new Response("Method not allowed", {
           status: 405, headers: { "Allow": "GET, HEAD, POST" }
         });
+      }
+      if (Number(request.headers.get("content-length") || 0) > MAX_BODY_BYTES) {
+        return new Response("Request too large", { status: 413 });
       }
       return approvalPage(request, url);
     }
@@ -92,7 +99,10 @@ async function approvalPage(request, url) {
       "Content-Type": "text/html; charset=utf-8",
       "Cache-Control": "no-store",
       "Referrer-Policy": "no-referrer",
-      "X-Content-Type-Options": "nosniff"
+      "X-Content-Type-Options": "nosniff",
+      // The signing page is never legitimately framed; a page that could be
+      // is a page that could be clickjacked into approving.
+      "Content-Security-Policy": "frame-ancestors 'none'"
     }
   });
 }

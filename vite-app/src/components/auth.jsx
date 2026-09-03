@@ -69,6 +69,9 @@ export function SignInScreen({ onSignIn }) {
     }
     if (!profile) {
       setError("Signed in, but no profile is set up for this account yet — ask an admin to add you in Users & access.");
+      // Same as the no-tabs branch below: an account the app has judged
+      // unusable must not leave a live session on a shared tablet.
+      await sbClient.auth.signOut();
       return;
     }
     const tabs = tabList(profile.tab_access);

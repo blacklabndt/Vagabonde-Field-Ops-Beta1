@@ -17,6 +17,21 @@
 
 begin;
 
+-- A ticket the client has signed for, or that has been invoiced, is billing
+-- the business has already stood behind. This script clears every ticket
+-- on the way to the jobs, so it refuses to run while any such ticket
+-- exists — those are real records, and the "example jobs" framing above
+-- does not describe a database that holds them.
+do $$
+declare n int;
+begin
+  select count(*) into n from public.tickets
+   where approved_at is not null or status in ('Approved', 'Invoiced');
+  if n > 0 then
+    raise exception 'Refusing: % approved or invoiced ticket(s) are on file. This script deletes every ticket; it is for a database of example data only.', n;
+  end if;
+end $$;
+
 -- Deleted innermost-first rather than relying on cascades, so this works the
 -- same whether or not every foreign key was declared with one.
 delete from public.ticket_crew;

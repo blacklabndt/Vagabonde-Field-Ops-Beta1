@@ -321,6 +321,11 @@ tbody tr.clickable { cursor: pointer; }
 
 @media (max-width: 760px) {
 
+  /* Thumb-sized where a thumb does the work: the row × that deletes a
+     rate line or a file, the filter pills. 44px is the floor a glove hits. */
+  .row-x { width: 40px; height: 40px; font-size: 18px; }
+  .pill { min-height: 40px; }
+
   .topbar { gap: 12px; padding: 10px 14px; flex-wrap: nowrap; }
   .topbar-brand { width: 116px; height: 26px; }
   /* The bar keeps only what a thumb needs: menu, mark, theme. Name and sign

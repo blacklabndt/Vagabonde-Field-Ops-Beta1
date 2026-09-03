@@ -74,9 +74,18 @@ staged, reviewed, and run by hand exactly once:
 
 Read its header before running — it says what survives (the owner
 account, the house rate card, the schema itself) and what to do about the
-storage buckets afterwards. **It also retires the Playwright e2e suite**,
-which signs in as two of the seed technicians; keep a pair of test
-accounts if the suite should outlive handover.
+storage buckets afterwards. Despite its name it empties everything, not
+only the seed rows, so it refuses to run until the session has said so:
+`set app.confirm_total_wipe = 'yes';` first, in the same SQL session.
+**It also retires the Playwright e2e suite**, which signs in as two of the
+seed technicians; keep a pair of test accounts if the suite should outlive
+handover.
+
+To remove only the generated rows and keep real records, run
+`supabase/handover/wipe-seed-only.sql` instead — it works by the seed
+markers (S-1… jobs, @seed.vagabonde.ca accounts, organisations that only
+ever appeared on seed jobs) and prints a preview of the organisations it
+will remove before the deletes.
 
 ## Day one, for the new admin
 

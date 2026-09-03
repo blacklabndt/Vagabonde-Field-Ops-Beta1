@@ -119,6 +119,11 @@ export function TimesheetsScreen({ currentUser }) {
   };
   const person = selectable.find(p => p.profileId === selected)
     || (isAdmin ? (selectable[0] || null) : (people.find(p => p.profileId === currentUser.id) || ownEmpty));
+  // What "Export period summary" may include: everyone for an admin; for
+  // anyone else only their own row. The query also returns crewmates on
+  // shared tickets, whose hours this screen deliberately doesn't show — the
+  // workbook mustn't be the way around that.
+  const summaryPeople = isAdmin ? people : people.filter(p => p.profileId === currentUser.id);
   // Keep the picker in step with that fallback: when an admin opens a period
   // with no hours (selected falls to null) or switches to a person with none
   // this fortnight, point selected at the first roster entry so the picker
@@ -247,8 +252,8 @@ export function TimesheetsScreen({ currentUser }) {
             </Btn>
           )}
           <Btn variant="secondary" style={{ minHeight: 38 }}
-            onClick={() => runExport(() => exportTimesheetWorkbook({ people, period }))}
-            disabled={!people.length || exporting}>{exporting ? "Building…" : "Export period summary"}</Btn>
+            onClick={() => runExport(() => exportTimesheetWorkbook({ people: summaryPeople, period }))}
+            disabled={!summaryPeople.length || exporting}>{exporting ? "Building…" : "Export period summary"}</Btn>
         </div>}
       </div>
 

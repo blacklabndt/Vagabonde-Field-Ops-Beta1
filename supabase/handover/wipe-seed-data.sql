@@ -1,4 +1,12 @@
--- Handover wipe: every row of load-test seed data, in one transaction.
+-- Handover wipe: EVERYTHING, not only the seed rows — in one transaction.
+--
+-- Despite the file name, nothing below is scoped to the load-test markers
+-- (S-1% jobs, @seed.vagabonde.ca accounts). Every job, ticket, JHA, report,
+-- client, contact, chat message and account except the owner's goes. That
+-- is what a handover wants — the client starts from an empty book — and it
+-- is also why the interlock just below refuses to run until you have read
+-- this far. To remove only the seed rows and keep real records, use
+-- wipe-seed-only.sql beside this file instead.
 --
 -- THIS IS DESTRUCTIVE AND NOT A MIGRATION. It lives here, not in
 -- supabase/migrations/, precisely so nothing ever runs it by accident.
@@ -27,6 +35,19 @@
 -- dashboard or API.
 
 begin;
+
+-- The interlock. This script deletes ALL data, not only the seed rows; it
+-- refuses to continue unless the session has said, in so many words, that
+-- that is understood. Run this first, in the same session:
+--
+--   set app.confirm_total_wipe = 'yes';
+--
+do $$
+begin
+  if current_setting('app.confirm_total_wipe', true) is distinct from 'yes' then
+    raise exception 'Refusing: wipe-seed-data.sql deletes EVERY job, ticket, JHA, report, client and account except the owner — not only the seed rows. Read the header; to proceed run:  set app.confirm_total_wipe = ''yes'';  first. For seed rows only, use wipe-seed-only.sql.';
+  end if;
+end $$;
 
 -- Billing first (children before parents, so no cascade surprises).
 delete from public.ticket_crew;

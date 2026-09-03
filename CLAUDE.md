@@ -70,8 +70,16 @@ Cloudflare Worker `solitary-snowflake-ee22` (assets + `/approve` proxy in
   (RESEND_API_KEY, MAIL_FROM_*, KLIPY_API_KEY, APPROVAL_BASE_URL) are
   FALLBACKS only — a table value wins, so rotating a secret does nothing
   while a table value exists. With a key but no verified sending address
-  the transport is in testing mode: only the test email (mail-test) may
-  use Resend's onboarding sender; real sends are refused with the reason.
+  the transport is in testing mode: every send goes out under Resend's
+  onboarding sender, which delivers only to the inbox the Resend account
+  was created with — a send to anyone else is refused by Resend and
+  mail.ts translates that refusal into a plain message naming the fix.
+- Approval tokens are stored hashed (`sha256:` + hex, see
+  `_shared/approvalToken.ts` and migration 20260902211209); the raw token
+  exists only in the emailed link. Approving is the service role's act
+  alone: the tickets UPDATE policy's WITH CHECK pins the approval columns,
+  so no signed-in account can set Approved. Probe it with role simulation
+  if you touch that policy.
   The role→tabs defaults live in TWO places that must move together:
   ROLE_PRESETS in vite-app/src/data.js and tabs_for_role() in the
   database (create-user provisions from the latter).
@@ -110,7 +118,26 @@ Cloudflare Worker `solitary-snowflake-ee22` (assets + `/approve` proxy in
 The live project carries deliberate load-test seed data alongside Kyle's
 real records: jobs `S-1%`, staff accounts `@seed.vagabonde.ca` (id_code
 24400+), and generated orgs/contacts/tickets from 2026-08-18. It is all
-identifiable by those markers when a cleanup is wanted.
+identifiable by those markers when a cleanup is wanted:
+`supabase/handover/wipe-seed-only.sql` removes exactly that, by marker.
+`wipe-seed-data.sql` beside it is the handover reset — despite its name it
+empties EVERYTHING except the owner account, and refuses to run until the
+session has set `app.confirm_total_wipe = 'yes'`.
+
+## Access rules the database enforces (probe with role simulation)
+
+- `is_staff()` means at least one tab. Stripping every tab locks an
+  account out of the API, not only the menu. delete-user locks (Auth ban +
+  `profiles.deactivated_at` + no tabs) an account with work on file instead
+  of deleting it, because the foreign keys keep history's names.
+- A role change is an Admin's (`profiles_update` WITH CHECK); the users tab
+  alone grants tabs, never rank.
+- Signed-in accounts may update only a JHA's close-out columns (column
+  grant); the functions write the rest with the service role.
+- `jobs_guard_update` trigger: job_number/created_by/created_at are fixed,
+  status changes are Admin-only, client changes Admin/Coordinator. There is
+  no direct DELETE on jobs — `delete_job` is the only door, and a non-admin
+  transfer may target only a job they raised.
 
 ## People
 

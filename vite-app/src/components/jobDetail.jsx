@@ -2,6 +2,7 @@ import React, { useState, useEffect, useRef } from "react";
 import { money, todayLocal, localDate, dayMonth, initialsOf, ticketDateStamp, lastNumbers, JOB_FIELDS } from "../data.js";
 import { Db } from "../db.js";
 import { OfflineCache } from "../offlineCache.js";
+import { OfflineQueue } from "../offlineQueue.js";
 import { Blueprint, Btn, TableScroll, TagX, Field, PdfGlyph, PdfLink, Dialog, ErrorBox, emailIn, contactLabel, splitContact, StatusTag, useMissingFields, SearchSelect, Loading, LoadingRow } from "./common.jsx";
 
 export function JobDetailScreen({ job, currentUser, onStartJha, onOpenTicket, jobRecord, setJobRecord, onJobChanged, onJobDeleted }) {
@@ -175,7 +176,9 @@ export function JobDetailScreen({ job, currentUser, onStartJha, onOpenTicket, jo
   // panel heading. Nothing else is read off it now — the hazards it covered
   // are on the assessment itself rather than summarised here.
   const latestJha = jhas[0];
-  const ticketTotal = tickets.reduce((s, t) => s + t.amount, 0);
+  // Integer cents, like every other total in the app — a running float sum
+  // of dollars is the one thing CLAUDE.md forbids outright.
+  const ticketTotal = tickets.reduce((s, t) => s + Math.round(Number(t.amount || 0) * 100), 0) / 100;
   const awaitingApproval = tickets.some(t => t.status === "Awaiting approval");
 
   // Who may remove this job.
@@ -1209,6 +1212,10 @@ function UploadReportDialog({ job, jobRecord, currentUser, onClose, onSubmit }) 
     } catch { /* stays manual */ }
   };
 
+  // The stored row, once the upload has landed. A retry after the email
+  // failed must not upload the same PDF again and file a second report —
+  // it only has to send. Cleared when a different file is picked.
+  const storedReport = useRef(null);
   const submit = async sent => {
     if (!file) { miss.flag("file"); setError("Attach the interpreted PDF first."); return; }
     if (!welds.trim()) { miss.flag("welds"); setError("Note which welds this report covers."); return; }
@@ -1217,11 +1224,14 @@ function UploadReportDialog({ job, jobRecord, currentUser, onClose, onSubmit }) 
     setSaving(true);
     setError("");
     try {
-      const report = await Db.uploadReport({
-        jobDbId: job.dbId, jobNumber: job.id, file, welds: welds.trim(), result: "Accept",
-        interpretedBy: currentUser.name, send: false, sendTo: to.trim()
-      });
-      // The row is stored first, then emailed — so a Postmark outage costs the
+      if (!storedReport.current) {
+        storedReport.current = await Db.uploadReport({
+          jobDbId: job.dbId, jobNumber: job.id, file, welds: welds.trim(), result: "Accept",
+          interpretedBy: currentUser.name, send: false, sendTo: to.trim()
+        });
+      }
+      const report = storedReport.current;
+      // The row is stored first, then emailed — so a mail outage costs the
       // send, not the upload. The report shows as Pending and can be resent.
       if (sent) {
         setSaving("Sending…");
@@ -1232,7 +1242,9 @@ function UploadReportDialog({ job, jobRecord, currentUser, onClose, onSubmit }) 
       onSubmit();
     } catch (e) {
       setSaving(false);
-      setError(e.message || "Couldn't upload — try again.");
+      setError(storedReport.current
+        ? `The report is uploaded, but the email didn't go out: ${e.message || "the email service didn't respond."} Try again to resend it, or close this — it's on file as Pending and can be sent from the list.`
+        : (e.message || "Couldn't upload — try again."));
     }
   };
 
@@ -1261,6 +1273,7 @@ function UploadReportDialog({ job, jobRecord, currentUser, onClose, onSubmit }) 
             const f = e.target.files[0] || null;
             miss.fixed("file");
             setFile(f);
+            storedReport.current = null;
             if (f) scanForNumbers(f);
             e.target.value = "";
           }} />
@@ -1344,7 +1357,12 @@ function CreateTicketDialog({ job, jobRecord, currentUser, onClose, onSubmit }) 
       onSubmit(id);
     } catch (e) {
       setSaving(false);
-      setError(e.message || "Couldn't create the ticket — try again.");
+      // Creating the row needs signal — the number is minted by the
+      // database and nothing here queues. Say so, rather than a bare
+      // "Failed to fetch" under a hint that promised an offline number.
+      setError(OfflineQueue.isNetworkError(e)
+        ? "No connection — a ticket raised from here needs signal to reserve its number. Try again once you're back in range."
+        : (e.message || "Couldn't create the ticket — try again."));
     }
   };
 
@@ -1370,7 +1388,7 @@ function CreateTicketDialog({ job, jobRecord, currentUser, onClose, onSubmit }) 
           </div>
           {provisional && (
             <div style={{ color: "var(--color-accent-700)", marginTop: 2 }}>
-              Provisional — offline, confirmed on sync
+              Offline — creating the ticket needs signal
             </div>
           )}
         </div>

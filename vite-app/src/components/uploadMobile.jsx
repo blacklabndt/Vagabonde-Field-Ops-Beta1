@@ -56,6 +56,12 @@ export function UploadMobileScreen({ job, jobRecord, currentUser, onSent }) {
 
   const sendAll = async () => {
     if (!items.length) return;
+    // The desktop dialog refuses a report with no welds listed, and so must
+    // this: the contractor otherwise gets a row that says nothing about
+    // which welds it covers, and reconciling it against the film has
+    // nothing to go on.
+    const unlabelled = items.find(it => !it.welds.length);
+    if (unlabelled) { setError(`Note which welds ${unlabelled.file.name} covers before sending.`); return; }
     setSending(true);
     setError("");
     let failedAt = null;

@@ -101,6 +101,21 @@ export function TicketMobileScreen({ job, jobRecord, currentUser, onSaved, ticke
   const [people, setPeople] = useState([]);
   const [crew, setCrew] = useState([]);
   const [crewPick, setCrewPick] = useState("");
+  // The filer as a crew row — what every ticket starts with. Read through a
+  // ref by the draft loader, which may run before or after the directory
+  // arrives; whichever comes second fills in the profile's own name and
+  // subcontractor flag.
+  const peopleRef = useRef([]);
+  useEffect(() => { peopleRef.current = people; }, [people]);
+  const seedCrew = list => {
+    const me = (list || []).find(p => p.id === currentUser.id);
+    return [{
+      profileId: currentUser.id,
+      name: me ? me.displayName : currentUser.name,
+      isSub: me ? me.is_subcontractor : false,
+      role: "Lead", straight: 0, ot: 0, solo: 0, soloOt: 0, dose: 0, mileage: 0
+    }];
+  };
 
   // The date this ticket is filed against — captured once when the screen
   // opens, in local time, so a ticket built either side of midnight UTC still
@@ -139,21 +154,23 @@ export function TicketMobileScreen({ job, jobRecord, currentUser, onSaved, ticke
       }
     })();
 
-    Db.listProfiles()
+    Db.listActiveProfiles()
       .then(list => {
         setPeople(list);
         const first = list.find(p => p.id !== currentUser.id);
         if (first) setCrewPick(first.id);
-        // A reopened draft brings its own crew rows; seeding "just me" here
-        // would overwrite them. The guard also covers a recovered WIP entry.
-        if (ticket || wipRestored.current) return;
-        const me = list.find(p => p.id === currentUser.id);
-        setCrew([{
-          profileId: currentUser.id,
-          name: me ? me.displayName : currentUser.name,
-          isSub: me ? me.is_subcontractor : false,
-          role: "Lead", straight: 0, ot: 0, solo: 0, soloOt: 0, dose: 0, mileage: 0
-        }]);
+        // A reopened draft brings its own crew rows (or is seeded by the
+        // draft loader when it has none); seeding "just me" here would
+        // overwrite them. The guard also covers a recovered WIP entry. What
+        // this path still owes them is the profile's own name and
+        // subcontractor flag, if the filer's row was seeded before the
+        // directory arrived.
+        if (ticket || wipRestored.current) {
+          const me = list.find(p => p.id === currentUser.id);
+          if (me) setCrew(p => p.map(c => c.profileId === me.id ? { ...c, name: me.displayName, isSub: me.is_subcontractor } : c));
+          return;
+        }
+        setCrew(seedCrew(list));
       })
       .catch(e => console.error("Couldn't load crew list:", e.message));
   }, [job ? job.clientId : null]);
@@ -189,7 +206,11 @@ export function TicketMobileScreen({ job, jobRecord, currentUser, onSaved, ticke
         if (row.work_date) setWorkDate(row.work_date);
         if (row.delays) setDelays(row.delays);
         if (row.client_contact && row.client_contact.name) setTicketClientContact(row.client_contact.name);
-        if (savedCrew.length) setCrew(savedCrew);
+        // A draft raised from Job detail arrives with no crew rows at all,
+        // and a ticket with nobody on it bills hours no one is paid for —
+        // so an empty crew is seeded with the filer, exactly as a fresh
+        // ticket is.
+        setCrew(savedCrew.length ? savedCrew : seedCrew(peopleRef.current));
       } catch (e) {
         setLoadError(e.message || "Couldn't open that ticket.");
       }
@@ -368,6 +389,14 @@ export function TicketMobileScreen({ job, jobRecord, currentUser, onSaved, ticke
   const availablePeople = people.filter(p => !crew.some(c => c.profileId === p.id));
   const availableHelpers = availablePeople.filter(p => crewRoleFor(p) === "Helper");
   const availableTechs = availablePeople.filter(p => crewRoleFor(p) !== "Helper");
+  // The pick must be someone still addable: a recovered or copied crew can
+  // leave the stored pick pointing at a person already on the ticket, and
+  // Add would then put them on twice. Falls back to the filer when they've
+  // taken themselves off, else the first person the dropdown shows — so
+  // what Add adds is always what the dropdown reads.
+  const effCrewPick = availablePeople.some(p => p.id === crewPick) ? crewPick
+    : availablePeople.some(p => p.id === currentUser.id) ? currentUser.id
+    : (availablePeople[0] || {}).id || "";
 
   const setCrewField = (profileId, key, value) =>
     setCrew(p => p.map(c => c.profileId === profileId ? { ...c, [key]: Math.max(0, value) } : c));
@@ -411,6 +440,12 @@ export function TicketMobileScreen({ job, jobRecord, currentUser, onSaved, ticke
     setSaving(true);
     setSaveError("");
     setEmailFailed(false);
+    // What goes to the database is what is on screen at this moment. Until
+    // the save lands the form is frozen (see the frame below) and the
+    // keyboard is put away — a number corrected while "Saving…" spun used
+    // to be discarded silently, because the successful save wiped the
+    // recovery copy and left the screen with the old figure stored.
+    if (document.activeElement && document.activeElement.blur) document.activeElement.blur();
     // Declared outside the try so the catch reads the same truth the save
     // path wrote — see the note on `inDb` below. `stage` records how far
     // the save actually got: a crew-save failure used to be reported as
@@ -539,7 +574,11 @@ export function TicketMobileScreen({ job, jobRecord, currentUser, onSaved, ticke
   return (
     <div className="page">
       <div className="phone-shell">
-        <Blueprint className="phone-frame">
+        {/* Frozen while a save is in flight: an edit typed during the save
+            would be lost to it (see save()). pointer-events off keeps taps
+            from reaching the inputs; the page itself still scrolls. */}
+        <Blueprint className="phone-frame" aria-busy={saving || undefined}
+          style={saving ? { pointerEvents: "none", opacity: 0.7 } : undefined}>
           <div style={{ display: "flex", alignItems: "center", fontSize: 11, textTransform: "uppercase" }}>
             <span style={{ width: 7, height: 7, background: "var(--color-accent)", marginRight: 6, flex: "none" }} />
             Draft ticket
@@ -750,7 +789,7 @@ export function TicketMobileScreen({ job, jobRecord, currentUser, onSaved, ticke
               {/* Grouped rather than two dropdowns: helpers are picked the same
                   way as anyone else on the crew, and the group they come from
                   decides the crew role, so it cannot be set wrong. */}
-              <select className="input" value={crewPick} onChange={e => setCrewPick(e.target.value)} style={{ flex: 1 }}>
+              <select className="input" value={effCrewPick} onChange={e => setCrewPick(e.target.value)} style={{ flex: 1 }} aria-label="Add someone to the crew">
                 {availableTechs.length > 0 && (
                   <optgroup label="Technicians">
                     {availableTechs.map(p => <option key={p.id} value={p.id}>{p.displayName}</option>)}
@@ -763,10 +802,10 @@ export function TicketMobileScreen({ job, jobRecord, currentUser, onSaved, ticke
                 )}
               </select>
               <Btn variant="secondary" onClick={() => {
-                const p = people.find(x => x.id === crewPick);
+                const p = availablePeople.find(x => x.id === effCrewPick);
                 if (!p) return;
                 setCrew(c => [...c, { profileId: p.id, name: p.displayName, isSub: p.is_subcontractor, role: crewRoleFor(p), straight: 0, ot: 0, solo: 0, soloOt: 0, dose: 0, mileage: 0 }]);
-                const rest = availablePeople.filter(x => x.id !== crewPick);
+                const rest = availablePeople.filter(x => x.id !== effCrewPick);
                 if (rest[0]) setCrewPick(rest[0].id);
               }}>Add</Btn>
             </div>

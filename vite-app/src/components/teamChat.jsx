@@ -533,7 +533,16 @@ export function TeamChatScreen({ currentUser, onOpenJob, onRead }) {
         // The room you walk into holds still; only what arrives after
         // you is animated.
         if (initial) page.forEach(m => quietIds.current.add(m.id));
-        setMessages(prev => mergeIn(prev, page));
+        setMessages(prev => {
+          const next = mergeIn(prev, page);
+          // Messages that arrive by poll — the room's only pulse while the
+          // realtime channel is down — are read on screen like any other,
+          // so the bookmark moves for them too; it used to move only for
+          // the realtime path, and the drawer badge grew over messages the
+          // reader was looking at.
+          if (!initial && next !== prev && document.visibilityState === "visible") noteRead();
+          return next;
+        });
         setPins(pinned);
         if (initial) setHasMore(more);
         setLoadError("");
@@ -763,7 +772,11 @@ export function TeamChatScreen({ currentUser, onOpenJob, onRead }) {
     try {
       const { messages: older, hasMore: more } = await Db.listChatMessages(messages[0].createdAt);
       older.forEach(m => quietIds.current.add(m.id));
-      restoreHeight.current = el.scrollHeight;
+      // Only when something was prepended: an empty page leaves the list
+      // untouched, so the layout effect never runs to clear this, and the
+      // stale height would throw the reader up the list at the next
+      // arrival.
+      if (older.length) restoreHeight.current = el.scrollHeight;
       setMessages(prev => mergeIn(prev, older));
       setHasMore(more);
     } catch (e) {

@@ -8,6 +8,11 @@
 // GET  ?t=token  → the ticket, read-only, with an Approve button
 // POST ?t=token  → records the approval and burns the token
 //
+// The row holds a hash of the token, never the token (see
+// _shared/approvalToken.ts): the tickets table is readable by every staff
+// account, and a raw token there was a way for anyone signed in to sign a
+// colleague's ticket as the client.
+//
 // Runs without JWT verification — the rep has no bearer token, only the
 // link — pinned by [functions.approve-ticket] in supabase/config.toml so a
 // deploy can't quietly turn verification back on and 401 every approval.
@@ -16,6 +21,13 @@ import { createClient } from "https://esm.sh/@supabase/supabase-js@2";
 import { esc } from "../_shared/mail.ts";
 import { renderInvoice, invoiceCss } from "../_shared/invoice.ts";
 import { loadInvoice, TICKET_INVOICE_SELECT } from "../_shared/ticketInvoice.ts";
+import { hashToken, invoiceFingerprint } from "../_shared/approvalToken.ts";
+
+// A signature is a typed name and, optionally, a small PNG. Anything bigger
+// than this is not a form a person filled in, and formData() would buffer
+// the lot before anything here could object.
+const MAX_BODY_BYTES = 1_000_000;
+const MAX_NAME_CHARS = 120;
 
 // The invoice supplies its own .sheet and its own table styling, so this adds
 // only what sits around it: the sign form, notices, and the stamp. The old
@@ -110,7 +122,7 @@ async function handle(req: Request): Promise<Response> {
   const { data: row, error: readErr } = await admin
     .from("tickets")
     .select(TICKET_INVOICE_SELECT + ", approval_expires_at")
-    .eq("approval_token", token).maybeSingle();
+    .eq("approval_token", await hashToken(token)).maybeSingle();
   // deno-lint-ignore no-explicit-any
   const ticket = row as any;
 
@@ -144,11 +156,24 @@ async function handle(req: Request): Promise<Response> {
     return page(header + `<div class="actions">${downloadButton()}</div>`);
   }
 
+  // What this page is asking the rep to sign for, as of right now.
+  const fingerprint = await invoiceFingerprint(invoiceData!);
+
   if (req.method === "POST") {
+    if (Number(req.headers.get("content-length") || 0) > MAX_BODY_BYTES) {
+      return page(header + `<div class="actions"><p style="color:#8a3b3b;font-size:13px">That signature image is too large — try a smaller photo, or just type your name.</p></div>` + signForm(fingerprint));
+    }
     const form = await req.formData();
-    const name = String(form.get("name") ?? "").trim();
+    // The page the rep is submitting from showed a particular set of charges.
+    // If the ticket has been edited since — or the page predates this check —
+    // show the current bill and ask again, rather than recording a signature
+    // against figures the rep never saw.
+    if (String(form.get("fp") ?? "") !== fingerprint) {
+      return page(header + `<div class="actions"><p style="color:#8a3b3b;font-size:13px">This ticket has changed since this page was opened. Please look over the charges above and sign again below.</p></div>` + signForm(fingerprint));
+    }
+    const name = String(form.get("name") ?? "").trim().slice(0, MAX_NAME_CHARS);
     if (!name) {
-      return page(header + `<div class="actions"><p style="color:#8a3b3b;font-size:13px">Please type your name to sign.</p></div>` + signForm());
+      return page(header + `<div class="actions"><p style="color:#8a3b3b;font-size:13px">Please type your name to sign.</p></div>` + signForm(fingerprint));
     }
     // The drawn/uploaded signature, if one came along. Validated to exactly
     // a small PNG data URL — anything else (oversized, wrong type, not a
@@ -211,17 +236,21 @@ async function handle(req: Request): Promise<Response> {
       ${downloadButton()}</div>`);
   }
 
-  return page(header + signForm());
+  return page(header + signForm(fingerprint));
 }
 
 // The typed name remains the signature of record; the pad adds the rep's
 // actual mark to the bill. One canvas is the single source: drawing inks
 // it, uploading a picture lands the picture in it (fitted), Clear empties
 // it, and whatever it holds at submit rides along as a small PNG.
-function signForm() {
+//
+// `fingerprint` is the digest of the charges this page shows; the POST
+// handler refuses a submit whose digest no longer matches the ticket.
+function signForm(fingerprint: string) {
   return `<form method="POST" class="actions" id="signform">
+    <input type="hidden" name="fp" value="${esc(fingerprint)}">
     <label class="signbox">Your name — typing it here signs this ticket
-      <input name="name" autocomplete="name" placeholder="T. Beaudry" required>
+      <input name="name" autocomplete="name" placeholder="T. Beaudry" maxlength="${MAX_NAME_CHARS}" required>
     </label>
     <label class="signbox" style="margin-top:14px">Your signature (optional) — draw it below with a finger or mouse, or upload a photo of it</label>
     <canvas id="sigpad" class="sigpad"></canvas>
@@ -289,6 +318,12 @@ function signForm() {
       img.src = URL.createObjectURL(f);
     });
     document.getElementById("signform").addEventListener("submit", function () {
+      // One tap, one approval: a second tap on a slow connection used to
+      // reach the server as a second submit and land the rep on "already
+      // approved". The disabled button is left out of the form data, which
+      // is fine — it carries no name.
+      var go = this.querySelector("button[type=submit]");
+      if (go) { go.disabled = true; go.textContent = "Approving…"; }
       if (!dirty) return;
       // Exported small: the bill needs a legible mark, not a photograph.
       var out = document.createElement("canvas");

@@ -381,7 +381,32 @@ export const Db = {
 
   async searchOrgDirectory({ page = 0, pageSize = 20, scope = "All", search = "" } = {}) {
     const { data, error } = await sbClient.rpc("search_org_directory", { q: search, scope, page_num: page, page_size: pageSize });
-    if (error) throw error;
+    if (error) {
+      // No signal: answer from the cached directory instead. The New ticket
+      // dialog's client picker is this search, and without it there was no
+      // way to start a ticket from Home out of range — the one thing the
+      // offline queue exists for. Contact counts are not cached; nobody
+      // picks a client by them.
+      if (!isNetworkError(error)) throw error;
+      const q = String(search || "").trim().toLowerCase();
+      const orgs = [];
+      try {
+        if (scope !== "Contractors") (await this.listClients()).forEach(c => orgs.push({ type: "client", id: c.id, name: c.name }));
+        if (scope !== "Clients") (await this.listContractors()).forEach(c => orgs.push({ type: "contractor", id: c.id, name: c.name }));
+      } catch (e) {
+        // Cold cache: the directory is saved at sign-in, so this is a device
+        // that has never been in range signed in. Say that, not "Failed to
+        // fetch" — and keep it a network error for anything that checks.
+        if (!isNetworkError(e)) throw e;
+        throw new TypeError("Failed to fetch — no connection, and the directory hasn't been saved on this device yet. Once you've signed in once in range, it stays available offline.");
+      }
+      const hits = orgs
+        .filter(o => !q || String(o.name || "").toLowerCase().includes(q))
+        .sort((a, b) => String(a.name).localeCompare(String(b.name)));
+      const rows = hits.slice(page * pageSize, (page + 1) * pageSize)
+        .map(o => ({ key: o.type + ":" + o.id, type: o.type, id: o.id, name: o.name, contactCount: 0 }));
+      return { rows, total: hits.length };
+    }
     const rows = (data || []).map(o => ({
       key: o.org_type + ":" + o.org_id, type: o.org_type, id: o.org_id,
       name: o.name, contactCount: Number(o.contact_count)
@@ -471,11 +496,19 @@ export const Db = {
 
   // Jobs joined with client name, shaped to match what the screens expect.
   async listJobs() {
-    const { data, error } = await sbClient
-      .from("jobs")
-      .select("id, job_number, project, lsd, afe, area, method, procedure, status, created_at, client_id, contractor_id, created_by, clients(name), contractors(name), profiles!jobs_created_by_fkey(name)")
-      .order("created_at", { ascending: false });
-    if (error) throw error;
+    // "All of them" — so paged past PostgREST's 1,000-row cap like every
+    // other whole-table list. Its one caller is the rate-override job
+    // picker, and an override is exactly the thing raised weeks into a job
+    // that a capped list would have silently dropped.
+    const data = await fetchAllPages(async page => {
+      const { data: rows, error, count } = await sbClient
+        .from("jobs")
+        .select("id, job_number, project, lsd, afe, area, method, procedure, status, created_at, client_id, contractor_id, created_by, clients(name), contractors(name), profiles!jobs_created_by_fkey(name)", page === 0 ? { count: "exact" } : {})
+        .order("created_at", { ascending: false }).order("id")
+        .range(page * RESPONSE_ROW_CAP, (page + 1) * RESPONSE_ROW_CAP - 1);
+      if (error) throw error;
+      return { rows: rows || [], total: count ?? (rows || []).length };
+    });
     return data.map(shapeJob);
   },
 
@@ -523,15 +556,20 @@ export const Db = {
   // offering them would be a list of things that refuse to be picked.
   async listActiveJobsForClient(clientId) {
     if (!clientId) return [];
-    const { data, error } = await sbClient
-      .from("jobs")
-      .select("id, job_number, project, lsd, afe, area, method, procedure, status, created_at, client_id, contractor_id, created_by, clients(name), contractors(name), profiles!jobs_created_by_fkey(name)")
-      .eq("client_id", clientId)
-      .eq("status", "Active")
-      .order("created_at", { ascending: false })
-      .limit(RESPONSE_ROW_CAP);
-    if (error) throw error;
-    return data.map(shapeJob);
+    // Cached per client, so a client whose jobs were listed once in range
+    // can be ticketed from Home out of range (the New ticket dialog reads
+    // this after the cached directory search).
+    return OfflineCache.readThrough("jobs.client." + clientId, async () => {
+      const { data, error } = await sbClient
+        .from("jobs")
+        .select("id, job_number, project, lsd, afe, area, method, procedure, status, created_at, client_id, contractor_id, created_by, clients(name), contractors(name), profiles!jobs_created_by_fkey(name)")
+        .eq("client_id", clientId)
+        .eq("status", "Active")
+        .order("created_at", { ascending: false })
+        .limit(RESPONSE_ROW_CAP);
+      if (error) throw error;
+      return data.map(shapeJob);
+    });
   },
 
   // Same shape as listJobs, for exactly one row — used to seed the initial
@@ -632,12 +670,25 @@ export const Db = {
     _lastDetailPrefetch = Date.now();
 
     try {
+      // Paged: a page of long-running jobs can hold more than 1,000 tickets
+      // between them, and a capped read used to hand the oldest jobs an
+      // empty list — which the cache below then wrote over a complete one,
+      // so Job detail read "None on file yet." offline for a job with a
+      // dozen tickets. A page that fails throws, and nothing is written.
+      const all = (table, cols, newestFirst) => fetchAllPages(async page => {
+        const { data: rows, error, count } = await sbClient
+          .from(table).select(cols, page === 0 ? { count: "exact" } : {})
+          .in("job_id", ids)
+          .order(newestFirst, { ascending: false }).order("id")
+          .range(page * RESPONSE_ROW_CAP, (page + 1) * RESPONSE_ROW_CAP - 1);
+        if (error) throw error;
+        return { rows: rows || [], total: count ?? (rows || []).length };
+      });
       const [jhas, reports, tickets] = await Promise.all([
-        sbClient.from("jhas").select(JHA_COLUMNS).in("job_id", ids).order("signed_at", { ascending: false }),
-        sbClient.from("reports").select("*").in("job_id", ids).order("uploaded_at", { ascending: false }),
-        sbClient.from("tickets").select(JOB_TICKET_COLUMNS).in("job_id", ids).order("created_at", { ascending: false })
+        all("jhas", JHA_COLUMNS, "signed_at"),
+        all("reports", "*", "uploaded_at"),
+        all("tickets", JOB_TICKET_COLUMNS, "created_at")
       ]);
-      if (jhas.error || reports.error || tickets.error) return;
 
       // Written per job, including the empty ones. An absent key and an empty
       // list mean different things offline: absent throws and logs "failed to
@@ -650,9 +701,9 @@ export const Db = {
         });
         byJob.forEach((value, id) => OfflineCache.put(prefix + id, value));
       };
-      spread("jhas.", jhas.data, shapeJha);
-      spread("reports.", reports.data, shapeReport);
-      spread("tickets.", tickets.data, shapeJobTicket);
+      spread("jhas.", jhas, shapeJha);
+      spread("reports.", reports, shapeReport);
+      spread("tickets.", tickets, shapeJobTicket);
     } catch (e) {
       // Offline, or the request was refused — either way the board is already
       // on screen and nothing here is worth interrupting it for.
@@ -740,11 +791,12 @@ export const Db = {
     // with the follows_default flag on, so their tickets price at Default
     // rates until an admin flips the switch and gives them their own card.
     // Best effort: a missing schedule is not a reason to fail the client.
-    try {
-      await sbClient.from("rate_schedules").insert({ client_id: data.id, follows_default: true });
-    } catch (e) {
-      console.warn("Client created, but their rate schedule was not:", e.message);
-    }
+    // supabase-js reports a refusal in `error`, it does not throw — the
+    // try/catch this used to be never ran, and a client whose schedule was
+    // refused (an account without the rates tab creating one) simply had no
+    // card, with the ticket screen the first place to notice.
+    const { error: schedErr } = await sbClient.from("rate_schedules").insert({ client_id: data.id, follows_default: true });
+    if (schedErr) console.warn("Client created, but their rate schedule was not:", schedErr.message);
     return data;
   },
 
@@ -876,6 +928,7 @@ export const Db = {
       if (!match.email && rep.email) patch.email = rep.email.trim();
       if (!match.phone && rep.phone) patch.phone = rep.phone.trim();
       await sbClient.from("contacts").update(patch).eq("id", match.id);
+      invalidate("contacts");
       return;
     }
     await sbClient.from("contacts").insert({
@@ -885,6 +938,10 @@ export const Db = {
       is_primary: !existing.some(c => c.is_primary),
       last_used_at: stampNow
     });
+    // Like every other contacts write: the job record read moments after
+    // creating a job goes through the 30-second contacts cache, and without
+    // this the brand-new client's rep came back blank for that long.
+    invalidate("contacts");
   },
 
   // ── JHAs ─────────────────────────────────────────────────────────────
@@ -2391,6 +2448,13 @@ export const Db = {
     return data;
   },
 
+  // The people who can be put on a crew or a JHA today: everyone whose
+  // account is not locked. Users & access keeps using listProfiles, which
+  // includes the locked ones so they can be seen and their history kept.
+  async listActiveProfiles() {
+    return (await this.listProfiles()).filter(p => !p.deactivated_at);
+  },
+
   async listProfiles() {
     return cached("profiles", () => OfflineCache.readThrough("profiles", async () => {
       // Paged like every other "all of them" list: PostgREST caps a response
@@ -2456,6 +2520,9 @@ export const Db = {
     if (error) throw error;
     if (data && data.error) throw new Error(data.error);
     invalidate("profiles");
+    // { ok } when the account is gone; { ok, deactivated, message } when it
+    // had work on file and was locked instead — the screen says which.
+    return data || {};
   },
 
   // Creates a real staff account — Admin-to-Admin, through the create-user
@@ -2485,7 +2552,11 @@ export const Db = {
         try { await this.updateProfileDetails(data.user.id, { firstName, lastName, isSubcontractor, cert, level }); }
         finally { Toasts.unmute(); }
       } catch (e) {
-        console.warn("Account created, but couldn't save name parts:", e.message);
+        // Half an account is not a success: without these the person prints
+        // with a blank level on the client's invoice and their mileage
+        // never appears. Say so, and say what to do — the account exists,
+        // so pressing Create again would only collide on the email.
+        throw new Error(`The account was created, but the name, level and subcontractor flag didn't save (${e.message || "the save failed"}). Close this, open the account in the list, and fill them in there.`);
       }
     }
     return data;

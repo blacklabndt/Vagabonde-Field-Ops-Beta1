@@ -49,6 +49,11 @@ export function UsersAccessScreen({ currentUser }) {
 
   const setRole = role => {
     if (!account || !ROLE_PRESETS[role]) return;
+    // Backed by profiles_update in the database (migration "a permission
+    // you have not got"): a role change is an Admin's, and nobody's own —
+    // the users tab alone used to be enough to make oneself Admin.
+    if (currentUser.role !== "Admin") { setError("Only an Admin can change someone's role."); return; }
+    if (account.id === currentUser.id) { setError("Your own role is changed by another admin, not from your own account."); return; }
     const tabs = ROLE_PRESETS[role].slice();
     if (wouldLockMeOut(tabs)) {
       setError(`Switching your own account to ${role} would remove your access to Users & access, and only this screen can give it back. Have another admin change your role, or promote someone else first.`);
@@ -69,15 +74,28 @@ export function UsersAccessScreen({ currentUser }) {
       return;
     }
     setError("");
-    setUsers(p => p.map(u => u.id === account.id ? { ...u, tab_access: tabs } : u));
-    try { await Db.updateProfileTabs(account.id, tabs); }
-    catch (e) { setError(e.message || "Couldn't reset access."); await load(); }
+    const acctId = account.id;
+    setUsers(p => p.map(u => u.id === acctId ? { ...u, tab_access: tabs } : u));
+    // Through the same chain as every other tab write: a reset landing
+    // after a quicker untick used to restore the tab just removed.
+    chainWrite(() => Db.updateProfileTabs(acctId, tabs), "Couldn't reset access.");
   };
   const removeAccount = async () => {
     if (!account) return;
     if (account.id === currentUser.id) { setError("You can't remove your own account."); return; }
-    if (!confirm(`Permanently remove ${account.displayName}'s account? They will no longer be able to sign in — this can't be undone.`)) return;
-    try { await Db.deleteUserAccount(account.id); setUsers(p => p.filter(u => u.id !== account.id)); setSelected(currentUser.id); }
+    if (!confirm(`Remove ${account.displayName}'s account? They will no longer be able to sign in — this can't be undone. (An account with tickets or JHAs on file is locked rather than deleted, so the records keep their name.)`)) return;
+    try {
+      const res = await Db.deleteUserAccount(account.id);
+      if (res && res.deactivated) {
+        // Locked, not deleted: the row stays, with no tabs and a stamp, so
+        // the list shows what happened rather than pretending it vanished.
+        setUsers(p => p.map(u => u.id === account.id ? { ...u, tab_access: [], deactivated_at: new Date().toISOString() } : u));
+        setError(res.message || `${account.displayName}'s account was locked instead of deleted: they can no longer sign in.`);
+        return;
+      }
+      setUsers(p => p.filter(u => u.id !== account.id));
+      setSelected(currentUser.id);
+    }
     catch (e) { setError(e.message || "Couldn't remove that account."); }
   };
 
@@ -159,7 +177,7 @@ export function UsersAccessScreen({ currentUser }) {
                     const contextual = CONTEXT_TABS.includes(t.key);
                     return (
                       <div key={t.key} style={{ display: "flex", alignItems: "center", gap: 10, padding: "6px 0", opacity: lockedSelf || universal ? 0.55 : 1 }}>
-                        <CheckBox on={allowed} size={22} disabled={lockedSelf || universal}
+                        <CheckBox on={allowed} size={28} disabled={lockedSelf || universal}
                           label={`${contextual ? "Allow" : "Show"} ${t.label}`} onChange={() => toggleTab(t.key)} />
                         <span style={{ fontSize: 14, flex: 1 }}>
                           {t.label}
@@ -178,10 +196,20 @@ export function UsersAccessScreen({ currentUser }) {
 
                   <div style={{ fontSize: 11, textTransform: "uppercase", letterSpacing: ".08em", color: "var(--color-accent)", margin: "18px 0 8px" }}>Role</div>
                   <Field label="Role">
-                    <select className="input" value={account.role} onChange={e => setRole(e.target.value)}>
+                    <select className="input" value={account.role} onChange={e => setRole(e.target.value)}
+                      disabled={currentUser.role !== "Admin" || account.id === currentUser.id}
+                      aria-label="Role">
                       {Object.keys(ROLE_PRESETS).map(r => <option key={r}>{r}</option>)}
                     </select>
                   </Field>
+                  {account.deactivated_at && (
+                    <div style={{ fontSize: 12, color: "var(--color-accent-700)", margin: "6px 0 0" }}>
+                      Locked out {new Date(account.deactivated_at).toLocaleDateString("en-CA", { day: "2-digit", month: "short", year: "numeric" })} — this account can't sign in. Its name stays on past records; restoring it is done in the Supabase dashboard (Authentication → Users → unban).
+                    </div>
+                  )}
+                  {currentUser.role === "Admin" && account.id === currentUser.id && (
+                    <div style={{ fontSize: 11, color: "color-mix(in srgb, var(--color-text) 55%, transparent)", margin: "6px 0 0" }}>your own role is changed by another admin</div>
+                  )}
                   <div style={{ fontSize: 12, color: "color-mix(in srgb, var(--color-text) 55%, transparent)", margin: "6px 0 10px" }}>
                     Password resets happen through Supabase Auth (dashboard or the "Forgot password" flow) — not editable here.
                   </div>
@@ -331,7 +359,8 @@ function NewUserDialog({ onClose, onCreated }) {
     if (!form.email.trim()) gaps.push("email");
     if (gaps.length) { miss.flag(...gaps); setError("First name, last name and email are required."); return; }
     if (!emailIn(form.email)) { miss.flag("email"); setError("That doesn't look like an email address."); return; }
-    if (form.password.length < 6) { miss.flag("password"); setError("Password needs to be at least 6 characters."); return; }
+    // The same floor as the reset screen: an account can be created as Admin.
+    if (form.password.length < 8) { miss.flag("password"); setError("Password needs to be at least 8 characters."); return; }
     miss.clear();
     setSaving(true);
     setError("");

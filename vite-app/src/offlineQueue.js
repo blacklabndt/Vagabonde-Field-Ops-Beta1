@@ -51,6 +51,15 @@ async function oqDelete(id) {
   await oqPromisifyTx(tx);
 }
 
+// Whose outbox this is. The crew shares tablets: tech A's queued ticket must
+// not replay under tech B's session (the insert is refused — the row names
+// A — and lands in B's panel as "won't sync", one tap from being discarded).
+// Every item is stamped with the profile that queued it, and everything
+// below shows and replays only the signed-in person's own. An item with no
+// owner predates the stamp and is treated as the current person's.
+let oqOwner = null;
+const oqMine = item => !item.owner || !oqOwner || item.owner === oqOwner;
+
 async function oqGetAll() {
   const db = await oqOpenDb();
   const tx = db.transaction(OQ_STORE, "readonly");
@@ -59,7 +68,7 @@ async function oqGetAll() {
     req.onsuccess = () => resolve(req.result);
     req.onerror = () => reject(req.error);
   });
-  return result.sort((a, b) => a.createdAt - b.createdAt);
+  return result.filter(oqMine).sort((a, b) => a.createdAt - b.createdAt);
 }
 
 // A network failure looks like a thrown TypeError from fetch ("Failed to
@@ -75,7 +84,9 @@ export function isNetworkError(e) {
 
 const oqListeners = new Set();
 function oqNotify() {
-  oqGetAll().then(items => oqListeners.forEach(fn => fn(items)));
+  // A read that fails (IndexedDB gone, private mode) must not become an
+  // unhandled rejection in whoever's save path triggered it.
+  oqGetAll().then(items => oqListeners.forEach(fn => fn(items))).catch(() => {});
 }
 
 let oqFlushing = null;
@@ -85,7 +96,16 @@ async function oqFlushOnce(handlers) {
   const items = await oqGetAll();
   for (const item of items) {
     const handler = handlers[item.type];
-    if (!handler) continue;
+    if (!handler) {
+      // Nothing here knows how to replay it — a build mismatch. Say so in
+      // the panel instead of keeping the badge lit over an item nobody can
+      // see or act on.
+      if (!item.lastError) {
+        await oqPut({ ...item, lastError: "This item can't be synced by this version of the app — install the update, then retry." });
+        oqNotify();
+      }
+      continue;
+    }
 
     // Handlers that take more than one write get a way to record what has
     // already landed. Without it, a replay that dies halfway starts again
@@ -126,9 +146,14 @@ async function oqFlushOnce(handlers) {
 export const OfflineQueue = {
   isNetworkError,
 
+  // Who the outbox belongs to from now on — set at sign-in, cleared at
+  // sign-out (App.jsx). Items queued while nobody is signed in carry no
+  // owner, which the filter above reads as "whoever is here".
+  setOwner(profileId) { oqOwner = profileId || null; },
+
   async enqueue(type, payload) {
     const id = (crypto.randomUUID ? crypto.randomUUID() : String(Date.now()) + Math.random());
-    await oqPut({ id, type, payload, createdAt: Date.now(), lastError: null });
+    await oqPut({ id, type, payload, owner: oqOwner, createdAt: Date.now(), lastError: null });
     oqNotify();
     return id;
   },
@@ -168,7 +193,7 @@ export const OfflineQueue = {
   // immediately with the current list, then again on every change.
   subscribe(fn) {
     oqListeners.add(fn);
-    oqGetAll().then(fn);
+    oqGetAll().then(fn).catch(() => {});
     return () => oqListeners.delete(fn);
   },
 

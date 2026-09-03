@@ -55,7 +55,28 @@ Deno.serve(async (req) => {
     // The profile row first — if the auth delete below fails partway, the
     // person still can't sign in (no profile behind their session), rather
     // than the reverse order leaving an orphaned profile with no account.
-    await admin.from("profiles").delete().eq("id", userId);
+    const { error: profErr } = await admin.from("profiles").delete().eq("id", userId);
+    if (profErr) {
+      // 23503: something on file still names this person — tickets they
+      // raised, crew rows, JHAs, jobs, rate history. Those foreign keys are
+      // RESTRICT/NO ACTION on purpose: the records keep their names. So the
+      // account is locked instead of deleted — banned in Auth (no sign-in,
+      // no token refresh), every tab off, and stamped deactivated so Users &
+      // access and the crew pickers know. Reversing it is a Supabase
+      // dashboard action (Authentication → Users → unban).
+      if (profErr.code !== "23503") throw profErr;
+      const { data: who } = await admin.from("profiles").select("name").eq("id", userId).maybeSingle();
+      const { error: banErr } = await admin.auth.admin.updateUserById(userId, { ban_duration: "876000h" });
+      if (banErr) throw banErr;
+      const { error: lockErr } = await admin.from("profiles")
+        .update({ tab_access: [], deactivated_at: new Date().toISOString() })
+        .eq("id", userId);
+      if (lockErr) throw lockErr;
+      return new Response(JSON.stringify({
+        ok: true, deactivated: true,
+        message: `${who?.name ?? "This person"} has tickets, JHAs or jobs on file, so the account was locked instead of deleted: they can no longer sign in, and every tab is off. Their name stays on the records.`
+      }), { headers: { ...corsHeaders, "Content-Type": "application/json" } });
+    }
     const { error: authErr } = await admin.auth.admin.deleteUser(userId);
     if (authErr) throw authErr;
 

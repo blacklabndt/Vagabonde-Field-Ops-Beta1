@@ -9,6 +9,10 @@ import { OfflineQueue } from "./offlineQueue.js";
 import { OfflineCache } from "./offlineCache.js";
 import { SwUpdates } from "./swUpdates.js";
 import { restoreSession, IDENTITY_KEY } from "./session.js";
+
+// How long a device may keep opening the app as its last signed-in person
+// with no signal to check — the "12 h" the sign-in screen promises.
+const IDENTITY_TTL_MS = 12 * 60 * 60 * 1000;
 import { Recovery } from "./recovery.js";
 import { SignInScreen, SetNewPasswordScreen } from "./components/auth.jsx";
 import { HomeScreen } from "./components/home.jsx";
@@ -255,7 +259,14 @@ export function App() {
     }
   }), []);
 
-  useEffect(() => OfflineQueue.attachAutoFlush(queueHandlers), [queueHandlers]);
+  // Re-attached per signed-in account: the queue is scoped to whoever
+  // queued each item (shared tablets), so a sign-in is also the moment that
+  // person's own outbox gets its flush — the mount-time one ran as nobody.
+  useEffect(() => {
+    OfflineQueue.setOwner(currentUser ? currentUser.id : null);
+    if (!currentUser) return undefined;
+    return OfflineQueue.attachAutoFlush(queueHandlers);
+  }, [queueHandlers, currentUser ? currentUser.id : null]);
   useEffect(() => OfflineQueue.subscribe(setQueued), []);
   const [cacheState, setCacheState] = useState({ servingCached: false, at: null });
   useEffect(() => OfflineCache.subscribe(setCacheState), []);
@@ -292,9 +303,19 @@ export function App() {
   useEffect(() => {
     const recheck = async () => {
       if (!restoredOffline.current) return;
-      const { data } = await sbClient.auth.getSession().catch(() => ({ data: { session: null } }));
+      // `online` means attached to a network, not that anything answers —
+      // a truck between towers fires it all afternoon. A refresh that fails
+      // on the network is therefore not an answer, and the person stays
+      // signed in from the device's memory until one arrives; only the
+      // server actually saying "no session" signs anyone out. (session.js
+      // holds the same line for the initial restore.)
+      let data = null, error = null;
+      try { ({ data, error } = await sbClient.auth.getSession()); }
+      catch (e) { error = e; }
+      if (data && data.session) { restoredOffline.current = false; OfflineCache.markLive(); return; }
+      const inconclusive = error && (error.name === "AuthRetryableFetchError" || OfflineQueue.isNetworkError(error));
+      if (inconclusive) return;
       restoredOffline.current = false;
-      if (data && data.session) { OfflineCache.markLive(); return; }
       console.warn("Back online, but the session had lapsed — signing in again is needed.");
       setCurrentUser(null);
     };
@@ -319,7 +340,15 @@ export function App() {
           // already in flight, the "no usable profile" sign-out must not
           // destroy the recovery session mid-reset.
           signOut: () => Recovery.pending() ? Promise.resolve() : sbClient.auth.signOut(),
-          readIdentity: () => OfflineCache.read(IDENTITY_KEY).then(hit => (hit ? hit.value : null)),
+          // The sign-in screen promises "offline sign-in cached for 12 h",
+          // and this is where the promise is kept: a remembered identity
+          // older than that is not an identity, it is a lost tablet's last
+          // user. Every successful online restore writes it afresh.
+          readIdentity: () => OfflineCache.read(IDENTITY_KEY).then(hit => {
+            if (!hit) return null;
+            if (Date.now() - (hit.at || 0) > IDENTITY_TTL_MS) { OfflineCache.remove(IDENTITY_KEY).catch(() => {}); return null; }
+            return hit.value;
+          }),
           writeIdentity: identity => OfflineCache.put(IDENTITY_KEY, identity),
         isNetworkError: OfflineQueue.isNetworkError
       });
@@ -394,7 +423,17 @@ export function App() {
     const timer = setInterval(() => { if (document.visibilityState === "visible") refresh(); }, 60000);
     const onVisible = () => { if (document.visibilityState === "visible") refresh(); };
     document.addEventListener("visibilitychange", onVisible);
-    return () => { clearInterval(timer); document.removeEventListener("visibilitychange", onVisible); };
+    // A push that arrives while the app is on screen is handed to the app
+    // instead of shown as a notification (push-sw.js) — this is the hand-off,
+    // so the drawer badge moves at once rather than at the next minute.
+    const onPushed = e => { if (e.data && e.data.type === "chat-push") refresh(); };
+    const sw = navigator.serviceWorker;
+    if (sw) sw.addEventListener("message", onPushed);
+    return () => {
+      clearInterval(timer);
+      document.removeEventListener("visibilitychange", onVisible);
+      if (sw) sw.removeEventListener("message", onPushed);
+    };
   }, [currentUser]);
 
   // The count on the installed app's own icon, where the OS shows it.
@@ -402,8 +441,18 @@ export function App() {
   // the Badging API just never see this.
   useEffect(() => {
     if (!("setAppBadge" in navigator)) return;
-    if (chatUnread > 0) navigator.setAppBadge(chatUnread).catch(() => {});
-    else if ("clearAppBadge" in navigator) navigator.clearAppBadge().catch(() => {});
+    const apply = () => {
+      if (chatUnread > 0) navigator.setAppBadge(chatUnread).catch(() => {});
+      else if ("clearAppBadge" in navigator) navigator.clearAppBadge().catch(() => {});
+    };
+    apply();
+    // The service worker puts a bare dot on the icon when a push arrives
+    // with the app out of sight. With the room open the count stays at 0,
+    // nothing re-renders, and the dot used to outlive the message it was
+    // for — so it is re-applied whenever the app comes back into view.
+    const onVisible = () => { if (document.visibilityState === "visible") apply(); };
+    document.addEventListener("visibilitychange", onVisible);
+    return () => document.removeEventListener("visibilitychange", onVisible);
   }, [chatUnread]);
 
   const loadMyTickets = async () => {
@@ -468,6 +517,10 @@ export function App() {
   // last crew's jobs and rates without signing in.
   const signOut = async () => {
     await sbClient.auth.signOut();
+    // The remembered identity goes first, on its own: it is the one record
+    // that lets the next person open this tablet as the last one with no
+    // signal, so it must not wait on — or be lost behind — the bulk clear.
+    try { await OfflineCache.remove(IDENTITY_KEY); } catch { /* the clear below tries again */ }
     // Signing out always completes — nobody gets trapped in a session because
     // a cache would not empty. But a wipe that failed is not a wipe, and the
     // person holding the tablet is the only one who can act on it, so it is
@@ -512,8 +565,17 @@ export function App() {
   const startTicketForJob = async job => {
     if (!job) return;
     setActiveJob(job);
+    // Without the record, the ticket screen would carry whatever job was
+    // opened last — its client rep, and so the address the approval goes
+    // to. Better no ticket than one filed against the wrong client.
     try { setJobRecord(await Db.getJobRecord(job)); }
-    catch (e) { console.error("Couldn't load the job record for the new ticket:", e.message); }
+    catch (e) {
+      console.error("Couldn't load the job record for the new ticket:", e.message);
+      Toasts.show(OfflineQueue.isNetworkError(e)
+        ? `No connection, and ${job.id} hasn't been opened on this device yet — open the job once in range, then its tickets work offline.`
+        : `Couldn't load ${job.id}'s details: ${e.message || "try again."}`, "error");
+      return;
+    }
     setActiveTicket(null);
     setContextScreen("ticket");
     setScreen("ticket");
@@ -529,8 +591,16 @@ export function App() {
     try { job = await Db.getJobByNumber(t.job); } catch (e) { console.error("Couldn't load that ticket's job:", e.message); }
     setActiveJob(job);
     if (t.status === "Draft" && job) {
+      // Same rule as startTicketForJob: a draft opened over another job's
+      // record would read that job's rep. The job page loads its own
+      // record, so land there instead and let the ticket be opened from it.
       try { setJobRecord(await Db.getJobRecord(job)); }
-      catch (e) { console.error("Couldn't load the job record for that ticket:", e.message); }
+      catch (e) {
+        console.error("Couldn't load the job record for that ticket:", e.message);
+        Toasts.show(`Couldn't load ${job.id}'s details — opening the job instead.`, "error");
+        gotoContext("job");
+        return;
+      }
       openTicketDraft(t.id);
       return;
     }
@@ -606,7 +676,7 @@ export function App() {
       body = <TicketMobileScreen key={activeTicket || "new"} job={activeJob} jobRecord={jobRecord} currentUser={currentUser} ticket={activeTicket} onSaved={() => gotoContext("job")} />;
       break;
     case "files":
-      body = <FilesScreen />;
+      body = <FilesScreen currentUser={currentUser} />;
       break;
     case "contacts":
       body = <ContactsScreen currentUser={currentUser} />;

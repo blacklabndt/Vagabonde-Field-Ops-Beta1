@@ -1,8 +1,9 @@
 import React, { useState, useEffect, useRef } from "react";
-import { JHA_TEMPLATES, SEED_HAZARDS, todayLocal, localDate, dayMonth } from "../data.js";
+import { JHA_TEMPLATES, SEED_HAZARDS, todayLocal, localDate, dayMonth, storageKeySafe } from "../data.js";
 import { Db } from "../db.js";
 import { Blueprint, Btn, CheckBox, TagX, Field, Dialog, ErrorBox, Switch, splitContact, hazardTagVariant, NoJobSelected, ConnectionBar, QueuedPanel, useMissingFields } from "./common.jsx";
 import { OfflineQueue } from "../offlineQueue.js";
+import { OfflineCache } from "../offlineCache.js";
 
 // The JHA (FLHA) — filed at the start of the day, closed out at the end.
 //
@@ -17,6 +18,14 @@ import { OfflineQueue } from "../offlineQueue.js";
 // until someone closes it out (see JhaCloseOutDialog in jobDetail).
 
 const COMM_PRESETS = ["Phone", "Road Radio"];
+const HOSPITAL_DEFAULT = "Grande Prairie Regional Hospital — 11205 110 St, Grande Prairie, AB";
+const BLANK_SITE = { weather: "", temperature: "", communication: "", commOther: false, muster: "", hospital: HOSPITAL_DEFAULT, firstAid: "" };
+const BLANK_EQUIP = {
+  ppe: { hardHat: true, glasses: true, boots: true, fr: false, gloves: false },
+  h2sSerial: "", h2sBumpTest: false,
+  redSerial: "", redSurveyMr: "", collimator: false, emergencyKit: false
+};
+const BLANK_KIT = { unit: "", idCode: "", tld: "", drd: "", alarm: "" };
 
 const PPE_CHECKS = [
   { key: "hardHat", label: "Hard hat" },
@@ -55,16 +64,8 @@ export function JhaBuilderScreen({ job, jobRecord, contacts, currentUser, onSubm
   const [workDate, setWorkDate] = useState(todayLocal);
   const backdated = workDate !== todayLocal();
 
-  const [site, setSite] = useState({
-    weather: "", temperature: "", communication: "", commOther: false,
-    muster: "", hospital: "Grande Prairie Regional Hospital — 11205 110 St, Grande Prairie, AB",
-    firstAid: ""
-  });
-  const [equip, setEquip] = useState({
-    ppe: { hardHat: true, glasses: true, boots: true, fr: false, gloves: false },
-    h2sSerial: "", h2sBumpTest: false,
-    redSerial: "", redSurveyMr: "", collimator: false, emergencyKit: false
-  });
+  const [site, setSite] = useState(BLANK_SITE);
+  const [equip, setEquip] = useState(BLANK_EQUIP);
 
   // Worker (1) is whoever is filing. Worker (2) is the helper with them, if
   // there is one — picked from the crew so their own equipment comes along.
@@ -79,7 +80,84 @@ export function JhaBuilderScreen({ job, jobRecord, contacts, currentUser, onSubm
   const w1Touched = useRef(false);
   const editW1 = next => { w1Touched.current = true; setW1(next); };
   const [w2, setW2] = useState({ unit: "", idCode: "", tld: "", drd: "", alarm: "" });
+  // The same guard for worker (2): a serial corrected by hand must survive
+  // the equipment list landing a moment later. Picking a different helper
+  // starts that person's kit fresh.
+  const w2Touched = useRef(false);
+  const editW2 = next => { w2Touched.current = true; setW2(next); };
+  const w2For = useRef("");
   const [equipment, setEquipment] = useState([]);
+
+  // ── Don't lose a half-built assessment ───────────────────────────────
+  // The ticket screen keeps a copy of what is being typed; this didn't, and
+  // fifteen rated hazards went with any tap on the drawer, an update
+  // restart, or a phone evicting the tab. Keyed by job, kept as it is
+  // typed, offered back on return, dropped once filed or discarded.
+  const wipKey = job && job.dbId ? `jha.wip.${job.dbId}` : null;
+  const wipReady = useRef(false);
+  const [recovered, setRecovered] = useState(null);
+  const dropWip = () => {
+    if (!wipKey) return;
+    try { const p = OfflineCache.remove(wipKey); if (p && p.catch) p.catch(() => {}); } catch { /* nothing to drop */ }
+  };
+  useEffect(() => {
+    if (!wipKey) return;
+    let live = true;
+    OfflineCache.read(wipKey).then(hit => {
+      if (!live) return;
+      const w = hit && hit.value;
+      if (w && w.entered) {
+        if (w.hazards) setHazards(w.hazards);
+        if (w.extra) setExtra(w.extra);
+        if (w.ratings) setRatings(prev => ({ ...prev, ...w.ratings }));
+        if (w.siteRep != null) setSiteRep(w.siteRep);
+        if (w.siteRepOther != null) setSiteRepOther(w.siteRepOther);
+        if (w.workDate) setWorkDate(w.workDate);
+        if (w.site) setSite(w.site);
+        if (w.equip) setEquip(w.equip);
+        if (w.helperId != null) { w2For.current = w.helperId; setHelperId(w.helperId); }
+        if (w.w1) { w1Touched.current = true; setW1(w.w1); }
+        if (w.w2) { w2Touched.current = true; setW2(w.w2); }
+        setRecovered(hit.at || null);
+      }
+      wipReady.current = true;
+    }).catch(() => { wipReady.current = true; });
+    return () => { live = false; };
+  }, [wipKey]);
+  // Only what someone actually entered is worth keeping — the defaults, the
+  // remembered ratings and a derived kit are not.
+  const entered = hazards.some(h => h.on) || extra.length > 0
+    || !!(site.weather || site.temperature || site.communication || site.muster || site.firstAid)
+    || !!(equip.h2sSerial || equip.redSurveyMr) || !!siteRepOther.trim()
+    || w1Touched.current || w2Touched.current;
+  useEffect(() => {
+    if (!wipKey || !wipReady.current) return;
+    if (!entered) { dropWip(); return; }
+    const t = setTimeout(() => {
+      OfflineCache.put(wipKey, {
+        entered: true, hazards, extra, ratings, siteRep, siteRepOther, workDate, site, equip, helperId,
+        w1: w1Touched.current ? w1 : null, w2: w2Touched.current ? w2 : null
+      });
+    }, 700);
+    return () => clearTimeout(t);
+  }, [hazards, extra, ratings, siteRep, siteRepOther, workDate, site, equip, helperId, w1, w2]);
+  const discardRecovered = () => {
+    dropWip();
+    setRecovered(null);
+    setHazards(SEED_HAZARDS.map(h => ({ ...h })));
+    setExtra([]);
+    setRatings({ ...remembered });
+    setSiteRep(splitContact((jobRecord || {}).contractorRep).name);
+    setSiteRepOther("");
+    setWorkDate(todayLocal());
+    setSite(BLANK_SITE);
+    setEquip(BLANK_EQUIP);
+    setHelperId("");
+    w1Touched.current = false;
+    w2Touched.current = false;
+    const me = people.find(p => p.id === currentUser.id);
+    setW1(me ? kitOf(me, equipment) : BLANK_KIT);
+  };
 
   useEffect(() => {
     Db.listEquipment().then(setEquipment).catch(e => console.error("Couldn't load equipment assignments:", e.message));
@@ -105,7 +183,7 @@ export function JhaBuilderScreen({ job, jobRecord, contacts, currentUser, onSubm
   }, [currentUser.id]);
 
   useEffect(() => {
-    Db.listProfiles().then(setPeople)
+    Db.listActiveProfiles().then(setPeople)
       .catch(e => console.error("Couldn't load the crew list:", e.message));
   }, []);
 
@@ -119,6 +197,8 @@ export function JhaBuilderScreen({ job, jobRecord, contacts, currentUser, onSubm
   }, [people, equipment, currentUser.id]);
 
   useEffect(() => {
+    if (helperId !== w2For.current) { w2For.current = helperId; w2Touched.current = false; }
+    if (w2Touched.current) return;
     const helper = people.find(p => p.id === helperId);
     setW2(helper ? kitOf(helper, equipment) : { unit: "", idCode: "", tld: "", drd: "", alarm: "" });
   }, [helperId, people, equipment]);
@@ -157,6 +237,13 @@ export function JhaBuilderScreen({ job, jobRecord, contacts, currentUser, onSubm
       setError("Nuclear energy worker (1) has no dosimetry recorded — fill in at least one serial, or set them up in Users & access.");
       return;
     }
+    // The second worker is a nuclear energy worker too; a helper filed with
+    // three blank serials is a dose record that names nobody's dosimeter.
+    if (helper && !w2.tld.trim() && !w2.drd.trim() && !w2.alarm.trim()) {
+      miss.flag("w2tld", "w2drd", "w2alarm");
+      setError(`${helper.displayName} has no dosimetry recorded — fill in at least one serial for nuclear energy worker (2), or set them up in Users & access.`);
+      return;
+    }
     if (!job || !job.dbId) { setError("No job selected."); return; }
     miss.clear();
     setSaving(true);
@@ -171,17 +258,23 @@ export function JhaBuilderScreen({ job, jobRecord, contacts, currentUser, onSubm
       jobDbId: job.dbId, template: JHA_TEMPLATES[0],
       hazards: selected.map(h => ({ ...h, rating: ratings[h.name] || null })),
       signedBy: currentUser.id, siteRep: siteRepJoined,
-      pdfKey: `${job.id}-JHA-${Date.now()}.pdf`,
+      // Job numbers are free text; storage keys are not (# and ? truncate,
+      // % breaks the request, non-ASCII is refused) — the same folding the
+      // report upload applies, or the PDF silently never lands.
+      pdfKey: `${storageKeySafe(job.id, "job")}-JHA-${Date.now()}.pdf`,
       dosimetry, unitNumber: w1.unit || null,
       workDate,
       details: { site, equipment: equip }
     };
     try {
       await Db.createJha(jhaPayload);
+      dropWip();
       onSubmitted();
     } catch (e) {
       if (OfflineQueue.isNetworkError(e)) {
         await OfflineQueue.enqueue("jha", jhaPayload);
+        // In the outbox now, which is a better home than the recovery copy.
+        dropWip();
         setQueued(true);
         return;
       }
@@ -203,6 +296,21 @@ export function JhaBuilderScreen({ job, jobRecord, contacts, currentUser, onSubm
             <div style={{ fontFamily: "var(--font-heading)", fontWeight: 600, fontSize: 22 }}>{job.project}</div>
             <div className="tabular" style={{ fontSize: 12, color: "color-mix(in srgb, var(--color-text) 55%, transparent)" }}>{job.lsd} · {job.client}</div>
           </div>
+
+          {recovered && (
+            <div style={{
+              fontSize: 12, padding: "8px 10px",
+              border: "1px solid var(--color-accent-700)",
+              background: "color-mix(in srgb, var(--color-accent) 8%, transparent)",
+              display: "flex", alignItems: "center", gap: 8, flexWrap: "wrap"
+            }}>
+              <span>Brought back the assessment you were building{recovered ? ` at ${new Date(recovered).toLocaleTimeString("en-CA", { hour: "2-digit", minute: "2-digit" })}` : ""} — it was never filed.</span>
+              <button type="button" onClick={discardRecovered}
+                style={{ marginLeft: "auto", background: "none", border: "none", textDecoration: "underline", cursor: "pointer", color: "inherit", font: "inherit", padding: 0 }}>
+                Start empty
+              </button>
+            </div>
+          )}
 
           <JhaSection title="Site information" />
           <Field label="Date of this assessment">
@@ -329,7 +437,7 @@ export function JhaBuilderScreen({ job, jobRecord, contacts, currentUser, onSubm
               ))}
             </select>
           </Field>
-          {helper && <WorkerKit value={w2} onChange={setW2} />}
+          {helper && <WorkerKit value={w2} onChange={editW2} prefix="w2" missing={miss.is} onFixed={miss.clear} />}
 
           <JhaSection title="Review" />
           <Field label="Site rep name" missing={miss.is("siteRep")}>
@@ -348,7 +456,7 @@ export function JhaBuilderScreen({ job, jobRecord, contacts, currentUser, onSubm
           <ErrorBox>{error}</ErrorBox>
           <Btn variant="primary" block style={{ minHeight: 56, fontSize: 15 }} onClick={submit} disabled={saving}>{saving ? "Filing…" : "File JHA"}</Btn>
           <Btn variant="ghost" block style={{ minHeight: 44, marginTop: 8 }} disabled={saving}
-            onClick={() => { if (confirm("Discard this hazard assessment? Nothing has been filed yet.")) onCancel(); }}>
+            onClick={() => { if (confirm("Discard this hazard assessment? Nothing has been filed yet.")) { dropWip(); onCancel(); } }}>
             Cancel
           </Btn>
         </Blueprint>
@@ -416,31 +524,32 @@ function JhaSection({ title, note }) {
 
 // Unit, ID code and the three pieces of monitoring equipment. Pre-filled from
 // the profile; editable here because equipment does get swapped.
-// `missing` is optional and only ever passed for worker 1 — filing needs at
-// least one of that worker's three serials, so all three light up together
-// rather than singling one out.
-function WorkerKit({ value, onChange, missing, onFixed }) {
+// `missing` is optional — filing needs at least one of a worker's three
+// serials, so all three light up together rather than singling one out.
+// `prefix` keys the flags per worker ("w1tld" / "w2tld"), so worker (2)'s
+// blanks don't light worker (1)'s boxes.
+function WorkerKit({ value, onChange, missing, onFixed, prefix = "w1" }) {
   const set = (k, v) => { if (onFixed) onFixed(); onChange({ ...value, [k]: v }); };
   const dos = k => ({
-    className: missing && missing(k) ? "input invalid" : "input",
-    "aria-invalid": (missing && missing(k)) || undefined
+    className: missing && missing(prefix + k) ? "input invalid" : "input",
+    "aria-invalid": (missing && missing(prefix + k)) || undefined
   });
-  const bad = k => !!(missing && missing(k));
+  const bad = k => !!(missing && missing(prefix + k));
   return (
     <>
       <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 8 }}>
         <Field label="Unit #"><input className="input" value={value.unit} onChange={e => set("unit", e.target.value)} /></Field>
         <Field label="ID code"><input className="input" value={value.idCode} onChange={e => set("idCode", e.target.value)} /></Field>
       </div>
-      <Field label="TLD / OSLD" missing={bad("w1tld")}>
-        <input {...dos("w1tld")} value={value.tld} onChange={e => set("tld", e.target.value)} />
+      <Field label="TLD / OSLD" missing={bad("tld")}>
+        <input {...dos("tld")} value={value.tld} onChange={e => set("tld", e.target.value)} />
       </Field>
       <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 8 }}>
-        <Field label="DRD" missing={bad("w1drd")}>
-          <input {...dos("w1drd")} value={value.drd} onChange={e => set("drd", e.target.value)} />
+        <Field label="DRD" missing={bad("drd")}>
+          <input {...dos("drd")} value={value.drd} onChange={e => set("drd", e.target.value)} />
         </Field>
-        <Field label="Alarming dosimeter" missing={bad("w1alarm")}>
-          <input {...dos("w1alarm")} value={value.alarm} onChange={e => set("alarm", e.target.value)} />
+        <Field label="Alarming dosimeter" missing={bad("alarm")}>
+          <input {...dos("alarm")} value={value.alarm} onChange={e => set("alarm", e.target.value)} />
         </Field>
       </div>
       <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 8, alignItems: "end" }}>

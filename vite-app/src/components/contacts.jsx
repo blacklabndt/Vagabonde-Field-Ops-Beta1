@@ -70,10 +70,14 @@ export function ContactsScreen({ currentUser }) {
   const sorted = [...mine].sort((a, b) =>
     (b.is_primary ? 1 : 0) - (a.is_primary ? 1 : 0) || (a.name || "").localeCompare(b.name || ""));
 
+  // Resolves true when the write landed, false when it did not — so a card
+  // being edited stays open with the typed values when the save fails,
+  // rather than collapsing to the old ones under an error box at the top of
+  // a scrolled page.
   const withError = async fn => {
     setError("");
-    try { await fn(); await loadContacts(); }
-    catch (e) { setError(e.message || "That didn't save — try again."); }
+    try { await fn(); await loadContacts(); return true; }
+    catch (e) { setError(e.message || "That didn't save — try again."); return false; }
   };
 
   const addContact = form => withError(async () => {
@@ -194,7 +198,7 @@ function ContactCard({ contact, orgName, onSave, onMakePrimary, onRemove, canRem
     return (
       <ContactForm heading={`Edit ${contact.name}`} contact={contact}
         onCancel={() => setEditing(false)}
-        onSave={async form => { await onSave(form); setEditing(false); }} />
+        onSave={async form => { if ((await onSave(form)) !== false) setEditing(false); }} />
     );
   }
 

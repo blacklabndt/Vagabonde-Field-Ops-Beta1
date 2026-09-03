@@ -3,8 +3,8 @@
 // The contract under test (offlineQueue.js, offlineCache.js, queuePanel.jsx):
 // a ticket saved with no signal is queued on the device and the top bar says
 // so; the queue replays on the browser's `online` event; the board falls back
-// to its cached rows with an "Offline —" banner; and read paths (the client
-// search) fail with an error on the spot rather than queueing.
+// to its cached rows with an "Offline —" banner; and the client picker answers
+// from the directory cached at sign-in rather than queueing a read.
 //
 // Desktop project only — the network machinery is viewport-blind, and the
 // suite's one writer keeps replays from racing each other. Everything the
@@ -53,12 +53,24 @@ test("the board falls back to cached jobs when the signal dies", async ({ page, 
   expect(rows).toBeGreaterThan(0);
 });
 
-test("a search offline errors on the spot instead of queueing", async ({ page, context }) => {
+test("a search offline answers from the cached directory instead of queueing", async ({ page, context }) => {
+  // The directory is saved at sign-in; wait for it to have landed — the
+  // New job dialog lists clients from that same load — before the signal
+  // dies, or this tests a device that has never been in range.
+  await page.getByRole("button", { name: "+ Job" }).click();
+  await expect(page.getByRole("dialog").locator("option", { hasText: SEED_CLIENT })).toHaveCount(1, { timeout: 15_000 });
+  await page.getByRole("dialog").getByRole("button", { name: "Cancel" }).click();
+
   await context.setOffline(true);
   await page.getByRole("button", { name: "+ Ticket" }).click();
-  // The dialog's auto-focused picker fires its search; with no network the
-  // dialog shows the failure right there.
-  await expect(page.getByRole("dialog").getByRole("alert")).not.toBeEmpty({ timeout: 10_000 });
+  // With no network the picker's search is answered by the directory the
+  // sign-in warmed — a ticket can still be started from the truck — and the
+  // dialog shows no failure.
+  await page.getByLabel("Search clients").fill("Athabasca");
+  const list = page.locator("#ticket-client-list");
+  await expect(list.locator("[role='option']", { hasText: SEED_CLIENT }).first()).toBeVisible({ timeout: 10_000 });
+  // ErrorBox renders nothing at all when there is no message.
+  await expect(page.getByRole("dialog").getByRole("alert")).toHaveCount(0);
   // And nothing snuck into the outbox: reads are not work.
   await expect(page.getByRole("button", { name: /queued/ })).toHaveCount(0);
 });

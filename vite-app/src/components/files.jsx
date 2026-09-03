@@ -17,7 +17,12 @@ function fileSize(bytes) {
   return (bytes / 1024 / 1024).toFixed(1) + " MB";
 }
 
-export function FilesScreen() {
+export function FilesScreen({ currentUser }) {
+  // Every role has the files tab, and the bucket's delete policy follows the
+  // tab — so a whole folder (the procedures library, say) was one mis-tap
+  // from anyone. Single files stay everyone's; folders are an Admin's or
+  // Coordinator's.
+  const canDeleteFolders = !!currentUser && (currentUser.role === "Admin" || currentUser.role === "Coordinator");
   const [prefix, setPrefix] = useState("");
   const [folders, setFolders] = useState([]);
   const [files, setFiles] = useState([]);
@@ -101,6 +106,7 @@ export function FilesScreen() {
   };
 
   const removeFolder = async f => {
+    if (!canDeleteFolders) { setError("Deleting a whole folder is an Admin's or Coordinator's — ask one, or delete the files inside it one by one."); return; }
     if (!confirm(`Delete the folder “${f.name}” and everything inside it? This can't be undone.`)) return;
     setBusy("Deleting…");
     try { await Db.deleteFolder(f.path); await load(); }
@@ -201,7 +207,7 @@ export function FilesScreen() {
                   <td onClick={() => setPrefix(f.path)} style={{ color: "color-mix(in srgb, var(--color-text) 45%, transparent)" }}>Folder</td>
                   <td onClick={() => setPrefix(f.path)}></td>
                   <td style={{ textAlign: "right" }}>
-                    <button onClick={() => removeFolder(f)} aria-label={`Delete folder ${f.name}`} className="row-x">×</button>
+                    {canDeleteFolders && <button onClick={() => removeFolder(f)} aria-label={`Delete folder ${f.name}`} className="row-x">×</button>}
                   </td>
                 </tr>
               ))}

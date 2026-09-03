@@ -68,8 +68,11 @@ Deno.serve(async (req) => {
       Deno.env.get("SUPABASE_SERVICE_ROLE_KEY")!
     );
     const job = (jha as any).jobs ?? {};
-    const key = (jha as any).pdf_key ||
-      `${job.job_number ?? "job"}/${job.job_number ?? "job"}-JHA-${jhaId}.pdf`;
+    // Job numbers are free text. Storage keys are not: # and ? truncate the
+    // key, % breaks the request, non-ASCII is refused outright. Same
+    // folding as storageKeySafe in vite-app/src/data.js.
+    const safe = keySafe(job.job_number, "job");
+    const key = (jha as any).pdf_key || `${safe}/${safe}-JHA-${jhaId}.pdf`;
 
     const { error: upErr } = await admin.storage.from("jhas")
       .upload(key, bytes, { contentType: "application/pdf", upsert: true });
@@ -336,6 +339,18 @@ async function drawJha(jha: any): Promise<Uint8Array> {
 // size the identical string — several folds expand a glyph (≤ → "<=",
 // ⁰¹²³ → "0123"), so measuring the raw form under-counts and a hazard
 // control could silently overprint the Sev/Prob/Freq columns.
+// The storage-key half of storageKeySafe in vite-app/src/data.js: accents
+// fold to plain letters, everything else the key can't carry becomes a dash.
+function keySafe(name: unknown, fallback: string): string {
+  const cleaned = String(name || "")
+    .normalize("NFKD").replace(/[\u0300-\u036f]/g, "")
+    .replace(/[^A-Za-z0-9._-]+/g, "-")
+    .replace(/-{2,}/g, "-")
+    .replace(/^[-.]+|[-.]+$/g, "")
+    .slice(0, 100);
+  return cleaned || fallback;
+}
+
 function foldAscii(s: string): string {
   return String(s ?? "")
     .replace(/[₀₁₂₃₄₅₆₇₈₉]/g, c => "0123456789"[" ₀₁₂₃₄₅₆₇₈₉".indexOf(c) - 1])
