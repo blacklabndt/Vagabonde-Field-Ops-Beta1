@@ -112,6 +112,12 @@ Cloudflare Worker `solitary-snowflake-ee22` (assets + `/approve` proxy in
   Set-Content: BOM-less UTF-8 reads as ANSI and every em-dash, `·`, `…`
   and emoji ships as mojibake (it cost teamChat.jsx 71 characters once).
   Edit tool or a node script only.
+- Never leave a literal control character in source (a `"\u0000"` join
+  separator written as the byte itself): git then treats the file as
+  binary — no diff, no blame, wholesale merge conflicts — and the review
+  that should have read the tracker's changes couldn't. Write the escape
+  text; the Write/Edit tools can turn an escape into the byte, so check
+  with `grep -P '[\x00-\x08\x0e-\x1f]'` after writing one.
 
 ## Live data
 
@@ -140,16 +146,40 @@ session has set `app.confirm_total_wipe = 'yes'`.
   transfer may target only a job they raised.
 - Prices are for Admins and Technicians (per Kyle): rate_lines,
   rate_overrides, rate_line_history and ticket_lines SELECT require the
-  role as well as the tab. Job detail hides amounts and the invoice view
-  from everyone else. A Coordinator cannot price a ticket until the role is
-  added to those four policies.
+  role as well as the tab — and so do the WRITES (ticket_lines insert/
+  delete, every rate_lines/rate_overrides/rate_schedules write), because a
+  role that cannot read a ticket's lines must never replace them (a
+  Coordinator's save once read zero lines and deleted the real ones).
+  `search_tickets` and `ticket_tracker_stats` hand other roles null money.
+  `seesPrices(user)` in data.js is the one client-side answer; Job detail,
+  Open tickets and the tracker all ask it. A Coordinator cannot price a
+  ticket until the role is added to those policies.
+- tickets has a column-level UPDATE grant: signed-in accounts write
+  status, client_contact, contractor_contact, delays and chased_at, nothing
+  else. The approval plumbing (approval_token/sent_at/expires_at/sent_to/
+  sent_by) is the service role's alone — a policy can't pin a column it
+  doesn't name, and an unpinned token column let a technician plant a hash
+  and sign their own ticket from the link. Withdrawing an approval is the
+  `withdraw_ticket_approval(id)` definer RPC. `total` is the trigger's.
 - Invoicing is `mark_tickets_invoiced(ids, invoiced)` (Admin, definer) —
   Approved ↔ Invoiced with `invoiced_at`; the approved-ticket immutability
   policies are untouched and this RPC is the only door.
-- Idempotent saves: tickets.client_key / reports.client_key (unique). The
-  ticket editor mints a key per unsaved ticket (kept in its recovery copy
-  and the outbox payload); createTicket/uploadReport return the existing
-  row for a repeated key instead of inserting again.
+- Idempotent saves: tickets.client_key / reports.client_key /
+  jhas.client_key (unique). The ticket editor and the JHA builder mint a
+  key per unsaved record (kept in the recovery copy and the outbox
+  payload); createTicket/uploadReport/createJha return the existing row
+  for a repeated key instead of inserting again — and a failed key lookup
+  is the save's failure, never a green light. The queue's ticket replay
+  passes the key too (it once didn't, on the one path that mattered).
+- contacts, equipment, timesheet_approvals and arcade_scores reads need
+  `is_staff()` too, so a locked account's unexpired token reads nothing.
+- `authenticated` has USAGE on schema `private` (migration 20260903055300).
+  A policy expression is stored resolved and never needed it; a SQL or
+  plpgsql function that runs as the caller and names `private.user_role()`
+  is parsed at call time and did — the tracker's stats and search failed
+  for every account for three minutes after round three's migration until
+  the live probe caught it. Probe every new invoker function as a
+  non-owner before calling it done.
 - Job detail's Create ticket dialog inserts nothing: it hands a seed (work
   date, this ticket's reps) to the editor, which saves — and queues — like
   a ticket started from Home.

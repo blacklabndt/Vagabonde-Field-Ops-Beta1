@@ -133,9 +133,15 @@ Deno.serve(async (req) => {
     });
 
     // 3. Record that it went, so the job detail's "Sent" column is truthful.
-    await admin.from("reports").update({
+    // A failure here is said, not swallowed: the report is in the
+    // contractor's inbox either way, and a row still reading "unsent" is
+    // how the same private link gets mailed twice.
+    const { error: markErr } = await admin.from("reports").update({
       sent_at: new Date().toISOString(), sent_to: toList
     }).eq("id", reportId);
+    if (markErr) {
+      throw new Error(`The report went out, but it couldn't be marked as sent — it may still show as pending; don't send it again. (${markErr.message})`);
+    }
 
     return new Response(JSON.stringify({ ok: true, attached: !!attachments }), {
       headers: { ...corsHeaders, "Content-Type": "application/json" }

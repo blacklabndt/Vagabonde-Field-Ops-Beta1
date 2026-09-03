@@ -24,6 +24,17 @@ test("a comma before three trailing digits is a thousands separator", () => {
   assert.equal(nonNegative("1,234,567"), 1234567);
 });
 
+test("…unless nothing that could be thousands precedes it", () => {
+  // An eighth of a milliroentgen, typed the European way: not 125.
+  assert.equal(decimalString("0,125"), "0.125");
+  assert.equal(nonNegative("0,125"), 0.125);
+  // Four digits before the comma can't be a thousands group either.
+  assert.equal(decimalString("1234,567"), "1234.567");
+  // The plain cases still read as money.
+  assert.equal(decimalString("1,200"), "1200");
+  assert.equal(decimalString("950,000"), "950000");
+});
+
 test("with both marks present the last one is the decimal point", () => {
   assert.equal(nonNegative("1,234.50"), 1234.5);
   assert.equal(nonNegative("1.234,50"), 1234.5);

@@ -470,6 +470,14 @@ export function TeamChatScreen({ currentUser, onOpenJob, onRead }) {
   const restoreHeight = useRef(null);
   // Sender names for realtime arrivals, whose rows come without the join.
   const nameOf = useRef(new Map());
+  // Every id that has been on screen. The read bookmark moves only for
+  // messages new to the room — not for a reaction landing on an old one,
+  // which also changes the merged array — and only while the reader is at
+  // the bottom to see them arrive; a poll landing while someone reads back
+  // through the morning used to zero the badges over messages they had
+  // never scrolled to.
+  const seenIds = useRef(new Set());
+  useEffect(() => { messages.forEach(m => seenIds.current.add(m.id)); }, [messages]);
   // Rows that must mount without the entrance animation: everything the
   // initial load and the "Show earlier" pages bring in. A message not in
   // this set is one that arrived while you were watching — those rise in.
@@ -545,16 +553,16 @@ export function TeamChatScreen({ currentUser, onOpenJob, onRead }) {
         // The room you walk into holds still; only what arrives after
         // you is animated.
         if (initial) page.forEach(m => quietIds.current.add(m.id));
-        setMessages(prev => {
-          const next = mergeIn(prev, page);
-          // Messages that arrive by poll — the room's only pulse while the
-          // realtime channel is down — are read on screen like any other,
-          // so the bookmark moves for them too; it used to move only for
-          // the realtime path, and the drawer badge grew over messages the
-          // reader was looking at.
-          if (!initial && next !== prev && document.visibilityState === "visible") noteRead();
-          return next;
-        });
+        // Messages that arrive by poll — the room's only pulse while the
+        // realtime channel is down — are read on screen like any other,
+        // so the bookmark moves for them too; it used to move only for
+        // the realtime path, and the drawer badge grew over messages the
+        // reader was looking at. Decided out here, before the merge, from
+        // the ids: an updater has to stay pure (React may run it twice),
+        // and "the array changed" also fires for a reaction on an old row.
+        const fresh = page.some(m => !seenIds.current.has(m.id));
+        setMessages(prev => mergeIn(prev, page));
+        if (!initial && fresh && stickToBottom.current && document.visibilityState === "visible") noteRead();
         setPins(pinned);
         if (initial) setHasMore(more);
         setLoadError("");

@@ -600,3 +600,11 @@ label.field-label-missing {
   from { opacity: .3; transform: translateY(16px) scale(.97); }
   to   { opacity: 1; transform: none; }
 }
+
+/* Phones: a dialog sits at the top and its backdrop scrolls, so the action
+   buttons stay reachable with the keyboard up. Centred in a fixed, non-
+   scrolling backdrop, a tall dialog put Cancel and Create under the
+   keyboard on a 390px screen, and nothing could scroll to them. */
+@media (max-width: 760px) {
+  .dialog-backdrop { place-items: start center; overflow-y: auto; padding: 12px 0 24px; }
+}

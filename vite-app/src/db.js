@@ -1,5 +1,5 @@
 import { sbClient, VAPID_PUBLIC_KEY } from "./config.js";
-import { todayLocal, localDate, dayMonth, ticketDateStamp, primaryContact, ageInDays, storageKeySafe, STANDARD_RATE_LINES, nonNegative, lineTotal } from "./data.js";
+import { todayLocal, localDate, dayMonth, ticketDateStamp, primaryContact, ageInDays, storageKeySafe, STANDARD_RATE_LINES, nonNegative, lineTotal, decimalString } from "./data.js";
 import { OfflineCache } from "./offlineCache.js";
 import { Toasts } from "./toastBus.js";
 import { OfflineQueue, isNetworkError } from "./offlineQueue.js";
@@ -12,6 +12,15 @@ import { OfflineQueue, isNetworkError } from "./offlineQueue.js";
 // Sentinel id for the house default rate schedule — a rate_schedules row
 // with client_id null, edited through the same screen as a client's own.
 export const DEFAULT_SCHEDULE = "__default__";
+
+// The per-client "open jobs" lists the New ticket dialog reads offline
+// (listActiveJobsForClient). Dropped whenever a job leaves the open set —
+// deleted, or marked complete — so a stale list can't offer a job that a
+// ticket would then fail against forever in the outbox.
+const dropClientJobLists = async () => {
+  const keys = await OfflineCache.keys("jobs.client.").catch(() => []);
+  await Promise.all(keys.map(k => OfflineCache.remove(k)));
+};
 
 // Zero-byte object that makes an otherwise-empty folder exist in Storage.
 const FOLDER_MARKER = ".keep";
@@ -543,6 +552,7 @@ export const Db = {
     await OfflineCache.remove("jhas." + jobId);
     await OfflineCache.remove("reports." + jobId);
     await OfflineCache.remove("tickets." + jobId);
+    await dropClientJobLists();
     return data;
   },
 
@@ -763,6 +773,7 @@ export const Db = {
     const { error } = await sbClient.from("jobs")
       .update({ status: complete ? "Complete" : "Active" }).eq("id", jobDbId);
     if (error) throw error;
+    await dropClientJobLists();
   },
 
   // Anything that adds to a job goes through here first. A job someone marked
@@ -1058,7 +1069,9 @@ export const Db = {
   // than trusted from the screen, so both places can't disagree.
   async closeOutJha({ jhaId, dosimetry, closedBy }) {
     const rows = (dosimetry || []).map(d => {
-      const raw = d.endReading === "" || d.endReading == null ? null : Number(String(d.endReading).replace(",", "."));
+      // The same reading of a comma as every other number field
+      // (decimalString): "0,125" is an eighth of a milliroentgen, not 125.
+      const raw = d.endReading === "" || d.endReading == null ? null : Number(decimalString(d.endReading));
       // Dose is carried to one decimal place — that's the precision the DRDs
       // are read to, so 2.11 files as 2.1 rather than implying more.
       const dose = raw == null || isNaN(raw) ? null : Math.round(raw * 10) / 10;
@@ -1085,17 +1098,37 @@ export const Db = {
   // No real PDF is rendered client-side yet (see README) — this stores the
   // hazard selection, signatures and a placeholder filename, which is
   // enough for "Signed JHAs on file" to be real data instead of a mock array.
-  async createJha({ jobDbId, template, hazards, signedBy, siteRep, pdfKey, dosimetry, unitNumber, details, workDate }) {
+  async createJha({ jobDbId, template, hazards, signedBy, siteRep, pdfKey, dosimetry, unitNumber, details, workDate, clientKey = null }) {
     await this.assertJobOpen(jobDbId);
+    // The same idempotency key tickets and reports carry (jhas.client_key,
+    // unique): an assessment whose insert landed but whose answer was lost
+    // on the radio replays from the outbox as a lookup of the row that
+    // already exists, not as a second signed safety record for the day.
+    const existing = async () => {
+      const { data: already, error: keyErr } = await sbClient.from("jhas").select().eq("client_key", clientKey).maybeSingle();
+      if (keyErr) throw keyErr;
+      return already;
+    };
+    if (clientKey) {
+      const already = await existing();
+      if (already) return already;
+    }
     const { data, error } = await sbClient.from("jhas").insert({
       job_id: jobDbId, template, hazards, signed_by: signedBy, site_rep: siteRep,
       // signed_at is when this was written down and is never editable;
       // work_date is the day it covers and is.
       signed_at: new Date().toISOString(), work_date: workDate || null, pdf_key: pdfKey,
       dosimetry: dosimetry || [], unit_number: unitNumber || null,
-      details: details || {}, status: "Open"
+      details: details || {}, status: "Open", client_key: clientKey
     }).select().single();
-    if (error) throw error;
+    if (error) {
+      // 23505 on the key: this very assessment landed a moment ago.
+      if (error.code === "23505" && clientKey && /client_key/.test(error.message || "")) {
+        const already = await existing();
+        if (already) return already;
+      }
+      throw error;
+    }
     // Render the PDF, best effort: a failed render must not lose an assessment
     // that has already been filed. A re-render happens at close-out anyway.
     this.renderJhaPdf(data.id).catch(e => console.warn("JHA filed, but the PDF didn't render:", e.message));
@@ -1231,8 +1264,12 @@ export const Db = {
     await this.assertJobOpen(jobDbId);
     // The same idempotency key as createTicket: a report whose insert landed
     // but whose answer was lost must not be filed — and emailed — twice.
+    // A lookup that failed is not a lookup that found nothing: proceeding
+    // past a refused or malformed pre-check is exactly the double filing
+    // the key exists to prevent, so its error is the save's error.
     if (clientKey) {
-      const { data: already } = await sbClient.from("reports").select("*").eq("client_key", clientKey).maybeSingle();
+      const { data: already, error: keyErr } = await sbClient.from("reports").select("*").eq("client_key", clientKey).maybeSingle();
+      if (keyErr) throw keyErr;
       if (already) return already;
     }
     let pdfKey = null;
@@ -1419,11 +1456,14 @@ export const Db = {
   // invoiced tickets are the client's document — same line deleteTicket
   // draws.
   async withdrawTicketApproval(ticketId) {
-    const { data: updated, error } = await sbClient.from("tickets").update({
-      status: "Draft", approval_token: null, approval_sent_at: null, approval_expires_at: null
-    }).eq("id", ticketId).eq("status", "Awaiting approval").select("id");
+    // A definer RPC, because the token columns are no longer any signed-in
+    // account's to write (the round-three column grant on tickets: the
+    // editor gets status, the reps, delays and chased_at, and nothing else).
+    // The function applies the same own-or-office rule as any ticket write
+    // and answers with the number of rows it changed.
+    const { data: changed, error } = await sbClient.rpc("withdraw_ticket_approval", { p_id: ticketId });
     if (error) throw error;
-    if (!updated || !updated.length) {
+    if (!changed) {
       throw new Error("That approval wasn't cancelled — the client may have just approved it, or the ticket isn't yours. Reload the job to see where it stands.");
     }
   },
@@ -2019,8 +2059,11 @@ export const Db = {
     const total = totalOf(lines);
     assertBillable(total);
 
+    // A failed lookup is the save's failure, not a green light (see
+    // uploadReport).
     if (clientKey) {
-      const { data: already } = await sbClient.from("tickets").select("id, total").eq("client_key", clientKey).maybeSingle();
+      const { data: already, error: keyErr } = await sbClient.from("tickets").select("id, total").eq("client_key", clientKey).maybeSingle();
+      if (keyErr) throw keyErr;
       if (already) return { id: already.id, total: Number(already.total), existing: true };
     }
 
@@ -2048,7 +2091,8 @@ export const Db = {
       // somebody took it between the mint and the insert — mint again.
       // Anything else is a real failure.
       if (error.code === "23505" && clientKey && /client_key/.test(error.message || "")) {
-        const { data: already } = await sbClient.from("tickets").select("id, total").eq("client_key", clientKey).maybeSingle();
+        const { data: already, error: keyErr } = await sbClient.from("tickets").select("id, total").eq("client_key", clientKey).maybeSingle();
+        if (keyErr) throw keyErr;
         if (already) return { id: already.id, total: Number(already.total), existing: true };
       }
       if (error.code !== "23505" || attempt >= 4) throw error;
@@ -2161,7 +2205,7 @@ export const Db = {
   // client has approved is what they agreed to pay, and nothing in the app may
   // quietly rewrite it afterwards.
   async updateTicket({ ticketId, clientContact, contractorContact, lines, status, delays }) {
-    const { data: row, error: rErr } = await sbClient.from("tickets").select("status, job_id").eq("id", ticketId).maybeSingle();
+    const { data: row, error: rErr } = await sbClient.from("tickets").select("status, job_id, total").eq("id", ticketId).maybeSingle();
     if (rErr) throw rErr;
     // Cancelled on another device while this editor was open. Say so —
     // the screen's generic wrapper ("press Save again") would be a lie
@@ -2223,6 +2267,16 @@ export const Db = {
       .from("ticket_lines").select("kind, label, unit, quantity, unit_rate")
       .eq("ticket_id", ticketId);
     if (oErr) throw oErr;
+    // Nothing read from a ticket that carries money means the lines are
+    // there and this account can't see them (prices are Admins' and
+    // Technicians'; the policy hides the rows rather than refusing the
+    // read). Replacing what can't be seen would be deleting it — the
+    // database refuses the delete to those roles too, but the editor should
+    // not even try: the hours, reps and delays are saved, the billing is
+    // left exactly as it was.
+    if (!(oldLines && oldLines.length) && Number(row.total || 0) > 0) {
+      return { id: ticketId, total: Number(row.total) };
+    }
 
     const { error: dErr } = await sbClient.from("ticket_lines").delete().eq("ticket_id", ticketId);
     if (dErr) throw dErr;
@@ -2494,10 +2548,28 @@ export const Db = {
         if (l.position != null && match.position !== l.position) toMove.push({ id: match.id, position: l.position });
       }
     }
-    for (const m of toMove) {
-      const { error } = await sbClient.from("rate_lines").update({ position: m.position }).eq("id", m.id);
-      if (error) throw error;
-    }
+    // The card's own lines — the customs the house card doesn't have — are
+    // renumbered after the house order, in the order they already had, so
+    // none of them lands on a position a standard line just took. Without
+    // this, turning follow off left a client's blended-rate line sharing a
+    // position with a size band, and the ticket dropdowns and the invoice
+    // read in whichever order the database felt like.
+    const houseMax = source.reduce((m, l) => Math.max(m, l.position == null ? 0 : Number(l.position)), 0);
+    const customs = (existing || [])
+      .filter(l => !source.some(s => key(s) === key(l)))
+      .sort((a, b) => (a.position == null ? 0 : a.position) - (b.position == null ? 0 : b.position));
+    customs.forEach((l, i) => {
+      const position = houseMax + 1 + i;
+      if (l.position !== position) toMove.push({ id: l.id, position });
+    });
+    // One round trip per line, all at once (reorderRateLines does the same):
+    // a full house card is sixty lines, and sixty sequential updates on
+    // field signal was a minute of "Saving…".
+    const moved = await Promise.all(toMove.map(m =>
+      sbClient.from("rate_lines").update({ position: m.position }).eq("id", m.id)
+    ));
+    const moveErr = moved.find(r => r.error);
+    if (moveErr) throw moveErr.error;
 
     if (toAdd.length) {
       const { error } = await sbClient.from("rate_lines").insert(toAdd);

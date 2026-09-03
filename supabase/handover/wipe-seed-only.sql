@@ -47,22 +47,32 @@ create temporary table seed_contractors on commit drop as
    where not exists (select 1 from public.jobs j where j.contractor_id = k.id and j.job_number not like 'S-1%')
      and exists (select 1 from public.jobs j where j.contractor_id = k.id);
 
--- Billing on seed jobs, and anything a seed person raised or worked.
+-- Billing on seed jobs. Only there: a real ticket that a seed account raised
+-- or rode along on (the e2e suite signs in as two of them) is real billing,
+-- and keeps its lines and its hours — it loses the seed name, the way a real
+-- job a seed account raised does below. Any ticket approved or invoiced
+-- outside the seed jobs is therefore never touched.
 create temporary table seed_tickets on commit drop as
   select t.id from public.tickets t
-   where t.job_id in (select id from seed_jobs)
-      or t.technician_id in (select id from seed_people)
-      or exists (select 1 from public.ticket_crew c where c.ticket_id = t.id and c.profile_id in (select id from seed_people));
+   where t.job_id in (select id from seed_jobs);
 delete from public.ticket_crew  where ticket_id in (select id from seed_tickets);
 delete from public.ticket_lines where ticket_id in (select id from seed_tickets);
 delete from public.tickets      where id in (select id from seed_tickets);
+-- Seed people on real tickets: the technician of record is nulled, and their
+-- crew rows go (the hours were a seed account's; the ticket's lines and the
+-- other crew members' hours stay).
+update public.tickets set technician_id = null
+ where technician_id in (select id from seed_people) and id not in (select id from seed_tickets);
+delete from public.ticket_crew where profile_id in (select id from seed_people);
 delete from public.timesheet_approvals where profile_id in (select id from seed_people);
 update public.timesheet_approvals set approved_by = null where approved_by in (select id from seed_people);
 
--- Field paperwork on seed jobs, or signed by seed people. A real assessment
--- a seed person merely closed out keeps its readings and loses the name.
+-- Field paperwork on seed jobs. A real assessment a seed person signed or
+-- closed out keeps its readings and loses the name.
 update public.jhas set closed_by = null where closed_by in (select id from seed_people);
-delete from public.jhas    where job_id in (select id from seed_jobs) or signed_by in (select id from seed_people);
+update public.jhas set signed_by = null
+ where signed_by in (select id from seed_people) and job_id not in (select id from seed_jobs);
+delete from public.jhas    where job_id in (select id from seed_jobs);
 delete from public.reports where job_id in (select id from seed_jobs);
 delete from public.rate_overrides where job_id in (select id from seed_jobs);
 -- A real job a seed account happened to raise (the e2e suite signs in as

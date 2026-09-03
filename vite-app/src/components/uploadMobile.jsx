@@ -29,7 +29,12 @@ export function UploadMobileScreen({ job, jobRecord, currentUser, onSent }) {
     // the row, its weld chips, its half-typed draft — is keyed by it, so
     // removing one file can't shift another file's state onto the wrong row.
     const key = crypto.randomUUID ? crypto.randomUUID() : String(Date.now()) + Math.random();
-    setItems(p => [...p, { key, file: f, welds: [], state: "Queued" }]);
+    // The save's idempotency key is a uuid or nothing (reports.client_key is
+    // a uuid column): the row key's fallback is fine for React and fatal
+    // for the insert, and on a browser without randomUUID it was making the
+    // phone unable to file a report at all.
+    const clientKey = crypto.randomUUID ? key : null;
+    setItems(p => [...p, { key, clientKey, file: f, welds: [], state: "Queued" }]);
   };
   const addWeld = key => {
     const w = (weldDraft[key] || "").trim();
@@ -83,7 +88,7 @@ export function UploadMobileScreen({ job, jobRecord, currentUser, onSent }) {
           const report = await Db.uploadReport({
             jobDbId: job.dbId, jobNumber: job.id, file: it.file,
             welds: it.welds.join(", "), result: "Accept", interpretedBy: currentUser.name,
-            send: false, sendTo: recipient, clientKey: it.key
+            send: false, sendTo: recipient, clientKey: it.clientKey
           });
           if (recipient) {
             try {
@@ -96,7 +101,7 @@ export function UploadMobileScreen({ job, jobRecord, currentUser, onSent }) {
           if (!OfflineQueue.isNetworkError(e)) throw e;
           await OfflineQueue.enqueue("report", {
             jobDbId: job.dbId, jobNumber: job.id, file: it.file,
-            welds: it.welds.join(", "), interpretedBy: currentUser.name, recipient, clientKey: it.key
+            welds: it.welds.join(", "), interpretedBy: currentUser.name, recipient, clientKey: it.clientKey
           });
           queuedCount++;
         }

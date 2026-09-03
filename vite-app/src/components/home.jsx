@@ -90,7 +90,7 @@ export function HomeScreen({ onCreateJob, onOpenJob, onStartTicket, currentUser,
   // only the search box is debounced, so a filter or page tap is immediate.
   const last = useRef({ key: null, text: "" });
   useEffect(() => {
-    const key = [filter, searchField, query].join("");
+    const key = [filter, searchField, query].join("\u0001");
     const isNewQuery = last.current.key !== null && last.current.key !== key;
     const typed = last.current.text !== query;
     last.current = { key, text: query };
@@ -507,7 +507,14 @@ function NewJobDialog({ currentUser, clients, contractors, contacts, onClose, on
   // The same three conditions submit() is about to check, counted instead of
   // reported — so the dialog can say how much is in the way before the button
   // is pressed. Change one and the other has to move with it.
-  const requiredLeft = [!form.project.trim(), !form.client, !form.lsd.trim()].filter(Boolean).length;
+  // …including the two the number can raise: no number at all (offline, the
+  // suggestion never arrives) and a number already taken. Both stop the
+  // submit, so both count — "0 left" over a button that then refuses was
+  // the exact promise this counter exists to keep.
+  const requiredLeft = [
+    !form.project.trim(), !form.client, !form.lsd.trim(),
+    !(form.jobNumber.trim() || placeholderNum), numberTaken
+  ].filter(Boolean).length;
 
   const submit = async () => {
     // Everything missing at once, rather than one box per attempt: the old

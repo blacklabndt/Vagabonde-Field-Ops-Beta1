@@ -55,14 +55,41 @@ export default {
       if (Number(request.headers.get("content-length") || 0) > MAX_BODY_BYTES) {
         return new Response("Request too large", { status: 413 });
       }
-      return approvalPage(request, url);
+      // The header is a claim; the bytes are the fact. A chunked POST carries
+      // no Content-Length at all, and used to stream through unbounded.
+      let payload;
+      if (request.method === "POST") {
+        payload = await readBounded(request, MAX_BODY_BYTES);
+        if (payload === null) return new Response("Request too large", { status: 413 });
+      }
+      return approvalPage(request, url, payload);
     }
 
     return env.ASSETS.fetch(request);
   }
 };
 
-async function approvalPage(request, url) {
+// The request body, read to the cap and no further: null past it. Small by
+// design — a typed name and a signature PNG — so buffering it is nothing.
+async function readBounded(request, max) {
+  if (!request.body) return new Uint8Array();
+  const reader = request.body.getReader();
+  const chunks = [];
+  let size = 0;
+  for (;;) {
+    const { done, value } = await reader.read();
+    if (done) break;
+    size += value.byteLength;
+    if (size > max) { await reader.cancel().catch(() => {}); return null; }
+    chunks.push(value);
+  }
+  const out = new Uint8Array(size);
+  let at = 0;
+  for (const c of chunks) { out.set(c, at); at += c.byteLength; }
+  return out;
+}
+
+async function approvalPage(request, url, payload) {
   const target = FUNCTIONS_ORIGIN + "/approve-ticket" + url.search;
 
   const headers = new Headers();
@@ -80,7 +107,7 @@ async function approvalPage(request, url) {
     upstream = await fetch(target, {
       method: request.method,
       headers,
-      body: request.method === "GET" || request.method === "HEAD" ? undefined : request.body,
+      body: request.method === "GET" || request.method === "HEAD" ? undefined : payload,
       redirect: "manual",
       signal: AbortSignal.timeout(UPSTREAM_TIMEOUT_MS)
     });

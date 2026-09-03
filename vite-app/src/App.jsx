@@ -232,15 +232,24 @@ export function App() {
       // way in — not when it was built in the field hours ago.
       let id = payload.ticketId;
       if (!payload.alreadyCreated) {
+        // With the key the editor minted: this is the one replay that can
+        // double-file a day — the insert lands, the answer is lost on the
+        // radio, the item stays queued — and the key is what turns the
+        // second attempt into a lookup of the row that already exists.
+        // (The ticketGone branch below always carried it; this one didn't.)
         const saved = await Db.createTicket({
           initials: payload.initials, jobDbId: payload.jobDbId, technicianId: payload.technicianId,
           workDate: payload.workDate, clientContact: payload.clientContact, contractorContact: payload.contractorContact,
-          lines: payload.lines, status: payload.status, delays: payload.delays
+          lines: payload.lines, status: payload.status, delays: payload.delays,
+          clientKey: payload.clientKey || null
         });
         id = saved.id;
         // The row and its number exist now. Anything that fails below this
         // line must resume against *this* ticket, not mint another one.
         await checkpoint({ alreadyCreated: true, ticketId: id });
+        // A row found by its key was the first attempt's, whose lines may
+        // never have landed: write today's over it, as the editor does.
+        if (saved.existing) await Db.updateTicket({ ticketId: id, lines: payload.lines, status: payload.status, delays: payload.delays });
       } else {
         try {
           await Db.updateTicket({ ticketId: id, lines: payload.lines, status: payload.status, delays: payload.delays });
@@ -297,7 +306,11 @@ export function App() {
   useEffect(() => {
     if (!currentUser) return;
     const tabs = tabList(currentUser.tabs);
-    if (tabs.length && !tabs.includes(screen) && screen !== contextScreen) setScreen(tabs[0]);
+    // Never onto a contextual screen (job, jha, upload, ticket): those open
+    // from a job, and an account without the board was being parked on
+    // "No job selected — pick one from Home" with no Home in its menu.
+    const first = tabs.filter(t => !CONTEXT_TABS.includes(t))[0] || tabs[0];
+    if (tabs.length && !tabs.includes(screen) && screen !== contextScreen) setScreen(first);
   }, [currentUser, screen, contextScreen]);
 
   // True when this session was restored from what the device remembered
@@ -326,6 +339,12 @@ export function App() {
       if (inconclusive) return;
       restoredOffline.current = false;
       console.warn("Back online, but the session had lapsed — signing in again is needed.");
+      // The same forgetting sign-out does. Without it the device's remembered
+      // identity outlived the server's "no session": close and reopen the
+      // app out of range and it opened as this person again, for the rest
+      // of the identity's twelve hours — a locked account included.
+      try { await OfflineCache.remove(IDENTITY_KEY); } catch { /* the clear below tries again */ }
+      try { await OfflineCache.clear(); } catch (e) { console.error("Couldn't clear the offline cache after the session lapsed:", e); }
       setCurrentUser(null);
     };
     window.addEventListener("online", recheck);
@@ -471,11 +490,20 @@ export function App() {
     setMyTicketsLoading(false);
   };
   // Once on sign-in, because the drawer badge needs a count before the screen
-  // has been opened…
-  useEffect(() => { if (currentUser) loadMyTickets(); }, [currentUser]);
+  // has been opened… The list is emptied first: it is the previous person's
+  // until the read lands, and if the read fails (no signal is the ordinary
+  // condition) it stayed theirs — their drafts, on the next person's screen.
+  useEffect(() => { setMyTickets([]); if (currentUser) loadMyTickets(); }, [currentUser]);
   // …and again on arriving at the screen. Keyed on `screen` alone: keyed on
   // both, signing in ran this a second time for the same list.
   useEffect(() => { if (currentUser && screen === "mytickets") loadMyTickets(); }, [screen]);
+  // …and whenever the outbox drains: a queued draft that just synced is a
+  // draft the badge didn't know about.
+  const queuedBefore = useRef(0);
+  useEffect(() => {
+    if (currentUser && queued.length < queuedBefore.current) loadMyTickets();
+    queuedBefore.current = queued.length;
+  }, [queued.length]);
   // The same set Open tickets shows: drafts still to be sent to the client.
   const openMyTicketsCount = myTickets.filter(t => t.status === "Draft").length;
 
@@ -526,6 +554,20 @@ export function App() {
   // the next person to pick one up should not be able to page through the
   // last crew's jobs and rates without signing in.
   const signOut = async () => {
+    // Signing out wipes this device's cache, and the recovery copies of a
+    // half-entered ticket or assessment live in it; the outbox survives but
+    // is this person's alone, so it won't send until they sign in again.
+    // Either one is worth a warning before the tap goes through — a shared
+    // tablet handed over mid-ticket used to lose the day without a word.
+    try {
+      const wip = await OfflineCache.keys("ticket.wip.");
+      const jhaWip = await OfflineCache.keys("jha.wip.");
+      const drafts = wip.length + jhaWip.length;
+      const parts = [];
+      if (drafts) parts.push(`${drafts === 1 ? "a half-entered ticket or hazard assessment" : `${drafts} half-entered tickets or assessments`} on this device that ${drafts === 1 ? "hasn't" : "haven't"} been saved yet — signing out discards ${drafts === 1 ? "it" : "them"}`);
+      if (queued.length) parts.push(`${queued.length} item${queued.length === 1 ? "" : "s"} waiting to sync, which won't go out until you sign in again`);
+      if (parts.length && !window.confirm(`You have ${parts.join(", and ")}. Sign out anyway?`)) return;
+    } catch { /* the check is a courtesy; sign-out itself must never be blocked by it */ }
     // The push subscription belongs to the device, and the row naming this
     // person must not keep buzzing the tablet with the next person's chat.
     // Best effort, before the session that RLS needs for the delete is gone;
@@ -558,6 +600,16 @@ export function App() {
     setMenuOpen(false);
     setMenuVisible(false);
     setChatUnread(0);
+    // And the data that was theirs: the open job and its record, the ticket
+    // being edited, the draft list behind the badge. All of it survived into
+    // the next session before, and the draft list in particular rendered
+    // the last technician's tickets to the next until a refetch replaced it.
+    setMyTickets([]);
+    setActiveJob(null);
+    setJobRecord(EMPTY_JOB_RECORD);
+    setActiveTicket(null);
+    setTicketSeed(null);
+    setContextScreen("");
     setCurrentUser(null);
   };
 
@@ -584,25 +636,49 @@ export function App() {
   // Nothing is inserted until the editor saves, so the dialog no longer
   // leaves empty drafts behind, and it works with no signal (the editor
   // queues). The nonce remounts the editor per seed.
+  // The job's record, loaded before a field screen opens on it. Without it
+  // the screen would carry whatever job was opened last — its client rep,
+  // and so the address an approval goes to, or the contractor rep a hazard
+  // assessment is reviewed with. Better no screen than one filed against
+  // the wrong job. Returns the record, or null once the failure is shown.
+  const recordFor = async (job, what) => {
+    try { return await Db.getJobRecord(job); }
+    catch (e) {
+      console.error(`Couldn't load the job record for the new ${what}:`, e.message);
+      Toasts.show(OfflineQueue.isNetworkError(e)
+        ? `No connection, and ${job.id} hasn't been opened on this device yet — open the job once in range, then its ${what}s work offline.`
+        : `Couldn't load ${job.id}'s details: ${e.message || "try again."}`, "error");
+      return null;
+    }
+  };
   const startTicketForJob = async (job, seed = null) => {
     if (!job) return;
+    // Nothing changes until the record is in hand: the job and the seed used
+    // to be set before the await, so a failure left Home pointing at a job
+    // nobody had opened.
+    const record = await recordFor(job, "ticket");
+    if (!record) return;
+    setJobRecord(record);
     setActiveJob(job);
-    setTicketSeed(seed ? { ...seed, nonce: Date.now() } : null);
-    // Without the record, the ticket screen would carry whatever job was
-    // opened last — its client rep, and so the address the approval goes
-    // to. Better no ticket than one filed against the wrong client.
-    try { setJobRecord(await Db.getJobRecord(job)); }
-    catch (e) {
-      console.error("Couldn't load the job record for the new ticket:", e.message);
-      Toasts.show(OfflineQueue.isNetworkError(e)
-        ? `No connection, and ${job.id} hasn't been opened on this device yet — open the job once in range, then its tickets work offline.`
-        : `Couldn't load ${job.id}'s details: ${e.message || "try again."}`, "error");
-      return;
-    }
+    // Always a nonce: the editor is keyed on it, and a seedless ticket used
+    // to key as a constant, so two blank tickets in a row would have shared
+    // one mount — and the once-only idempotency key minted in it.
+    setTicketSeed({ ...(seed || {}), nonce: Date.now() });
     setActiveTicket(null);
     setContextScreen("ticket");
     setScreen("ticket");
     setMenuOpen(false);
+  };
+  // "+ New JHA" on Job detail, with the same guard the ticket has: the
+  // builder seeds the site rep from the job record at mount, and Job detail
+  // replaces that record asynchronously — tapped before it resolved, the
+  // assessment opened naming the previous job's contractor rep.
+  const startJhaForJob = async job => {
+    if (!job) return;
+    const record = await recordFor(job, "hazard assessment");
+    if (!record) return;
+    setJobRecord(record);
+    gotoContext("jha");
   };
   // From the billing tracker: a draft opens in the billing screen to be
   // finished, anything already sent opens its job (there is nothing left to
@@ -662,7 +738,7 @@ export function App() {
           // job's record.
           key={activeJob.dbId || activeJob.id}
           job={activeJob} currentUser={currentUser}
-          onStartJha={() => gotoContext("jha")}
+          onStartJha={() => startJhaForJob(activeJob)}
           onOpenTicket={openTicketDraft}
           onStartTicket={seed => startTicketForJob(activeJob, seed)}
           // The screen you are standing on has just been deleted. Move to the
@@ -697,7 +773,10 @@ export function App() {
       body = <UploadMobileScreen job={activeJob} jobRecord={jobRecord} currentUser={currentUser} onSent={() => gotoContext("job")} />;
       break;
     case "ticket":
-      body = <TicketMobileScreen key={activeTicket || ("new-" + (ticketSeed ? ticketSeed.nonce : ""))} job={activeJob} jobRecord={jobRecord} currentUser={currentUser} ticket={activeTicket} seed={activeTicket ? null : ticketSeed} onSaved={() => gotoContext("job")} />;
+      body = <TicketMobileScreen key={activeTicket || ("new-" + (ticketSeed ? ticketSeed.nonce : ""))} job={activeJob} jobRecord={jobRecord} currentUser={currentUser} ticket={activeTicket} seed={activeTicket ? null : ticketSeed}
+        // A save changes the draft list the badge counts; refresh it on the
+        // way back rather than when the screen is next opened.
+        onSaved={() => { gotoContext("job"); loadMyTickets(); }} />;
       break;
     case "files":
       body = <FilesScreen currentUser={currentUser} />;
@@ -712,7 +791,7 @@ export function App() {
       body = <RateAdminScreen />;
       break;
     case "tracker":
-      body = <BillingTrackerScreen onOpenTicket={openTicket} />;
+      body = <BillingTrackerScreen onOpenTicket={openTicket} currentUser={currentUser} />;
       break;
     case "mytickets":
       body = <OpenTicketsScreen tickets={myTickets} loading={myTicketsLoading} onOpenTicket={openTicket} currentUser={currentUser} />;

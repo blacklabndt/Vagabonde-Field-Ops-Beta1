@@ -130,6 +130,13 @@ export function primaryContact(contacts, orgType, orgId) {
 const CREW_ROLE_OF = { Helper: "Helper" };
 export const crewRoleFor = profile => CREW_ROLE_OF[profile && profile.role] || "Technician";
 
+// Who sees money. Prices — rate cards, ticket lines, the totals they add up
+// to — are for Admins and Technicians, per Kyle: the database refuses the
+// lines to everyone else and nulls the totals it hands back. Every screen
+// that shows an amount asks this one question rather than keeping its own
+// answer, which is how Open tickets and Job detail came to disagree.
+export const seesPrices = user => !!user && (user.role === "Admin" || user.role === "Technician");
+
 // ── Pay periods ────────────────────────────────────────────────────────
 // Semi-monthly: the 1st–15th, then the 16th to the end of the month. Dates
 // are handled as plain YYYY-MM-DD strings, never Date objects, because a
@@ -249,7 +256,11 @@ export const decimalString = value => {
   }
   if (lastComma >= 0) {
     const parts = s.split(",");
-    const grouping = parts.length > 2 || /^\d{3}$/.test(parts[1]);
+    // A comma before exactly three digits is a thousands separator only when
+    // what precedes it could be thousands: "1,200" is twelve hundred, but
+    // "0,125" is an eighth — a dose or an hour typed the European way, which
+    // this rule once turned into 125.
+    const grouping = parts.length > 2 || (/^\d{3}$/.test(parts[1]) && /^[1-9]\d{0,2}$/.test(parts[0]));
     return grouping ? parts.join("") : parts.join(".");
   }
   return s;

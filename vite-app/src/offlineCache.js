@@ -103,6 +103,20 @@ export const OfflineCache = {
 
   read(key) { return ocGet(key); },
 
+  // Every remembered key that starts with `prefix`. How sign-out finds the
+  // half-entered tickets and assessments it is about to wipe, and how a
+  // job's deletion finds the per-client job lists that still name it.
+  async keys(prefix = "") {
+    const db = await ocOpenDb();
+    const tx = db.transaction(OC_STORE, "readonly");
+    const req = tx.objectStore(OC_STORE).getAllKeys();
+    const all = await new Promise((resolve, reject) => {
+      req.onsuccess = () => resolve(req.result || []);
+      req.onerror = () => reject(req.error);
+    });
+    return all.filter(k => typeof k === "string" && k.startsWith(prefix));
+  },
+
   // Drop one entry. Used by the ticket screen to throw away its in-progress
   // copy once the real thing is safely stored — a leftover would otherwise be
   // offered back the next time that job's ticket screen opens.

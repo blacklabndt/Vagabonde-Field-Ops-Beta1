@@ -15,6 +15,7 @@
 // secret — the picker shows this function's own explanation instead of
 // a grid: the same build-now-configure-later shape as the mail sender.
 
+import { createClient } from "https://esm.sh/@supabase/supabase-js@2";
 import { appSettings } from "../_shared/mail.ts";
 
 const corsHeaders = {
@@ -26,6 +27,21 @@ Deno.serve(async (req) => {
   if (req.method === "OPTIONS") return new Response("ok", { headers: corsHeaders });
 
   try {
+    // A signed-in account, like every other function: the gateway's check
+    // is satisfied by the publishable key that ships in the bundle, so
+    // without this the key went to any caller on the internet — the same
+    // exposure as before, but not one worth handing out for free.
+    const asUser = createClient(
+      Deno.env.get("SUPABASE_URL")!,
+      Deno.env.get("SUPABASE_ANON_KEY")!,
+      { global: { headers: { Authorization: req.headers.get("Authorization") ?? "" } } }
+    );
+    const { data: { user } } = await asUser.auth.getUser();
+    if (!user) {
+      return new Response(JSON.stringify({ error: "Sign in to search for GIFs." }), {
+        status: 401, headers: { ...corsHeaders, "Content-Type": "application/json" }
+      });
+    }
     const key = (await appSettings()).klipyApiKey;
     if (!key) {
       throw new Error("GIF search isn't set up yet — an Admin can add the KLIPY key on the Admin screen.");

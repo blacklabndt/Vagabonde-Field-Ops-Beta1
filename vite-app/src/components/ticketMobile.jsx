@@ -36,10 +36,13 @@ function linesToForm(lines, keepQuantities, catalog) {
 
 // Everything a crew row carries that is a measurement of today.
 const CREW_FIGURES = ["straight", "ot", "solo", "soloOt", "dose", "mileage"];
-const hasEntries = (weldLines, otherLines, crew) =>
+// A typed standby explanation counts too: a ticket that is nothing but a
+// delays note so far was being dropped from the recovery copy as untouched.
+const hasEntries = (weldLines, otherLines, crew, delays = "") =>
   weldLines.some(l => l.qty > 0) ||
   otherLines.some(l => l.qty > 0) ||
-  crew.some(c => CREW_FIGURES.some(k => c[k] > 0));
+  crew.some(c => CREW_FIGURES.some(k => c[k] > 0)) ||
+  (typeof delays === "string" && delays.trim().length > 0);
 
 // `seed` is what Job detail's Create ticket dialog chose for a NEW ticket —
 // the work date and this ticket's own reps. Absent for a reopened draft and
@@ -278,16 +281,20 @@ export function TicketMobileScreen({ job, jobRecord, currentUser, onSaved, ticke
       .then(hit => {
         if (!live) return;
         const w = hit && hit.value;
-        if (w && hasEntries(w.weldLines || [], w.otherLines || [], w.crew || [])) {
+        if (w && hasEntries(w.weldLines || [], w.otherLines || [], w.crew || [], w.delays || "")) {
           wipRestored.current = true;
           if (w.weldLines) setWeldLines(w.weldLines);
           if (w.otherLines) setOtherLines(w.otherLines);
           if (w.crew) setCrew(w.crew);
-          if (w.workDate) setWorkDate(w.workDate);
+          // What the Create ticket dialog chose just now — the day, this
+          // ticket's reps — outranks what the recovery copy remembers: the
+          // copy is keyed by job, so it may be yesterday's half-ticket, and
+          // a date picked on purpose must not be quietly swapped for it.
+          if (w.workDate && !(seed && seed.workDate)) setWorkDate(w.workDate);
           if (w.delays) setDelays(w.delays);
           if (w.clientKey) setClientKey(w.clientKey);
-          if (w.clientContact) setTicketClientContact(w.clientContact);
-          if (w.contractorContact) setTicketContractorContact(w.contractorContact);
+          if (w.clientContact && !(seed && seed.clientContact)) setTicketClientContact(w.clientContact);
+          if (w.contractorContact && !(seed && seed.contractorContact)) setTicketContractorContact(w.contractorContact);
           setRecovered(hit.at || null);
         }
         wipReady.current = true;
@@ -301,7 +308,7 @@ export function TicketMobileScreen({ job, jobRecord, currentUser, onSaved, ticke
     // Only what someone actually entered is worth keeping. An untouched form
     // is cleared instead, so opening the screen and backing out doesn't leave
     // a phantom to recover next time.
-    if (!hasEntries(weldLines, otherLines, crew)) { OfflineCache.remove(wipKey); return; }
+    if (!hasEntries(weldLines, otherLines, crew, delays)) { OfflineCache.remove(wipKey); return; }
     const t = setTimeout(() => {
       OfflineCache.put(wipKey, {
         weldLines, otherLines, crew, workDate, delays, clientKey,
@@ -314,10 +321,18 @@ export function TicketMobileScreen({ job, jobRecord, currentUser, onSaved, ticke
   const discardRecovered = () => {
     OfflineCache.remove(wipKey);
     setRecovered(null);
-    // Back to what a fresh ticket opens with: nothing.
+    // Back to what a fresh ticket opens with: nothing — and the day and the
+    // reps the Create ticket dialog chose, when it chose them. "Start empty"
+    // used to clear the lines and keep the recovered copy's date, delays
+    // and key, which is a different ticket wearing an empty face.
     setWeldLines([]);
     setOtherLines([]);
     setCrew(p => p.map(c => ({ ...c, ...Object.fromEntries(CREW_FIGURES.map(k => [k, 0])) })));
+    setDelays("");
+    setWorkDate((seed && seed.workDate) || todayLocal());
+    setTicketClientContact((seed && seed.clientContact) || "");
+    setTicketContractorContact((seed && seed.contractorContact) || "");
+    setClientKey(crypto.randomUUID ? crypto.randomUUID() : null);
   };
 
   // Catalog maps — rebuilt only when the catalog itself arrives or changes.
@@ -384,13 +399,16 @@ export function TicketMobileScreen({ job, jobRecord, currentUser, onSaved, ticke
   // Solo hours are a rate distinction inside those hours, not extra time, so
   // they're excluded from the comparison. Looked up by label — the card
   // decides the keys now.
-  const billedQty = label => {
-    const it = rates.others.find(o => o.label === label);
-    const row = it && otherLines.find(l => l.key === it.key);
-    return row ? row.qty : 0;
-  };
-  const billedStraight = billedQty("Straight time");
-  const billedOt = billedQty("Overtime");
+  // Matched the way the blended line is, by what the label says rather than
+  // by two exact strings: a client card that calls its hours line "Crew
+  // straight time" billed zero under the old lookup, so the cross-check
+  // read amber the moment anyone entered an hour — permanently, for that
+  // client — and taught the crew to ignore it.
+  const billedWhere = test => rates.others
+    .filter(o => o.unit === "h" && test(String(o.label || "").toLowerCase()))
+    .reduce((s, o) => { const row = otherLines.find(l => l.key === o.key); return s + (row ? row.qty : 0); }, 0);
+  const billedStraight = billedWhere(l => !l.includes("blended") && (l.includes("straight") || l.includes("regular")));
+  const billedOt = billedWhere(l => !l.includes("blended") && (l.includes("overtime") || /\bot\b/.test(l)));
   // Blended hours are billable hours: one negotiated figure standing in for
   // straight + OT together, per Kyle. Found by name, since it is a custom
   // line each card carries (or doesn't) on its own terms.

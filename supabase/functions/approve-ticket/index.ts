@@ -18,7 +18,7 @@
 // deploy can't quietly turn verification back on and 401 every approval.
 
 import { createClient } from "https://esm.sh/@supabase/supabase-js@2";
-import { esc } from "../_shared/mail.ts";
+import { esc, sendMail, appSettings, wrapEmail } from "../_shared/mail.ts";
 import { renderInvoice, invoiceCss, invoiceTotals, moneyCents } from "../_shared/invoice.ts";
 import type { InvoiceData } from "../_shared/invoice.ts";
 import { loadInvoice, TICKET_INVOICE_SELECT } from "../_shared/ticketInvoice.ts";
@@ -115,6 +115,60 @@ Deno.serve(async (req) => {
   }
 });
 
+// The request body, read to the cap and no further: null past it.
+async function readBounded(req: Request, max: number): Promise<Uint8Array | null> {
+  if (!req.body) return new Uint8Array();
+  const reader = req.body.getReader();
+  const chunks: Uint8Array[] = [];
+  let size = 0;
+  for (;;) {
+    const { done, value } = await reader.read();
+    if (done) break;
+    size += value.byteLength;
+    if (size > max) { await reader.cancel().catch(() => {}); return null; }
+    chunks.push(value);
+  }
+  const out = new Uint8Array(size);
+  let at = 0;
+  for (const c of chunks) { out.set(c, at); at += c.byteLength; }
+  return out;
+}
+
+// Tells the people who sent the ticket that it came back signed: the
+// account that pressed "Email for approval" (approval_sent_by — its address
+// is the auth user's), plus the configured reply-to as the office copy.
+// Nothing to send to is not an error; it is an install with no addresses.
+// deno-lint-ignore no-explicit-any
+async function notifyApproval(admin: any, row: any, d: InvoiceData, signer: string, approvedAt: string) {
+  const settings = await appSettings();
+  let to = "";
+  if (row?.approval_sent_by) {
+    const { data } = await admin.auth.admin.getUserById(row.approval_sent_by);
+    to = data?.user?.email ?? "";
+  }
+  const office = settings.replyTo && settings.replyTo !== to ? settings.replyTo : "";
+  if (!to && !office) return;
+  const job = row?.jobs ?? {};
+  const totals = invoiceTotals(d);
+  const when = new Date(approvedAt).toLocaleString("en-CA", { timeZone: "America/Edmonton", dateStyle: "medium", timeStyle: "short" });
+  const subject = `Ticket ${row.id} approved by ${signer}`;
+  const lines = [
+    `Ticket ${row.id} was approved by ${signer} on ${when}.`,
+    job.job_number ? `Job ${job.job_number}${job.project ? ` · ${job.project}` : ""}${job.clients?.name ? ` · ${job.clients.name}` : ""}` : "",
+    `Total ${moneyCents(totals.grand)} including GST.`,
+    "It is locked now and sits under Approved in the billing tracker, ready to invoice."
+  ].filter(Boolean);
+  await sendMail({
+    from: "billing",
+    to: to || office,
+    cc: to && office ? office : undefined,
+    subject,
+    htmlBody: wrapEmail(lines.map(l => `<p>${esc(l)}</p>`).join("")),
+    textBody: lines.join("\n\n"),
+    tag: "approval-notice"
+  });
+}
+
 async function logError(functionName: string, message: string, context: Record<string, unknown> = {}) {
   try {
     const admin = createClient(Deno.env.get("SUPABASE_URL")!, Deno.env.get("SUPABASE_SERVICE_ROLE_KEY")!);
@@ -138,7 +192,7 @@ async function handle(req: Request): Promise<Response> {
   // invoice itself is loaded through loadInvoice below.
   const { data: row, error: readErr } = await admin
     .from("tickets")
-    .select(TICKET_INVOICE_SELECT + ", approval_expires_at")
+    .select(TICKET_INVOICE_SELECT + ", approval_expires_at, approval_sent_by")
     .eq("approval_token", await hashToken(token)).maybeSingle();
   // deno-lint-ignore no-explicit-any
   const ticket = row as any;
@@ -184,10 +238,14 @@ async function handle(req: Request): Promise<Response> {
   const ask = askStrip(invoiceData!);
 
   if (req.method === "POST") {
-    if (Number(req.headers.get("content-length") || 0) > MAX_BODY_BYTES) {
-      return page(ask + header + `<div class="actions"><p style="color:#8a3b3b;font-size:13px">That signature image is too large — try a smaller photo, or just type your name.</p></div>` + signForm(fingerprint));
-    }
-    const form = await req.formData();
+    const tooLarge = () =>
+      page(ask + header + `<div class="actions"><p style="color:#8a3b3b;font-size:13px">That signature image is too large — try a smaller photo, or just type your name.</p></div>` + signForm(fingerprint));
+    if (Number(req.headers.get("content-length") || 0) > MAX_BODY_BYTES) return tooLarge();
+    // The header is a claim; the bytes are the fact. A chunked POST has no
+    // Content-Length, and formData() would have buffered all of it.
+    const raw = await readBounded(req, MAX_BODY_BYTES);
+    if (raw === null) return tooLarge();
+    const form = await new Request(req.url, { method: "POST", headers: req.headers, body: raw }).formData();
     // The page the rep is submitting from showed a particular set of charges.
     // If the ticket has been edited since — or the page predates this check —
     // show the current bill and ask again, rather than recording a signature
@@ -254,6 +312,15 @@ async function handle(req: Request): Promise<Response> {
     invoiceData!.ticket.approved_at = signedRows[0].approved_at ?? approvedAt;
     invoiceData!.ticket.approved_by_email = signedRows[0].approved_by_email ?? name;
     invoiceData!.ticket.approved_signature = signedRows[0].approved_signature ?? null;
+    // The line below says VagaboNDE has been notified; this is what makes
+    // it true. The account that sent the approval hears back by email, with
+    // the office address copied when one is configured. Best effort: a mail
+    // failure is logged and never stands between the rep and their receipt.
+    try {
+      await notifyApproval(admin, row, invoiceData!, name, signedRows[0].approved_at ?? approvedAt);
+    } catch (e) {
+      await logError("approve-ticket", "Approved, but the office wasn't told: " + (e as Error).message, { ticket: ticket.id });
+    }
     return page(invoice() + `
       <div class="actions"><p class="signnote">Thank you. VagaboNDE has been notified and this ticket is now
       locked.</p>

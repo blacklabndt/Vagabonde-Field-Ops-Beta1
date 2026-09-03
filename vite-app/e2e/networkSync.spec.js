@@ -39,9 +39,21 @@ const drawerGo = async (page, label) => {
 // Sign out lives in the same drawer, below the sections. Its name is unique
 // on the page, so it needs no scoping — only the drawer being open.
 const signOutFromDrawer = async page => {
-  await page.getByRole("button", { name: "Sections" }).click();
-  await page.getByRole("button", { name: "Sign out" }).click();
-  await expect(page.getByPlaceholder("you@vagabonde.ca")).toBeVisible({ timeout: 15_000 });
+  // Sign-out asks first when the device holds a half-entered ticket or a
+  // queued item (round three): a real person answers the dialog; Playwright
+  // dismisses dialogs by default, which cancels the sign-out. Accept it for
+  // exactly the span of the sign-out — a handler left on the page would
+  // collide with the once-handlers the draft clean-up registers for its own
+  // confirm, and a dialog accepted twice is an error.
+  const accept = d => d.accept().catch(() => {});
+  page.on("dialog", accept);
+  try {
+    await page.getByRole("button", { name: "Sections" }).click();
+    await page.getByRole("button", { name: "Sign out" }).click();
+    await expect(page.getByPlaceholder("you@vagabonde.ca")).toBeVisible({ timeout: 15_000 });
+  } finally {
+    page.off("dialog", accept);
+  }
 };
 
 // Through the real form, as auth.setup.js does — the banked session belongs to

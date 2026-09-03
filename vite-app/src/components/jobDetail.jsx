@@ -1,8 +1,9 @@
 import React, { useState, useEffect, useRef } from "react";
-import { money, todayLocal, localDate, dayMonth, initialsOf, ticketDateStamp, lastNumbers, JOB_FIELDS } from "../data.js";
+import { money, todayLocal, localDate, dayMonth, initialsOf, ticketDateStamp, lastNumbers, JOB_FIELDS, seesPrices as pricesFor } from "../data.js";
 import { Db } from "../db.js";
 import { OfflineCache } from "../offlineCache.js";
 import { OfflineQueue } from "../offlineQueue.js";
+import { Toasts } from "../toastBus.js";
 
 // An idempotency key for a save (see Db.createTicket / uploadReport).
 const newClientKey = () => (crypto.randomUUID ? crypto.randomUUID() : null);
@@ -13,7 +14,7 @@ export function JobDetailScreen({ job, currentUser, onStartJha, onOpenTicket, on
   // Admins and Technicians (the database refuses the lines to anyone else,
   // per the "round two" migration). Everyone else sees the ticket's number,
   // date and status, which is what a Helper needs.
-  const seesPrices = currentUser.role === "Admin" || currentUser.role === "Technician";
+  const seesPrices = pricesFor(currentUser);
   const [showUpload, setShowUpload] = useState(false);
   const [showTicket, setShowTicket] = useState(false);
   const [editingRecord, setEditingRecord] = useState(false);
@@ -1254,6 +1255,23 @@ function UploadReportDialog({ job, jobRecord, currentUser, onClose, onSubmit }) 
       }
       onSubmit();
     } catch (e) {
+      // No signal: the report goes to the outbox with its file, the way a
+      // ticket does, and uploads — and emails — when the truck is back in
+      // range. The key minted above goes with it, so a replay after a lost
+      // answer finds the row that already landed. This dialog used to be
+      // the only way to file a report from a phone and had no offline path
+      // at all: "Couldn't upload — try again", and the PDF died with the tab.
+      if (!storedReport.current && OfflineQueue.isNetworkError(e)) {
+        await OfflineQueue.enqueue("report", {
+          jobDbId: job.dbId, jobNumber: job.id, file, welds: welds.trim(), interpretedBy: currentUser.name,
+          recipient: sent ? to.trim() : "", clientKey: uploadKey.current
+        });
+        Toasts.show(sent
+          ? "No connection — the report is in the outbox and will upload and send itself when you're back in range."
+          : "No connection — the report is in the outbox and will upload when you're back in range.", "info");
+        onSubmit();
+        return;
+      }
       setSaving(false);
       setError(storedReport.current
         ? `The report is uploaded, but the email didn't go out: ${e.message || "the email service didn't respond."} Try again to resend it, or close this — it's on file as Pending and can be sent from the list.`
@@ -1326,7 +1344,6 @@ function CreateTicketDialog({ job, jobRecord, currentUser, onClose, onSubmit }) 
   const [preview, setPreview] = useState("");
   const [provisional, setProvisional] = useState(false);
   const [error, setError] = useState("");
-  const [saving, setSaving] = useState(false);
   useEffect(() => OfflineCache.subscribe(s => setProvisional(s.servingCached)), []);
   // The directory, so both rep fields can offer everyone on file for this
   // job's client and contractor rather than only the job's primary.
@@ -1371,7 +1388,7 @@ function CreateTicketDialog({ job, jobRecord, currentUser, onClose, onSubmit }) 
 
   return (
     <Dialog title="Create ticket" maxWidth={520} onClose={onClose}
-      actions={<><Btn variant="secondary" onClick={onClose}>Cancel</Btn><Btn variant="primary" onClick={submit} disabled={saving}>{saving ? "Creating…" : "Create ticket"}</Btn></>}>
+      actions={<><Btn variant="secondary" onClick={onClose}>Cancel</Btn><Btn variant="primary" onClick={submit}>Create ticket</Btn></>}>
       <ErrorBox>{error}</ErrorBox>
       {jhaMissing && (
         <div style={{ border: "1px solid var(--color-accent)", padding: "10px 12px", fontSize: 13 }}>

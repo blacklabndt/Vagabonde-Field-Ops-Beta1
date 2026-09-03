@@ -25,19 +25,27 @@ export const VAPID_PUBLIC_KEY = "BCnt_FGpoYIxJsp4q2YCK6xfKMazrrCYVmfkRDRpLoLIak2
 // fetch, and a 15 MB interpreted report on one bar of LTE needs minutes, not
 // thirty seconds — cut off, it read as "no connection", went to the offline
 // queue, and the queue's retry cut it off again, forever, with four bars
-// showing. So uploads and function calls run unbounded; the token refresh
-// that precedes them still goes to /auth/v1 and is still bounded, which is
-// the hang this ceiling exists for. Genuinely offline, fetch rejects
-// immediately anyway.
+// showing. So uploads run unbounded and function calls get minutes; the
+// token refresh that precedes them still goes to /auth/v1 and is still
+// bounded, which is the hang this ceiling exists for. Genuinely offline,
+// fetch rejects immediately anyway.
 const REQUEST_TIMEOUT_MS = 30000;
-const UNBOUNDED = /\/storage\/v1\/|\/functions\/v1\//;
+const UNBOUNDED = /\/storage\/v1\//;
+// Edge Functions render PDFs and send mail: minutes at the outside, never
+// forever. They used to share Storage's exemption, and a function call that
+// never settled — a radio attached to nothing — left the outbox flush
+// pending for the life of the tab, so nothing queued ever synced again and
+// (the toasts are muted for the flush) nothing was ever confirmed again.
+const FUNCTIONS = /\/functions\/v1\//;
+const FUNCTION_TIMEOUT_MS = 5 * 60 * 1000;
 
 function fetchWithCeiling(input, init = {}) {
   const url = typeof input === "string" ? input : (input && input.url) || "";
   if (UNBOUNDED.test(url)) return fetch(input, init);
 
   const controller = new AbortController();
-  const timer = setTimeout(() => controller.abort(), REQUEST_TIMEOUT_MS);
+  const ceiling = FUNCTIONS.test(url) ? FUNCTION_TIMEOUT_MS : REQUEST_TIMEOUT_MS;
+  const timer = setTimeout(() => controller.abort(), ceiling);
 
   // Respect a caller's own signal as well as ours.
   if (init.signal) {

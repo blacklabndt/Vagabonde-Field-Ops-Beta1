@@ -55,6 +55,17 @@ export function JhaBuilderScreen({ job, jobRecord, contacts, currentUser, onSubm
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState("");
   const [queued, setQueued] = useState(false);
+  // An idempotency key for this one assessment (jhas.client_key), minted
+  // once, kept with the recovery copy and sent with the outbox payload, so
+  // a filing whose answer was lost on the radio is found again rather than
+  // filed twice as two signed safety records for the same day.
+  const [clientKey, setClientKey] = useState(() => (crypto.randomUUID ? crypto.randomUUID() : null));
+  // What this person rated each hazard last time (loaded below, merged under
+  // the live ratings). Declared up here because the "anything entered?"
+  // guard compares against it, and a const read before its declaration is a
+  // crash on the first render — which is exactly what the builder did for
+  // half an hour after round three shipped, until the e2e suite said so.
+  const [remembered, setRemembered] = useState({});
   const miss = useMissingFields();
 
   // The day this assessment covers. Defaults to today, because that is what
@@ -163,6 +174,7 @@ export function JhaBuilderScreen({ job, jobRecord, contacts, currentUser, onSubm
         if (w.helperId != null) { w2For.current = w.helperId; setHelperId(w.helperId); }
         if (w.w1) { w1Touched.current = true; setW1(w.w1); }
         if (w.w2) { w2Touched.current = true; setW2(w.w2); }
+        if (w.clientKey) setClientKey(w.clientKey);
         setRecovered(hit.at || null);
       }
       wipReady.current = true;
@@ -173,7 +185,12 @@ export function JhaBuilderScreen({ job, jobRecord, contacts, currentUser, onSubm
   // remembered ratings, a derived kit and what the last assessment prefilled
   // are not.
   const sameAs = (a, b) => JSON.stringify(a) === JSON.stringify(b);
-  const entered = hazards.some(h => h.on) || extra.length > 0
+  // Against the seed, not "anything ticked": the standard hazards open
+  // ticked, so `some(on)` was true on an untouched form, every open of the
+  // screen stored a phantom copy, and the phantom's `entered` flag then
+  // switched the prefill-from-last-assessment off for good on that job.
+  const entered = !sameAs(hazards, SEED_HAZARDS) || extra.length > 0
+    || !sameAs(ratings, remembered)
     || !sameAs(site, baseline.current.site)
     || !sameAs({ ...equip, redSerial: "" }, { ...baseline.current.equip, redSerial: "" })
     || !!siteRepOther.trim()
@@ -183,7 +200,7 @@ export function JhaBuilderScreen({ job, jobRecord, contacts, currentUser, onSubm
     if (!entered) { dropWip(); return; }
     const t = setTimeout(() => {
       OfflineCache.put(wipKey, {
-        entered: true, hazards, extra, ratings, siteRep, siteRepOther, workDate, site, equip, helperId,
+        entered: true, hazards, extra, ratings, siteRep, siteRepOther, workDate, site, equip, helperId, clientKey,
         w1: w1Touched.current ? w1 : null, w2: w2Touched.current ? w2 : null
       });
     }, 700);
@@ -192,6 +209,9 @@ export function JhaBuilderScreen({ job, jobRecord, contacts, currentUser, onSubm
   const discardRecovered = () => {
     dropWip();
     setRecovered(null);
+    // A fresh assessment is a fresh filing: a new key, so it can never be
+    // taken for the one that was thrown away.
+    setClientKey(crypto.randomUUID ? crypto.randomUUID() : null);
     setHazards(SEED_HAZARDS.map(h => ({ ...h })));
     setExtra([]);
     setRatings({ ...remembered });
@@ -216,8 +236,8 @@ export function JhaBuilderScreen({ job, jobRecord, contacts, currentUser, onSubm
 
   // Start each hazard at whatever this person rated it last time. Merged
   // *under* anything already set, so a rating changed on this form is never
-  // overwritten by the defaults arriving a moment later.
-  const [remembered, setRemembered] = useState({});
+  // overwritten by the defaults arriving a moment later. (`remembered` is
+  // declared with the other state at the top.)
   useEffect(() => {
     Db.lastHazardRatings(currentUser.id)
       .then(defaults => {
@@ -325,7 +345,8 @@ export function JhaBuilderScreen({ job, jobRecord, contacts, currentUser, onSubm
       pdfKey: `${storageKeySafe(job.id, "job")}-JHA-${Date.now()}.pdf`,
       dosimetry, unitNumber: w1.unit || null,
       workDate,
-      details: { site, equipment: equip }
+      details: { site, equipment: equip },
+      clientKey
     };
     try {
       await Db.createJha(jhaPayload);
@@ -658,7 +679,9 @@ function HazardRow({ hazard, rating, onToggle, onRate }) {
     // it and collided with the hazard underneath.
     <div style={{ border: hazard.on ? "1px solid var(--color-accent)" : "1px solid transparent", background: hazard.on ? "color-mix(in srgb, var(--color-accent) 7%, transparent)" : "transparent" }}>
       <div className="hazard-row" style={{ border: 0, background: "transparent" }}>
-        <CheckBox on={hazard.on} onChange={onToggle} label={hazard.name} />
+        {/* 40px, like the rating buttons: the one thing this screen exists to
+            record is ticked with gloves on. */}
+        <CheckBox on={hazard.on} onChange={onToggle} label={hazard.name} size={40} />
         <div style={{ flex: 1, minWidth: 0 }}>
           <div style={{ fontSize: 15 }}>{hazard.name}</div>
           <div style={{ fontSize: 11, color: "color-mix(in srgb, var(--color-text) 55%, transparent)" }}>{hazard.control}</div>

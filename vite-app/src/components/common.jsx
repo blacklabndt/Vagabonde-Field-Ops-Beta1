@@ -206,7 +206,13 @@ export function useMissingFields() {
   // went into the select as type-ahead and picked a client.
   useEffect(() => {
     if (!flagSeq) return;
-    const el = document.querySelector(".input.invalid");
+    // Inside the open dialog first, if there is one: the whole document's
+    // first invalid field could belong to the page behind it (a taken job
+    // number on Home while a dialog says "Client is required"), and the
+    // scroll and focus went there.
+    const dialogs = document.querySelectorAll(".dialog-backdrop");
+    const scope = dialogs.length ? dialogs[dialogs.length - 1] : document;
+    const el = scope.querySelector(".input.invalid") || document.querySelector(".input.invalid");
     if (!el) return;
     el.scrollIntoView({ block: "center", behavior: "smooth" });
     // preventScroll so focus doesn't fight the smooth scroll above.
@@ -334,7 +340,14 @@ export function SearchSelect({
   const choose = o => { onPick(o); setText(""); setOpen(false); if (inputRef.current) inputRef.current.blur(); };
 
   const onKeyDown = e => {
-    if (e.key === "Escape") { setOpen(false); return; }
+    if (e.key === "Escape") {
+      // With the list open, Escape closes the list and nothing else: it
+      // used to bubble on to the Dialog's window listener as well and take
+      // the half-filled form down with it. With the list closed it is the
+      // dialog's to handle.
+      if (open) { e.stopPropagation(); e.nativeEvent.stopImmediatePropagation(); setOpen(false); }
+      return;
+    }
     if (!open && (e.key === "ArrowDown" || e.key === "Enter")) { setOpen(true); return; }
     if (!open) return;
     if (e.key === "ArrowDown") { e.preventDefault(); setActive(i => Math.min(rows.length - 1, i + 1)); }

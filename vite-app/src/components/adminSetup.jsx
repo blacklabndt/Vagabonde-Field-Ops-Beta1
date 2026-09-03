@@ -78,7 +78,9 @@ export function AdminSetupScreen() {
     finally { setTesting(false); }
   };
 
-  const emailTestingMode = !form.fromReports.trim();
+  // Either sending address blank means some mail still goes out under the
+  // test sender — approvals ride the billing address, reports the other.
+  const emailTestingMode = !form.fromReports.trim() || !form.fromBilling.trim();
 
   if (loadState === "loading") return <div className="page"><Loading label="Loading settings…" /></div>;
 

@@ -1,6 +1,6 @@
 import React from "react";
 import { Blueprint, Btn, TableScroll, StatusTag } from "./common.jsx";
-import { money } from "../data.js";
+import { money, seesPrices } from "../data.js";
 
 // Open tickets — the tickets this person still has to send out to the
 // client: their drafts, and nothing else. Per Kyle. A ticket that has gone
@@ -13,9 +13,11 @@ export function OpenTicketsScreen({ tickets, loading, onOpenTicket, currentUser 
   // Integer-cents sum, per the house money rule (gstOn in data.js) — never
   // a running float of dollars, which drifts a half-cent low at some totals.
   const sum = arr => arr.reduce((s, t) => s + Math.round(t.amount * 100), 0) / 100;
-  // Amounts are an office concern — a technician just needs to see what is
-  // still to send and finish it.
-  const showAmounts = currentUser.role === "Admin" || currentUser.role === "Coordinator";
+  // The one price rule (data.js): Admins and Technicians see amounts, nobody
+  // else does. This screen used to say Admin-or-Coordinator, which hid a
+  // technician's own totals and showed a Coordinator figures the database
+  // refuses them everywhere else.
+  const showAmounts = seesPrices(currentUser);
   const oldest = open.reduce((m, t) => Math.max(m, t.age || 0), 0);
 
   return (

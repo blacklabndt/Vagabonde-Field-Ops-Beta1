@@ -47,10 +47,16 @@ async function queuedAt(ts, type, payload) {
 }
 
 // One IndexedDB database for the whole file — so every test leaves it empty.
-// With no owner set, everything in the store is "mine" and can be swept.
+// Swept as each owner the tests sign in as, then as nobody: with no owner
+// set only unstamped items are visible, so a sweep as nobody alone would
+// leave a signed-in technician's items behind for the next test to trip on.
+const OWNERS = ["tech-a", "tech-b", null];
 async function emptyOutbox() {
+  for (const owner of OWNERS) {
+    OfflineQueue.setOwner(owner);
+    for (const item of await OfflineQueue.list()) await OfflineQueue.remove(item.id);
+  }
   OfflineQueue.setOwner(null);
-  for (const item of await OfflineQueue.list()) await OfflineQueue.remove(item.id);
   nav.onLine = true;
 }
 beforeEach(emptyOutbox);
@@ -200,6 +206,19 @@ test("an item queued before anyone signed in belongs to whoever is here", async 
   OfflineQueue.setOwner("tech-b");
   const mine = await OfflineQueue.list();
   assert.equal(mine.length, 1, "an unstamped item predates the owner column, not the person");
+});
+
+test("with nobody signed in, a technician's queued work stays out of sight", async () => {
+  OfflineQueue.setOwner("tech-a");
+  await queuedAt(1_000, "ticket", { jobId: "J-11" });
+  // Signed out on the shared tablet: the outbox is nobody's to see or replay.
+  OfflineQueue.setOwner(null);
+  assert.deepEqual(await OfflineQueue.list(), [], "a null owner is not a master key");
+  let replayed = 0;
+  await OfflineQueue.flush({ ticket: async () => { replayed++; } });
+  assert.equal(replayed, 0);
+  OfflineQueue.setOwner("tech-a");
+  assert.equal((await OfflineQueue.list()).length, 1, "and it is still there for its owner");
 });
 
 test("the badge hears the current list at once, and again on every change", async () => {

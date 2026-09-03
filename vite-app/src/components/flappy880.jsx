@@ -249,7 +249,10 @@ export function Flappy880({ onClose, me }) {
   // here would silently eat every space typed into it.
   useEffect(() => {
     const onKey = e => {
-      if (e.key === "Escape") { onClose(); return; }
+      // Escape is this game's alone while it is open: heard in the capture
+      // phase and stopped there, so the drawer's own bubble-phase listener
+      // (the egg opens from inside the drawer) doesn't close the drawer too.
+      if (e.key === "Escape") { e.stopPropagation(); onClose(); return; }
       const t = e.target;
       if (t && (t.tagName === "INPUT" || t.tagName === "TEXTAREA" || t.isContentEditable)) return;
       if (e.key === " " || e.key === "ArrowUp") {
@@ -257,8 +260,8 @@ export function Flappy880({ onClose, me }) {
         if (!e.repeat) flap();                // holding the key down is not flying
       }
     };
-    window.addEventListener("keydown", onKey);
-    return () => window.removeEventListener("keydown", onKey);
+    window.addEventListener("keydown", onKey, true);
+    return () => window.removeEventListener("keydown", onKey, true);
   }, [flap, onClose]);
 
   useEffect(() => {

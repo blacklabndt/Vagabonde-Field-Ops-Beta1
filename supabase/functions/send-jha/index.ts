@@ -137,10 +137,14 @@ Deno.serve(async (req) => {
       attachments, tag: "jha"
     });
 
-    // 3. Record that it went, so the job detail can say so.
-    await admin.from("jhas").update({
+    // 3. Record that it went, so the job detail can say so. A failure here
+    // is said, not swallowed (see send-report).
+    const { error: markErr } = await admin.from("jhas").update({
       sent_at: new Date().toISOString(), sent_to: toList
     }).eq("id", jhaId);
+    if (markErr) {
+      throw new Error(`The assessment went out, but it couldn't be marked as sent — it may still show as unsent; don't send it again. (${markErr.message})`);
+    }
 
     return new Response(JSON.stringify({ ok: true, attached: !!attachments }), {
       headers: { ...corsHeaders, "Content-Type": "application/json" }

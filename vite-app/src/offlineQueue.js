@@ -56,9 +56,12 @@ async function oqDelete(id) {
 // A — and lands in B's panel as "won't sync", one tap from being discarded).
 // Every item is stamped with the profile that queued it, and everything
 // below shows and replays only the signed-in person's own. An item with no
-// owner predates the stamp and is treated as the current person's.
+// owner predates the stamp and is treated as the current person's. With
+// nobody signed in, only those unstamped items are anyone's: a null owner
+// used to mean "everything", which was one rendered outbox away from
+// showing tech A's queued day to whoever picked the tablet up next.
 let oqOwner = null;
-const oqMine = item => !item.owner || !oqOwner || item.owner === oqOwner;
+const oqMine = item => !item.owner || (!!oqOwner && item.owner === oqOwner);
 
 async function oqGetAll() {
   const db = await oqOpenDb();

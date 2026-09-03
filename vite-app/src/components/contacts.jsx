@@ -74,10 +74,18 @@ export function ContactsScreen({ currentUser }) {
   // being edited stays open with the typed values when the save fails,
   // rather than collapsing to the old ones under an error box at the top of
   // a scrolled page.
+  // Resolves to the failure rather than throwing it, so a button that fires
+  // and forgets can't leave an unhandled rejection — and hands the message
+  // back as well as posting it at the top of the page, so the card that was
+  // being edited (which stays open) can show it where the person is looking.
   const withError = async fn => {
     setError("");
     try { await fn(); await loadContacts(); return true; }
-    catch (e) { setError(e.message || "That didn't save — try again."); return false; }
+    catch (e) {
+      const message = e.message || "That didn't save — try again.";
+      setError(message);
+      return { error: message };
+    }
   };
 
   const addContact = form => withError(async () => {
@@ -255,7 +263,10 @@ function ContactForm({ heading, contact, org, onSave, onCancel, canSetPrimary })
     miss.clear();
     setErr("");
     setSaving(true);
-    try { await onSave(form); }
+    try {
+      const outcome = await onSave(form);
+      if (outcome && outcome.error) setErr(outcome.error);
+    }
     catch (e) { setErr(e.message || "Couldn't save that contact."); }
     setSaving(false);
   };
