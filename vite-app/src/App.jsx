@@ -820,7 +820,7 @@ export function App() {
       body = <UsersAccessScreen currentUser={currentUser} />;
       break;
     case "mail":
-      body = <AdminSetupScreen />;
+      body = <AdminSetupScreen currentUser={currentUser} />;
       break;
     case "chat":
       body = <TeamChatScreen currentUser={currentUser} onOpenJob={openJob} onRead={() => setChatUnread(0)} />;

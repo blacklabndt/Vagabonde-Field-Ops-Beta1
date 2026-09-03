@@ -3,7 +3,6 @@ import { primaryContact } from "../data.js";
 import { Db } from "../db.js";
 import { OfflineQueue } from "../offlineQueue.js";
 import { Blueprint, Btn, TableScroll, TagX, Field, Dialog, ErrorBox, StatusTag, useMissingFields, RowsPerPage, useRowsPerPage, SearchSelect, RequiredLeft } from "./common.jsx";
-import { ArchiveDialog } from "./archiveDialog.jsx";
 
 // What the error box calls each field, kept in step with its label above the
 // box it points at — "Site · LSD is required" is no help if the label reads
@@ -42,8 +41,6 @@ export function HomeScreen({ onCreateJob, onOpenJob, onStartTicket, currentUser,
   const [searchField, setSearchField] = useState("any");
   const [showNew, setShowNew] = useState(false);
   const [showNewTicket, setShowNewTicket] = useState(false);
-  // The Admin's Archive dropdown: "year" or "range" opens the dialog.
-  const [archiveMode, setArchiveMode] = useState(null);
   const [page, setPage] = useState(0);
   const [rows, setRows] = useState([]);
   const [total, setTotal] = useState(0);
@@ -170,17 +167,6 @@ export function HomeScreen({ onCreateJob, onOpenJob, onStartTicket, currentUser,
             phone the row wraps and .home-new-work's order lifts them up
             beside the pills; the auto margin holds the right edge on both. */}
         <div className="home-new-work" style={{ display: "flex", gap: 6, flex: "none", marginLeft: "auto" }}>
-          {/* Year-end, for the owner: everything on file for a period, as a
-              zip — and then, if they say so, the same jobs cleared from the
-              app. Admins only; nobody else sees the control. */}
-          {currentUser.role === "Admin" && (
-            <select className="input" aria-label="Archive" value="" style={{ width: "auto", minHeight: 38 }}
-              onChange={e => { if (e.target.value) setArchiveMode(e.target.value); }}>
-              <option value="">Archive…</option>
-              <option value="year">Archive a year</option>
-              <option value="range">Archive a date range</option>
-            </select>
-          )}
           {/* Raising a ticket used to mean finding the job on the board and
               opening it first. From here it is two choices — whose job, and
               which one — which is how a technician thinks about it at the end
@@ -275,13 +261,6 @@ export function HomeScreen({ onCreateJob, onOpenJob, onStartTicket, currentUser,
           onClose={() => setShowNew(false)}
           onCreate={async job => { setShowNew(false); await onCreateJob(job); reload(); }}
         />
-      )}
-
-      {archiveMode && (
-        <ArchiveDialog mode={archiveMode} currentUser={currentUser}
-          onClose={() => setArchiveMode(null)}
-          // The board is a different board once the jobs are gone.
-          onCleared={() => reload()} />
       )}
     </div>
   );

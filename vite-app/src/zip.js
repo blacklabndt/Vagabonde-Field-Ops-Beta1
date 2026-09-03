@@ -30,7 +30,9 @@ function crcTable() {
   return CRC_TABLE;
 }
 
-function crc32(bytes) {
+// Exported for the archive's manifest: the same CRC the entries carry, so a
+// downloaded zip can be read back and checked file by file.
+export function crc32(bytes) {
   const table = crcTable();
   let c = 0xFFFFFFFF;
   for (let i = 0; i < bytes.length; i++) c = table[(c ^ bytes[i]) & 0xFF] ^ (c >>> 8);

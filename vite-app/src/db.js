@@ -130,7 +130,10 @@ function shapeJob(j) {
     // The id as well as the name: a screen has to be able to ask "did I
     // raise this", and two people can share a name.
     createdBy: j.profiles ? j.profiles.name : "", createdById: j.created_by,
-    createdAt: stamp(j.created_at)
+    createdAt: stamp(j.created_at),
+    // The raw instant too: the display stamp has no year, and the archive
+    // files a job under the month it was raised.
+    createdAtIso: j.created_at || null
   };
 }
 

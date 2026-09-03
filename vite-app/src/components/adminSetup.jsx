@@ -1,6 +1,7 @@
 import React, { useState, useEffect } from "react";
 import { Db } from "../db.js";
-import { Blueprint, Btn, Field, ErrorBox, Loading } from "./common.jsx";
+import { Blueprint, Btn, Field, ErrorBox, Loading, TagX } from "./common.jsx";
+import { ArchiveDialog } from "./archiveDialog.jsx";
 
 // Admin — every key and address the app needs to be fully alive, in one
 // screen, each with the instructions for getting it. The software ships to
@@ -17,7 +18,9 @@ import { Blueprint, Btn, Field, ErrorBox, Loading } from "./common.jsx";
 const SECTION_TITLE = { fontFamily: "var(--font-heading)", fontWeight: 600, fontSize: 16, marginBottom: 4 };
 const SECTION_HELP = { fontSize: 13, color: "color-mix(in srgb, var(--color-text) 65%, transparent)", marginBottom: 12, lineHeight: 1.5 };
 
-export function AdminSetupScreen() {
+export function AdminSetupScreen({ currentUser }) {
+  // The Archive dropdown: "year" or "range" opens the dialog.
+  const [archiveMode, setArchiveMode] = useState(null);
   const [form, setForm] = useState({
     resendApiKey: "", fromReports: "", fromBilling: "", replyTo: "",
     klipyApiKey: "", approvalBaseUrl: ""
@@ -96,6 +99,27 @@ export function AdminSetupScreen() {
 
       <div style={{ display: "flex", flexDirection: "column", gap: 16, maxWidth: 640 }}>
         <ErrorBox>{error}</ErrorBox>
+
+        {/* Year-end. It lives here, not on Home, because its last step is
+            the one bulk delete in the app: the archive dialog only offers
+            the clear once the downloaded zip has been checked file by
+            file, and then only behind a typed word. */}
+        <Blueprint style={{ padding: "18px 20px", borderColor: "var(--color-accent-700)" }}>
+          <div style={SECTION_TITLE}>Archive</div>
+          <div style={SECTION_HELP}>
+            Every job raised in a year or a date range, as one zip filed client → month → job: the job's details
+            as a text file, its hazard assessments and reports as the PDFs on file, and each ticket's field invoice.
+            Building changes nothing. Once the zip on this computer has been checked against what was built, the
+            dialog offers to clear those jobs from the app to start fresh — the only bulk delete there is, so it is
+            kept off Home and behind a typed confirmation.
+          </div>
+          <select className="input" aria-label="Archive" value="" style={{ width: "auto", minHeight: 40 }}
+            onChange={e => { if (e.target.value) setArchiveMode(e.target.value); }}>
+            <option value="">Archive…</option>
+            <option value="year">Archive a year</option>
+            <option value="range">Archive a date range</option>
+          </select>
+        </Blueprint>
 
         <Blueprint style={{ padding: "18px 20px" }}>
           <div style={SECTION_TITLE}>Email — reports &amp; billing approvals</div>
@@ -222,7 +246,60 @@ export function AdminSetupScreen() {
           password-reset links land) and <strong>leaked-password protection</strong> (Authentication →
           Policies). The setup document covers both.
         </div>
+
+        <RecentErrorsPanel />
       </div>
+
+      {archiveMode && (
+        <ArchiveDialog mode={archiveMode} currentUser={currentUser} onClose={() => setArchiveMode(null)} />
+      )}
     </div>
+  );
+}
+
+// What the Edge Functions log when they fail — report emails, approvals, PDF
+// renders, account removals — that nobody would otherwise hear about until
+// a client or a tech complained. Admin-only, like the rest of this screen.
+// (It sat on Users & access; the owner asked for it here.)
+function RecentErrorsPanel() {
+  const [errors, setErrors] = useState([]);
+  const [loading, setLoading] = useState(true);
+  const [err, setErr] = useState("");
+
+  const load = () => {
+    setLoading(true);
+    Db.listFunctionErrors().then(setErrors).catch(e => setErr(e.message || "Couldn't load recent errors.")).finally(() => setLoading(false));
+  };
+  useEffect(() => { load(); }, []);
+
+  return (
+    <Blueprint style={{ padding: "18px 20px" }}>
+      <div style={{ display: "flex", alignItems: "center", gap: 10, marginBottom: 4 }}>
+        <div style={{ ...SECTION_TITLE, marginBottom: 0 }}>Recent background errors</div>
+        <Btn variant="secondary" style={{ marginLeft: "auto" }} onClick={load} disabled={loading}>{loading ? "Loading…" : "Refresh"}</Btn>
+      </div>
+      <div style={{ fontSize: 12, color: "color-mix(in srgb, var(--color-text) 60%, transparent)", marginBottom: 14 }}>
+        Failures in report emails, ticket approvals, PDF rendering, and account removal — logged here so they don't go unnoticed.
+      </div>
+      <ErrorBox>{err}</ErrorBox>
+      {!loading && !errors.length && !err && (
+        <div style={{ fontSize: 13, color: "color-mix(in srgb, var(--color-text) 55%, transparent)" }}>Nothing logged — everything's been going through cleanly.</div>
+      )}
+      {errors.length > 0 && (
+        <div style={{ display: "grid", gap: 8 }}>
+          {errors.map(e => (
+            <div key={e.id} style={{ border: "1px solid var(--color-neutral-300)", padding: "10px 12px", fontSize: 13 }}>
+              <div style={{ display: "flex", gap: 8, alignItems: "center" }}>
+                <TagX variant="outline">{e.function_name}</TagX>
+                <span style={{ fontSize: 11, color: "color-mix(in srgb, var(--color-text) 55%, transparent)", marginLeft: "auto" }}>
+                  {new Date(e.created_at).toLocaleString("en-CA", { day: "2-digit", month: "short", hour: "numeric", minute: "2-digit" })}
+                </span>
+              </div>
+              <div style={{ marginTop: 4 }}>{e.message}</div>
+            </div>
+          ))}
+        </div>
+      )}
+    </Blueprint>
   );
 }

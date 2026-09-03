@@ -254,55 +254,7 @@ export function UsersAccessScreen({ currentUser }) {
       )}
 
       {showNew && <NewUserDialog onClose={() => setShowNew(false)} onCreated={async () => { setShowNew(false); await load(); }} />}
-
-      <RecentErrorsPanel />
     </div>
-  );
-}
-
-// What went wrong in the background — report emails, ticket approvals, PDF
-// renders, account deletions — that nobody would otherwise hear about until
-// a client or a tech complained. Admin-only, same as the rest of this screen.
-function RecentErrorsPanel() {
-  const [errors, setErrors] = useState([]);
-  const [loading, setLoading] = useState(true);
-  const [err, setErr] = useState("");
-
-  const load = () => {
-    setLoading(true);
-    Db.listFunctionErrors().then(setErrors).catch(e => setErr(e.message || "Couldn't load recent errors.")).finally(() => setLoading(false));
-  };
-  useEffect(() => { load(); }, []);
-
-  return (
-    <Blueprint style={{ padding: "18px 20px", marginTop: 20 }}>
-      <div style={{ display: "flex", alignItems: "center", gap: 10, marginBottom: 4 }}>
-        <h4 style={{ margin: 0, fontSize: 19 }}>Recent background errors</h4>
-        <Btn variant="secondary" style={{ marginLeft: "auto" }} onClick={load} disabled={loading}>{loading ? "Loading…" : "Refresh"}</Btn>
-      </div>
-      <div style={{ fontSize: 12, color: "color-mix(in srgb, var(--color-text) 60%, transparent)", marginBottom: 14 }}>
-        Failures in report emails, ticket approvals, PDF rendering, and account removal — logged here so they don't go unnoticed.
-      </div>
-      <ErrorBox>{err}</ErrorBox>
-      {!loading && !errors.length && !err && (
-        <div style={{ fontSize: 13, color: "color-mix(in srgb, var(--color-text) 55%, transparent)" }}>Nothing logged — everything's been going through cleanly.</div>
-      )}
-      {errors.length > 0 && (
-        <div style={{ display: "grid", gap: 8 }}>
-          {errors.map(e => (
-            <div key={e.id} style={{ border: "1px solid var(--color-neutral-300)", padding: "10px 12px", fontSize: 13 }}>
-              <div style={{ display: "flex", gap: 8, alignItems: "center" }}>
-                <TagX variant="outline">{e.function_name}</TagX>
-                <span style={{ fontSize: 11, color: "color-mix(in srgb, var(--color-text) 55%, transparent)", marginLeft: "auto" }}>
-                  {new Date(e.created_at).toLocaleString("en-CA", { day: "2-digit", month: "short", hour: "numeric", minute: "2-digit" })}
-                </span>
-              </div>
-              <div style={{ marginTop: 4 }}>{e.message}</div>
-            </div>
-          ))}
-        </div>
-      )}
-    </Blueprint>
   );
 }
 

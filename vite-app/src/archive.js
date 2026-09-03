@@ -1,17 +1,18 @@
 // The archive: every job raised in a chosen period, with its details as a
 // text file, its hazard assessments and reports as the PDFs on file, and
-// each ticket's field invoice as HTML — one folder per job, zipped in the
-// browser. Built for the owner's year-end: download the year, then (if
-// they choose, on the Home screen) clear those jobs from the app and
-// start fresh.
+// each ticket's field invoice as HTML — filed client → month → job, zipped
+// in the browser. Built for the owner's year-end from the Admin screen:
+// download the year, check the zip that landed, then (if they choose) clear
+// those jobs from the app and start fresh.
 //
-// Everything here except buildArchive is pure, so the folder naming and the
-// text file are unit-tested without a database — which is also why this
-// module never imports the data layer: buildArchive is handed it (`db`) by
-// the dialog, and the tests never load config.js's browser-only env.
+// Everything here except buildArchive is pure, so the folder naming, the
+// text file and the zip check are unit-tested without a database — which is
+// also why this module never imports the data layer: buildArchive is handed
+// it (`db`) by the dialog, and the tests never load config.js's browser-only
+// env.
 
 import { money, gstOn } from "./data.js";
-import { makeZip, safeFilename } from "./zip.js";
+import { makeZip, safeFilename, crc32 } from "./zip.js";
 
 const enc = new TextEncoder();
 const text = s => enc.encode(String(s ?? ""));
@@ -21,16 +22,33 @@ export function archiveZipName(mode, from, to) {
   return `Archive ${from} to ${to}.zip`;
 }
 
-// One folder per job: number and project, safe for every filesystem, and
-// unique even when two jobs share a project name. Kept short — a zip path
-// that runs past what Windows Explorer will open is an archive nobody can
-// read.
-export function jobFolderNames(jobs) {
+// The month a job was raised, as a folder: "2026-08". From the raw instant
+// on the local clock (the crew's, Edmonton); a job with no usable date files
+// under "Undated" rather than under the wrong month.
+export function monthFolderOf(job) {
+  const iso = job.createdAtIso;
+  if (iso) {
+    const d = new Date(iso);
+    if (!isNaN(d)) return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}`;
+  }
+  const m = /^(\d{4})-(\d{2})/.exec(String(job.createdAt || ""));
+  return m ? `${m[1]}-${m[2]}` : "Undated";
+}
+
+// One folder per job, under its client and the month it was raised:
+//   Athabasca Oil/2026-08/S-1004 - Pipeline tie-in
+// Safe for every filesystem, unique even when two jobs share a project
+// name, and kept short — a zip path that runs past what Windows Explorer
+// will open is an archive nobody can read.
+export function jobFolderPaths(jobs) {
   const used = new Map();
   return jobs.map(j => {
+    const client = safeFilename(String(j.client || ""), "").slice(0, 48).trim() || "No client";
+    const month = monthFolderOf(j);
     const number = safeFilename(String(j.id || ""), "job");
     const project = safeFilename(String(j.project || ""), "").slice(0, 48).trim();
-    const base = (project ? `${number} - ${project}` : number).slice(0, 80).trim();
+    const leaf = (project ? `${number} - ${project}` : number).slice(0, 80).trim();
+    const base = `${client}/${month}/${leaf}`;
     const n = (used.get(base) || 0) + 1;
     used.set(base, n);
     return n > 1 ? `${base} (${n})` : base;
@@ -69,7 +87,7 @@ export function csvCell(v) {
 }
 export const csv = rows => rows.map(r => r.map(csvCell).join(",")).join("\r\n") + "\r\n";
 
-export function jobDetailsText({ job, record = {}, tickets = [], jhas = [], reports = [], missing = [], meta = {} }) {
+export function jobDetailsText({ job, record = {}, tickets = [], jhas = [], reports = [], missing = [], notOnFile = [], meta = {} }) {
   const out = [];
   out.push("VagaboNDE Field Ops · job archive");
   out.push(`Job ${job.id}${job.project ? ` · ${job.project}` : ""}`);
@@ -140,6 +158,10 @@ export function jobDetailsText({ job, record = {}, tickets = [], jhas = [], repo
     out.push(`    PDF: ${r.archived || "(not on file)"}`);
   }
 
+  if (notOnFile.length) {
+    out.push("", "NO PDF ON FILE (the details above are the record)");
+    notOnFile.forEach(m => out.push(`  ${m}`));
+  }
   if (missing.length) {
     out.push("", "NOT RETRIEVED");
     missing.forEach(m => out.push(`  ${m}`));
@@ -148,33 +170,47 @@ export function jobDetailsText({ job, record = {}, tickets = [], jhas = [], repo
 }
 
 // Reads everything, builds the zip. `db` is the data layer (Db), handed in
-// by the caller; the progress callback drives the dialog's status line.
+// by the caller; the progress callback drives the dialog's status line. The
+// manifest — every entry's name, size and CRC — is what verifyZip checks
+// the downloaded file against.
 export async function buildArchive({ jobs, mode, from, to, by = "", onProgress = () => {}, db }) {
   if (!db) throw new Error("buildArchive needs the data layer.");
-  const folders = jobFolderNames(jobs);
+  const paths = jobFolderPaths(jobs);
   const files = [];
+  const manifest = [];
   const summary = {
     jobs: jobs.length, tickets: 0, awaiting: 0, approved: 0, jhas: 0, reports: 0, invoices: 0,
-    missing: [], bytes: 0, beforeGstCents: 0
+    // Retrieval failures: the archive is not complete while any exist.
+    missing: [],
+    // Assessments and reports with no PDF ever filed: nothing to retrieve;
+    // their details are in the job text file.
+    notOnFile: [],
+    bytes: 0, beforeGstCents: 0, clients: new Set()
   };
   const range = mode === "year" ? `archive of ${String(from).slice(0, 4)}` : `archive of ${from} to ${to}`;
   const meta = { at: fmtWhen(new Date().toISOString()), by, range };
-  const add = (name, data) => { files.push({ name, data }); summary.bytes += data.length; };
-  const index = [["Job", "Project", "Client", "Contractor", "Status", "Raised", "Tickets", "Before GST", "JHAs", "Reports", "Folder"]];
+  const add = (name, data) => {
+    files.push({ name, data });
+    manifest.push({ name, size: data.length, crc: crc32(data) });
+    summary.bytes += data.length;
+  };
+  const index = [["Client", "Month", "Job", "Project", "Contractor", "Status", "Raised", "Tickets", "Before GST", "JHAs", "Reports", "Folder"]];
 
   for (let i = 0; i < jobs.length; i++) {
     const job = jobs[i];
-    const folder = folders[i];
+    const folder = paths[i];
+    summary.clients.add(job.client || "No client");
     const say = step => onProgress({ index: i, count: jobs.length, job: job.id, step, bytes: summary.bytes });
     say("reading the job");
     const [record, jhas, reports, ticketRows] = await Promise.all([
       db.getJobRecord(job), db.listJhasForJob(job.dbId), db.listReportsForJob(job.dbId), db.listTicketsForJob(job.dbId)
     ]);
     const missing = [];
+    const notOnFile = [];
     const used = new Map();
 
     for (const j of jhas) {
-      if (!j.pdfKey) { missing.push(`JHA of ${j.workDate || j.at}: no PDF on file`); continue; }
+      if (!j.pdfKey) { notOnFile.push(`JHA of ${j.workDate || j.at}`); continue; }
       say(`JHA ${j.workDate || ""}`);
       try {
         const bytes = await db.downloadObject("jhas", j.pdfKey);
@@ -187,7 +223,7 @@ export async function buildArchive({ jobs, mode, from, to, by = "", onProgress =
       }
     }
     for (const r of reports) {
-      if (!r.pdfKey) { missing.push(`Report ${r.file}: no PDF on file`); continue; }
+      if (!r.pdfKey) { notOnFile.push(`Report ${r.file}`); continue; }
       say(`report ${r.file}`);
       try {
         const bytes = await db.downloadObject("reports", r.pdfKey);
@@ -223,9 +259,10 @@ export async function buildArchive({ jobs, mode, from, to, by = "", onProgress =
     }
     summary.beforeGstCents += jobCents;
 
-    add(`${folder}/Job details.txt`, text(jobDetailsText({ job, record, tickets, jhas, reports, missing, meta })));
+    add(`${folder}/Job details.txt`, text(jobDetailsText({ job, record, tickets, jhas, reports, missing, notOnFile, meta })));
     summary.missing.push(...missing.map(m => `${job.id}: ${m}`));
-    index.push([job.id, job.project || "", job.client || "", job.contractor || "", job.status || "", job.createdAt || "",
+    summary.notOnFile.push(...notOnFile.map(m => `${job.id}: ${m}`));
+    index.push([job.client || "No client", monthFolderOf(job), job.id, job.project || "", job.contractor || "", job.status || "", job.createdAt || "",
       String(tickets.length), money(dollars(jobCents)), String(jhas.length), String(reports.length), folder]);
   }
 
@@ -234,14 +271,63 @@ export async function buildArchive({ jobs, mode, from, to, by = "", onProgress =
     "VagaboNDE Field Ops · job archive",
     `Built ${meta.at}${by ? ` by ${by}` : ""} · ${range}`,
     "",
-    `${summary.jobs} job(s), ${summary.tickets} ticket(s), ${summary.jhas} hazard assessment PDF(s), ${summary.reports} report PDF(s), ${summary.invoices} invoice(s).`,
-    "One folder per job (see Index.csv). In each: Job details.txt (the job record, every ticket with its lines and crew hours, every assessment and report), JHAs/ and Reports/ (the PDFs as filed), Invoices/ (each ticket's field invoice as HTML — open in any browser).",
+    `${summary.jobs} job(s) for ${summary.clients.size} client(s): ${summary.tickets} ticket(s), ${summary.jhas} hazard assessment PDF(s), ${summary.reports} report PDF(s), ${summary.invoices} invoice(s).`,
+    "Filed client → month raised → job (see Index.csv). In each job's folder: Job details.txt (the job record, every ticket with its lines and crew hours, every assessment and report), JHAs/ and Reports/ (the PDFs as filed), Invoices/ (each ticket's field invoice as HTML — open in any browser).",
     "Jobs were chosen by the day they were raised. Amounts are before GST unless marked.",
+    summary.notOnFile.length ? "" : null,
+    summary.notOnFile.length ? "No PDF was ever filed for (their details are in the job text files):" : null,
+    ...summary.notOnFile.map(m => `  ${m}`),
     summary.missing.length ? "" : null,
-    summary.missing.length ? "Not retrieved:" : null,
+    summary.missing.length ? "NOT RETRIEVED — this archive is not complete:" : null,
     ...summary.missing.map(m => `  ${m}`)
   ].filter(l => l !== null).join("\n") + "\n"));
 
   onProgress({ index: jobs.length, count: jobs.length, job: "", step: "zipping", bytes: summary.bytes });
-  return { blob: makeZip(files), summary };
+  summary.clients = summary.clients.size;
+  return { blob: makeZip(files), summary, manifest };
+}
+
+// Reads a zip's central directory and checks every entry the build wrote is
+// there, at the same size, with the same CRC — the proof that the file on
+// the owner's disk is the archive that was built, before anything is
+// cleared. Stored entries only (which is all makeZip writes); no zip64.
+export function verifyZip(bytes, manifest) {
+  const u8 = bytes instanceof Uint8Array ? bytes : new Uint8Array(bytes);
+  const dv = new DataView(u8.buffer, u8.byteOffset, u8.byteLength);
+  const u16 = o => dv.getUint16(o, true);
+  const u32 = o => dv.getUint32(o, true);
+  if (u8.length < 22) return { ok: false, reason: "This isn't a zip file — it is too short to be one.", checked: 0, problems: [] };
+  // The end-of-central-directory record sits at the end, behind a comment of
+  // at most 65,535 bytes.
+  let eocd = -1;
+  for (let i = u8.length - 22; i >= Math.max(0, u8.length - 22 - 65535); i--) {
+    if (u32(i) === 0x06054B50) { eocd = i; break; }
+  }
+  if (eocd < 0) return { ok: false, reason: "This isn't a zip file, or the download was cut short.", checked: 0, problems: [] };
+  const total = u16(eocd + 10);
+  const cdOffset = u32(eocd + 16);
+  const found = new Map();
+  const dec = new TextDecoder();
+  let p = cdOffset;
+  for (let i = 0; i < total; i++) {
+    if (p + 46 > u8.length || u32(p) !== 0x02014B50) {
+      return { ok: false, reason: "The zip's directory is damaged — the download may have been cut short.", checked: 0, problems: [] };
+    }
+    const crc = u32(p + 16);
+    const size = u32(p + 24);
+    const nameLen = u16(p + 28), extraLen = u16(p + 30), commentLen = u16(p + 32);
+    const name = dec.decode(u8.subarray(p + 46, p + 46 + nameLen));
+    found.set(name, { crc, size });
+    p += 46 + nameLen + extraLen + commentLen;
+  }
+  const problems = [];
+  const expected = new Set();
+  for (const m of manifest) {
+    expected.add(m.name);
+    const f = found.get(m.name);
+    if (!f) problems.push(`missing: ${m.name}`);
+    else if (f.size !== m.size || f.crc !== m.crc) problems.push(`damaged: ${m.name}`);
+  }
+  for (const name of found.keys()) if (!expected.has(name)) problems.push(`not from this build: ${name}`);
+  return { ok: problems.length === 0, reason: "", checked: manifest.length, problems };
 }
