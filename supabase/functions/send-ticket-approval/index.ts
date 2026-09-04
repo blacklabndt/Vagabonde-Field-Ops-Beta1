@@ -185,7 +185,7 @@ Deno.serve(async (req) => {
 
     // The token exists only in memory until this lands. If the write fails,
     // the emailed link points at a token no row holds — approve-ticket would
-    // tell the rep the link was already used — so a failure here has to
+    // tell the rep the link is no longer valid — so a failure here has to
     // surface as one, not vanish behind ok:true.
     //
     // Stored hashed (see _shared/approvalToken.ts): the row is readable by

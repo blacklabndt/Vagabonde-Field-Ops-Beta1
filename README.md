@@ -11,13 +11,17 @@ promoted to its own standalone repository. Nothing was rewritten for the
 promotion — the source had already been through five lead-developer review
 passes, and its correctness lives in details a rewrite would only re-risk.
 What changed is the packaging: the Worker and its `wrangler.jsonc` moved
-inside the project (they sat above it in the prototype workspace), the repo
-root is the project root, and the version is stamped `1.0.0-beta.1`.
+inside the project (they sat above it in the prototype workspace), and the
+repo root is the project root. The version the app reports is
+`vite-app/package.json`'s — `0.9.0-Beta` today — stamped into the bundle at
+build time with the commit and the date, and shown at the bottom of the
+drawer on every device.
 
 Screens: the nine from the original design handoff — dialogs, ticket
-numbering, rate calculation, light/dark theme — plus six that grew out of
-running it: Files, Contacts, Equipment, Timesheets, Open tickets, and the
-admin billing tracker. And two easter eggs nobody should document further.
+numbering, rate calculation, light/dark theme — plus eight that grew out of
+running it: Files, Contacts, Equipment, Timesheets, Open tickets, the admin
+billing tracker, Team chat, and the Admin screen the app is configured from.
+And two easter eggs nobody should document further.
 
 ## Run it
 
@@ -149,9 +153,13 @@ Four rules, all learned the hard way, all costing more than they look:
 `private.tab_access()` is the single source: it reads the tab list from the
 JWT when the access-token hook has put it there, and falls back to querying
 `profiles` when it hasn't. That fallback is what makes the hook optional and
-safe to toggle — see "Turning on the token hook" below.
-- **Storage buckets** `reports`, `jhas` and `shared`, all private,
-  readable/writable only through the same tab-based policies. PDFs get
+safe to toggle — see "The token hook" below.
+- **Storage buckets** `reports`, `jhas`, `shared`, `timesheets` and
+  `chat-media`, all private. Most are gated by the same tab policies as the
+  tables; `timesheets` is the Admin's own (plus each person's own folder,
+  which is how a technician gets their approval PDF), and `chat-media` — the
+  chat's pictures and voice notes, capped at 8 MB — answers to the `chat`
+  tab, with uploads confined to a folder named for the sender. PDFs get
   signed URLs, never public ones.
 - **A trigger that provisions a profile automatically** when a new Supabase
   Auth user is created, seeding `tab_access` from `public.tabs_for_role()` —
@@ -188,6 +196,7 @@ tables.
 | Report upload (mobile + dialog) | The PDF uploads to the private `reports` bucket, plus a `reports` row; emailing it is a separate, recoverable step |
 | Billing ticket (mobile) | Prices every weld and charge line against the client's *published* rate schedule, and records the crew's hours, solo hours and dose |
 | Open tickets | A technician's own unbilled tickets — drafts to finish, signatures to chase |
+| Team chat | One crew-wide room: pictures, voice notes, GIFs, replies, pins, unread badge and Web Push. Unpinned messages expire after 30 days; job numbers in a message linkify to the job |
 | Billing tracker | Every ticket across every job, paged server-side, with the four totals as one RPC rather than a full table scan in the browser |
 | Rate admin | Rate lines write straight to `rate_lines` (debounced); "Fill from default" copies the house card into any rate still at zero; rate history is logged by a trigger |
 | Files | A private `shared` bucket browsed directly; folders are path prefixes, not a table, so the listing can't drift from what's stored |
@@ -195,6 +204,7 @@ tables.
 | Equipment | Exposure devices, survey meters, dosimeters and tools with calibration dates; the JHA pre-fills each worker's kit from what's assigned here |
 | Timesheets | Hours, solo hours, dose and mileage per person per pay period, derived from ticket crew rows; admin approves a period, and "Export to Excel" builds a two-sheet workbook |
 | Users & access | Accounts, tab permissions, role presets, and a panel of recent background errors from the Edge Functions |
+| Admin | The settings that used to be function secrets — Resend key and sending addresses, the approval-link base URL, the KLIPY key — in one Admin-only row, plus a test email and the year/date-range archive |
 
 ### Offline
 
@@ -263,33 +273,51 @@ to discard an item that is never going to land. Ticket numbers are minted by
 the database at save time rather than in the browser, so a ticket built
 offline at 07:00 can't collide with one raised while it was waiting.
 
-### Two things that need real accounts to work fully
+### Two things that need the Edge Functions deployed
 
-- **Creating a user** (Users & access → "+ New user") calls
-  `supabase.auth.signUp()` on a throwaway client instance, which creates a
-  *real* Supabase Auth account — not just a `profiles` row — and the
-  `on_auth_user_created` trigger provisions their profile from the role you
-  picked. If this project has "Confirm email" turned on (the Supabase
-  default), that new person has to click the confirmation email before
-  they can sign in.
-- **Removing a user** goes through the `delete-user` Edge Function, which
-  holds the service-role key and deletes the profile row *and* the auth
-  account behind it. Deploy that function or the button reports an error —
-  nothing in a client app should ever hold that key.
+- **Creating a user** (Users & access → "+ New user") goes through the
+  `create-user` Edge Function, which holds the service-role key. It checks
+  that the caller is a signed-in Admin, creates a *real* Supabase Auth
+  account already email-confirmed (so there is no confirmation step to
+  chase), and then writes the rank and its tabs itself. The browser's
+  `signUp()` is deliberately not used and signups are disabled: that
+  endpoint answers to anyone holding the publishable key, so the
+  provisioning trigger caps a metadata role to Technician or Helper and the
+  real rank is only ever set by the function, Admin-to-Admin. Tick
+  **Invite** and the account gets a password nobody knows plus a
+  set-password link by email.
+- **Removing a user** goes through the `delete-user` Edge Function, also
+  service-role. An account with no work on file is deleted outright, auth
+  row and all. An account with tickets, JHAs or jobs against it is *locked*
+  instead — banned in Auth, every tab removed, `deactivated_at` stamped —
+  because the foreign keys are what keep a name on the history it signed.
+  The screen says which of the two happened. Deploy both functions or the
+  buttons report an error; nothing in a client app should ever hold that key.
 
-### Turning on the token hook
+### The token hook
 
 `public.custom_access_token_hook` puts each account's `tab_access` and role
-into their JWT, so RLS reads them from the token instead of querying
-`profiles` at all. The function, its grants and the auth-admin read policy are
-already deployed; the hook itself still needs enabling once, in
-**Authentication → Hooks → Customize Access Token (JWT) Claims**, pointed at
-`public.custom_access_token_hook`.
+into their JWT. The function, its grants and the auth-admin read policy are
+deployed; whether the hook itself is switched on is a dashboard setting
+(**Authentication → Hooks → Customize Access Token (JWT) Claims**) that
+nothing in this repository can read back — and deliberately nothing has to.
 
-It is deliberately optional. `private.tab_access()` falls back to the table
-whenever the claim is absent, so nothing breaks before it is enabled, and
-sessions holding tokens minted beforehand keep working until they refresh.
-Turning it off again is equally safe.
+It is optional in both directions. `private.tab_access()` and
+`private.user_role()` read the claim when it is there and query `profiles`
+when it isn't, so the same answer comes back either way; enabling it changes
+how often the table is read, not what the rules decide. Sessions holding
+tokens minted before a change keep working until they refresh. Turning it off
+again is equally safe. The app's own menu never asks the token at all — the
+drawer is drawn from the `profiles` row read at sign-in, so a tab granted or
+revoked shows up on the next sign-in whatever the hook is doing.
+
+The one thing to know is what a live claim costs while it is enabled: a token
+is a *copy* of the row, an hour stale at the outside, so a demoted or locked
+account keeps whatever the claim says until it refreshes. That is what
+`supabase/handover/PENDING-audit-migration.sql` closes — it makes both
+functions read `profiles` only, and answer as though a deactivated account
+had no rank and no tabs. After it is applied the hook is a UI convenience and
+nothing more.
 
 `config.toml` carries the setting under `[auth.hook.custom_access_token]`, but
 **do not run `supabase config push` to apply it** — that file was generated by
@@ -297,10 +325,6 @@ Turning it off again is equally safe.
 auth settings (site URL, redirect URLs, email confirmation, JWT expiry) with
 them. Either use the dashboard, or reconcile the whole file against the live
 project first.
-
-The trade this buys performance with: a permissions change now takes effect on
-the user's next token refresh (default one hour) rather than their next
-request. Removing a profile is still immediate, because sign-in checks for one.
 
 ### One low-priority item left as-is
 
@@ -318,12 +342,18 @@ in the [Supabase dashboard](https://supabase.com/dashboard/project/eielmvxzdwwpr
 2. Check **Auto Confirm User** (so they can sign in immediately, no email step).
 3. Under **User Metadata**, add JSON like:
    ```json
-   { "name": "R. Vandenberg", "role": "Admin", "cert": "Lvl III · CGSB 48.9712" }
+   { "name": "R. Vandenberg", "role": "Technician", "cert": "Lvl III · CGSB 48.9712" }
    ```
-   `role` must be exactly `Admin`, `Coordinator`, `Technician` or `Helper` —
-   the trigger uses it to set their tab access.
 
-Or use the app's own **Users & access → + New user**, once one admin exists.
+The provisioning trigger reads that `name` and `cert`, but it will only
+honour a `role` of `Technician` or `Helper`, and files anything else — an
+absent role included — as `Technician`. That is deliberate: the metadata on
+this route is attacker-controlled on the signup endpoint, so rank is never
+taken from it. Which means the *first* admin cannot be made this way. Promote
+one by hand, once, with `supabase/RESTORE-ADMIN.sql` (put the address in and
+run it in the SQL editor) — after that every account is created from the
+app's own **Users & access → + New user**, where an Admin's own session is
+what authorises the rank.
 
 ## Structure
 
@@ -345,9 +375,24 @@ vite-app/
     offlineQueue.js         IndexedDB queue + auto-replay for the three field screens
     offlineCache.js         IndexedDB read-through cache — the jobs board and the
                             field path, kept usable with no signal
+    paging.js               reading past PostgREST's silent 1,000-row cap: by offset
+                            for reference lists, by key for anything billed or paid
     session.js              sign-in restore: whose session it is, and what to do when
                             the network can't answer (unit-tested, no React)
-    session.test.mjs        `npm test` — node --test, no browser needed
+    recovery.js             catches a password-reset landing at import, before
+                            supabase-js consumes the hash and the one-shot event
+    swUpdates.js            asks for a new version on a timer, on foreground and on
+                            reconnect; drives the Restart now / Postpone banner
+    toastBus.js             the data layer announces its own writes; App's one Toast
+                            listens, so no screen has to remember to confirm a save
+    chatMerge.js            the chat's merge — every path a message arrives by goes
+                            through it, so nothing doubles and a fuller copy wins
+    archive.js              builds the year-end archive: client → month → job, with
+                            a manifest the downloaded zip is checked back against
+    zip.js                  a minimal ZIP writer, so the archive needs no CDN library
+    *.test.mjs              `npm test` — node --test plus the render-name scan, no
+                            browser needed (archive, chat merge, dates, numbers,
+                            offline cache and queue, paging, periods, session, zip…)
     components/
       common.jsx            Blueprint frame, Btn, TagX, Field, Dialog, Switch, ErrorBoundary…
       auth.jsx              Sign in
@@ -358,6 +403,7 @@ vite-app/
       uploadMobile.jsx      Report upload (phone)
       ticketMobile.jsx      Billing ticket (phone) — typed weld/charge quantities, crew & dose
       openTickets.jsx       A technician's own unbilled tickets
+      teamChat.jsx          Team chat — pictures, voice notes, GIFs, replies, pins
       files.jsx             Shared files browser over the `shared` bucket
       contacts.jsx          Client/contractor directory, primary contact per org
       equipment.jsx         Equipment register + calibration due dates
@@ -365,18 +411,32 @@ vite-app/
       rateAdmin.jsx         Rate schedules, rate history + job-level overrides
       billingTracker.jsx    Unsigned-money tracker
       usersAccess.jsx       Accounts, tab permissions, background-error log
+      adminSetup.jsx        Admin screen: Resend + KLIPY keys, app address, archive
+      archiveDialog.jsx     Build the archive zip, check it, then unlock the clear
       queuePanel.jsx        The offline-queue badge and its what's-waiting panel
+      flappy880.jsx         One of the two easter eggs
 supabase/
   migrations/               schema, applied in filename order
-  functions/                Edge Functions (report + ticket-approval email, JHA PDF render, user deletion)
-  *.sql                     one-off operator runbooks, each idempotent — paste into the SQL editor
+  functions/                thirteen Edge Functions — the three that send mail
+                            (send-report, send-jha, send-ticket-approval), the two
+                            that render PDFs (render-invoice, render-jha), the client
+                            approval page (approve-ticket), account handling
+                            (create-user, delete-user, password-reset), the chat's
+                            push and nightly cleanup (chat-push, chat-retention),
+                            gif-search and mail-test; plus `_shared/`, which is
+                            library code, not a function
+  handover/                 the handover runbooks — the two wipes, and any DB fix
+                            written but not yet applied (PENDING-audit-migration.sql)
+  *.sql                     one-off operator scripts (seed jobs, restore an admin),
+                            each idempotent — paste into the SQL editor
 _ds/industry-.../styles.css the design system as handed off; the copy under
                             vite-app/public is what the app actually serves
 ```
 
 The office-facing screens (Files, Contacts, Equipment, Timesheets, Rate
-admin, Billing tracker, Users & access) are `React.lazy` chunks — a
-technician who never opens Rate admin doesn't download it.
+admin, Billing tracker, Users & access, Admin) are `React.lazy` chunks, and
+so are Team chat and the arcade — a technician who never opens Rate admin
+doesn't download it.
 
 ## Known gaps against the handoff (flagged, not hidden)
 
@@ -384,9 +444,11 @@ technician who never opens Rate admin doesn't download it.
   isn't cross-linked into the billing ticket's per-weld tally yet — the
   ticket screen bills by size/method quantity, as specced, but doesn't yet
   pull those quantities from uploaded report data.
-- "Flag as chased" next to each ticket in the billing tracker is deliberately
-  view-local bookkeeping: it sends nothing, and it doesn't survive a reload.
-  "Chase all unsigned" beside it does really re-send.
+- "Flag as chased" next to each ticket in the billing tracker sends nothing —
+  it is the record of a phone call, written to `tickets.chased_at`, so it
+  survives a reload and every admin sees the same answer. "Chase all
+  unsigned" beside it is the one that really re-sends, and it skips anything
+  chased in the last three days.
 - The mobile JHA builder collects no signature. The account filing the
   assessment is the record of who filed it, which is why the screen says so
   rather than drawing a signature box that means less than it looks like.

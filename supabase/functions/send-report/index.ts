@@ -58,6 +58,10 @@ Deno.serve(async (req) => {
       .select("id, filename, pdf_key, welds, result, jobs(job_number, project, clients(name))")
       .eq("id", reportId).single();
     if (rErr || !report) throw new Error("Report not found, or you don't have access to it");
+    // Without a PDF there is no attachment and no link — the contractor gets
+    // an email carrying nothing while the row is stamped as sent, which is
+    // how a report quietly never goes out. Same guard as send-jha.
+    if (!report.pdf_key) throw new Error("This report has no PDF on file — nothing was sent. Upload it first.");
 
     const job = report.jobs as any;
     const admin = createClient(
@@ -71,32 +75,30 @@ Deno.serve(async (req) => {
     let attachments = undefined;
     let attachmentNote = "";
 
-    if (report.pdf_key) {
-      const { data: signed } = await admin.storage
-        .from("reports").createSignedUrl(report.pdf_key, 60 * 60 * 24 * 14);
-      link = signed?.signedUrl ?? "";
+    const { data: signed } = await admin.storage
+      .from("reports").createSignedUrl(report.pdf_key, 60 * 60 * 24 * 14);
+    link = signed?.signedUrl ?? "";
 
-      const { data: blob } = await admin.storage.from("reports").download(report.pdf_key);
-      if (blob) {
-        const bytes = new Uint8Array(await blob.arrayBuffer());
-        if (bytes.length <= MAX_ATTACHMENT_BYTES) {
-          attachments = [{
-            Name: report.filename,
-            Content: base64(bytes),
-            ContentType: "application/pdf"
-          }];
-        } else {
-          attachmentNote =
-            "<p style=\"color:#6b6d6e\">The file was too large to attach — use the link above to download it.</p>";
-        }
+    const { data: blob } = await admin.storage.from("reports").download(report.pdf_key);
+    if (blob) {
+      const bytes = new Uint8Array(await blob.arrayBuffer());
+      if (bytes.length <= MAX_ATTACHMENT_BYTES) {
+        attachments = [{
+          Name: report.filename,
+          Content: base64(bytes),
+          ContentType: "application/pdf"
+        }];
+      } else {
+        attachmentNote =
+          "<p style=\"color:#6b6d6e\">The file was too large to attach — use the link above to download it.</p>";
       }
-      // Both storage calls are individually best-effort, but an email with
-      // neither the attachment nor a working link delivers nothing while
-      // the row records it as sent. A report that has a PDF on file must
-      // ship at least one way, or the send is a failure and has to say so.
-      if (!link && !attachments) {
-        throw new Error("Couldn't read the report's PDF from storage — nothing was sent. Try again shortly.");
-      }
+    }
+    // Both storage calls are individually best-effort, but an email with
+    // neither the attachment nor a working link delivers nothing while
+    // the row records it as sent. A report that has a PDF on file must
+    // ship at least one way, or the send is a failure and has to say so.
+    if (!link && !attachments) {
+      throw new Error("Couldn't read the report's PDF from storage — nothing was sent. Try again shortly.");
     }
 
     const subject = `${job.job_number} · ${job.project} — radiographic report${report.welds ? " (" + report.welds + ")" : ""}`;

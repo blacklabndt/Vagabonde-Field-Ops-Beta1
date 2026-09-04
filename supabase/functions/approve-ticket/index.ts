@@ -6,7 +6,15 @@
 // see it, and shouldn't.
 //
 // GET  ?t=token  → the ticket, read-only, with an Approve button
-// POST ?t=token  → records the approval and burns the token
+// POST ?t=token  → records the approval
+//
+// The token outlives the signing. It used to be burned on success, which
+// meant a rep who refreshed, pressed back, or opened the link again a week
+// later was told their link had been used up — and a resend refuses an
+// approved ticket, so there was no way back to the copy they had signed.
+// The link is now the rep's own receipt until it expires: re-signing is
+// impossible either way (the already-approved branch returns before the
+// POST handler, and the update is conditional on approved_at being null).
 //
 // The row holds a hash of the token, never the token (see
 // _shared/approvalToken.ts): the tickets table is readable by every staff
@@ -19,7 +27,7 @@
 
 import { createClient } from "https://esm.sh/@supabase/supabase-js@2";
 import { esc, sendMail, appSettings, wrapEmail } from "../_shared/mail.ts";
-import { renderInvoice, invoiceCss, invoiceTotals, moneyCents } from "../_shared/invoice.ts";
+import { renderInvoice, invoiceCss, invoiceTotals, moneyCents, edmontonStamp } from "../_shared/invoice.ts";
 import type { InvoiceData } from "../_shared/invoice.ts";
 import { loadInvoice, TICKET_INVOICE_SELECT } from "../_shared/ticketInvoice.ts";
 import { hashToken, invoiceFingerprint } from "../_shared/approvalToken.ts";
@@ -181,7 +189,7 @@ async function notifyApproval(admin: any, row: any, d: InvoiceData, signer: stri
   if (!to && !office) return;
   const job = row?.jobs ?? {};
   const totals = invoiceTotals(d);
-  const when = new Date(approvedAt).toLocaleString("en-CA", { timeZone: "America/Edmonton", dateStyle: "medium", timeStyle: "short" });
+  const when = edmontonStamp(approvedAt);
   const subject = `Ticket ${row.id} approved by ${signer}`;
   const lines = [
     `Ticket ${row.id} was approved by ${signer} on ${when}.`,
@@ -228,13 +236,16 @@ async function handle(req: Request): Promise<Response> {
   // deno-lint-ignore no-explicit-any
   const ticket = row as any;
 
-  // A failed lookup is not a spent token, and telling a rep their link is used
-  // up when the database merely hiccuped sends them chasing the wrong thing.
+  // A failed lookup is not an unknown token, and telling a rep their link is
+  // dead when the database merely hiccuped sends them chasing the wrong thing.
   if (readErr) throw readErr;
 
+  // A signed ticket keeps its token, so this is no longer "you already used
+  // it": the only ways to reach here are a link that was superseded by a
+  // resend, one whose approval was withdrawn, or a token no row ever held.
   if (!ticket) {
-    return notice("This link has already been used",
-      "If the ticket still needs signing, ask VagaboNDE to send a fresh approval link.");
+    return notice("This link is no longer valid",
+      "A newer approval email may have replaced it — check for a more recent one from VagaboNDE. Otherwise, ask them to send a fresh approval link.");
   }
   if (ticket.approval_expires_at && new Date(ticket.approval_expires_at) < new Date()) {
     return notice("This link has expired",
@@ -323,7 +334,7 @@ async function handle(req: Request): Promise<Response> {
     // signature. The read above narrows the window; this closes it.
     const approvedAt = new Date().toISOString();
     // .select() so we learn whether THIS request is the one that signed.
-    // Without it a zero-row update (the token already burned by a
+    // Without it a zero-row update (the ticket already signed by a
     // concurrent submit — the same link forwarded to a colleague, both
     // signing at once) returns {data:null, error:null}, indistinguishable
     // from success; the loser would then be handed a receipt stamped with
@@ -335,13 +346,14 @@ async function handle(req: Request): Promise<Response> {
       approved_ip: ip,
       // Always written, even as null: the signature column must only ever
       // hold what THIS approval carried, never something staged earlier.
-      approved_signature: signature,
-      approval_token: null // single use — burn it
+      approved_signature: signature
+      // The token is deliberately left alone — see the note at the top of
+      // this file. It is the rep's way back to the copy they signed.
     }).eq("id", ticket.id).is("approved_at", null).select("approved_by_email, approved_at, approved_signature");
     if (signErr) throw signErr;
 
     if (!signedRows || signedRows.length === 0) {
-      // Someone else's submit won the race and burned the token. Show the
+      // Someone else's submit won the race and signed it first. Show the
       // approval that actually persisted, not this request's attempt.
       const { data: fresh } = await admin.from("tickets")
         .select("approved_by_email, approved_at, approved_signature").eq("id", ticket.id).maybeSingle();

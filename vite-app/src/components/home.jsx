@@ -69,6 +69,12 @@ export function HomeScreen({ onCreateJob, onOpenJob, onStartTicket, currentUser,
     try {
       const res = await Db.searchJobs({ page: p, pageSize, status: f, search: q, searchField: sf });
       if (mine !== loadSeq.current) return;
+      // The page under us can empty out — the last job on the last page gets
+      // deleted or moves out of the filter and this index has no rows left.
+      // The count rides on the first row, so an empty page also reports a
+      // total of zero: the board would claim there is no work at all, with
+      // no pager left to get back. Start again at page 1 instead.
+      if (p > 0 && !res.rows.length) { setPage(0); fetchPage(0, f, q, sf); return; }
       setRows(res.rows);
       setTotal(res.total);
       // Served from this device because the network is down. Not an error —

@@ -10,10 +10,13 @@
 // suite's one writer keeps replays from racing each other. Everything the
 // run creates it also cancels.
 import { test, expect } from "@playwright/test";
+import {
+  SEED_CLIENT, ticketRx, goHome, scoutJobNumber, openJobFromBoard,
+  cancelDraftsOnJob
+} from "./helpers.js";
 
 const EMAIL = process.env.E2E_EMAIL;
 const PASSWORD = process.env.E2E_PASSWORD;
-const SEED_CLIENT = "Athabasca Energy";
 
 // The second technician (Ben Sawatzky) — for the shared-tablet test, which
 // needs two genuinely different accounts on one device. Optional: the test
@@ -23,10 +26,13 @@ const PASSWORD2 = process.env.E2E_PASSWORD2;
 const HAS_SECOND = !!(EMAIL2 && PASSWORD2);
 
 // Ticket numbers are initials-MMDD-YY-seq; the replayed draft mints its own,
-// so cleanup finds it by shape, not by a number captured on screen.
-const today = new Date();
-const mmdd = String(today.getMonth() + 1).padStart(2, "0") + String(today.getDate()).padStart(2, "0");
-const TICKET_RX = new RegExp(`AT-${mmdd}-\\d{2}-\\d{2}`);
+// so cleanup finds it by shape (helpers' ticketRx, read off the signed-in top
+// bar), not by a number captured on screen.
+//
+// The job a test minted a draft on, so afterEach can walk back and cancel it —
+// a run that dies between the save and the cancel used to leave the draft on
+// the live job, and the retry left a second one beside it.
+let sweepAfter = null;
 
 // Drawer navigation, scoped to the drawer itself: a bare name match grabs
 // the topbar brand ("VagaboNDE — go to home") behind the open drawer, and
@@ -65,48 +71,6 @@ const signIn = async (page, email, password) => {
   await expect(page.getByRole("button", { name: "+ Ticket" })).toBeVisible({ timeout: 20_000 });
 };
 
-// The job number behind the ticket dialog's nth job, learned without
-// committing to the ticket screen. The dialog lists only active jobs, so
-// whatever comes back can still take a JHA or a ticket.
-async function scoutJobNumber(page, jobIndex) {
-  await page.getByRole("button", { name: "+ Ticket" }).click();
-  const list = page.locator("#ticket-client-list");
-  await expect(list).toBeVisible({ timeout: 10_000 });
-  await list.locator("[role='option']", { hasText: SEED_CLIENT }).first().click();
-  const jobSelect = page.getByLabel("Active jobs for this client");
-  await expect(async () => {
-    expect(await jobSelect.locator("option").count()).toBeGreaterThan(jobIndex);
-  }).toPass({ timeout: 10_000 });
-  const label = (await jobSelect.locator("option").nth(jobIndex).textContent()).trim();
-  await page.getByRole("dialog").getByRole("button", { name: "Cancel" }).click();
-  return label.split(" — ")[0];
-}
-
-// From the board (already on it) to a job's own page.
-async function openJobFromBoard(page, jobNumber) {
-  await page.getByPlaceholder(/^Search /).fill(jobNumber);
-  const row = page.locator("table tbody tr", { hasText: jobNumber }).first();
-  await expect(row).toBeVisible({ timeout: 15_000 });
-  await row.click();
-  await expect(page.getByText("Job detail")).toBeVisible({ timeout: 15_000 });
-}
-
-// Sweep every matching draft off the open job. Called before as well as after,
-// so a run that died mid-test heals the next one instead of poisoning it.
-async function cancelDraftsOnJob(page, rx) {
-  // Let the job's ticket list arrive before deciding it is empty.
-  await page.waitForTimeout(1200);
-  for (;;) {
-    const row = page.locator("tr", { hasText: rx }).first();
-    if (!(await row.count())) break;
-    await row.click();
-    await expect(page.getByRole("button", { name: "Cancel this ticket" })).toBeVisible({ timeout: 15_000 });
-    page.once("dialog", d => d.accept());
-    await page.getByRole("button", { name: "Cancel this ticket" }).click();
-    await expect(page.getByText("Job detail")).toBeVisible({ timeout: 15_000 });
-  }
-}
-
 // The muster point box. Field renders its label as a sibling rather than a
 // wrapper, so there is nothing for getByLabel to bind to — the field itself
 // is what identifies the input.
@@ -139,13 +103,26 @@ async function jhaDraftOnDisk(page, muster) {
 test.beforeEach(async ({ page }, testInfo) => {
   test.skip(!EMAIL || !PASSWORD, "Set E2E_EMAIL and E2E_PASSWORD in vite-app/e2e/.env");
   test.skip(testInfo.project.name !== "desktop", "network behavior is viewport-blind");
-  await page.goto("/");
-  await expect(page.getByRole("button", { name: "+ Ticket" })).toBeVisible({ timeout: 15_000 });
+  sweepAfter = null;
+  await goHome(page);
 });
 
-test.afterEach(async ({ context }) => {
-  // Never leave a test's dead network to poison the next one.
+test.afterEach(async ({ page, context }) => {
+  // Never leave a test's dead network to poison the next one — and put the
+  // signal back before the sweep, which is a live read and a live delete.
   await context.setOffline(false);
+  const left = sweepAfter;
+  sweepAfter = null;
+  if (!left) return;
+  // Best effort: cleanup must not turn a passing test red, nor bury the real
+  // failure of one that already went wrong.
+  try {
+    await goHome(page);
+    await openJobFromBoard(page, left.jobNumber);
+    await cancelDraftsOnJob(page, left.rx);
+  } catch (e) {
+    console.warn("Draft sweep on " + left.jobNumber + " did not finish:", e.message);
+  }
 });
 
 test("the board falls back to cached jobs when the signal dies", async ({ page, context }) => {
@@ -183,6 +160,16 @@ test("a search offline answers from the cached directory instead of queueing", a
 });
 
 test("a ticket saved offline queues, syncs on reconnect, and lands as a draft", async ({ page, context }) => {
+  // Anything an earlier run left on this job goes first, and the job is
+  // registered for the afterEach sweep before a single row is written: the
+  // cancel at the end of this test is the happy path, not the only cleanup.
+  const rx = await ticketRx(page);
+  const jobNumber = await scoutJobNumber(page, 1);
+  await openJobFromBoard(page, jobNumber);
+  await cancelDraftsOnJob(page, rx);
+  sweepAfter = { jobNumber, rx };
+  await goHome(page);
+
   // Build the ticket online — the picker and job list are server searches.
   await page.getByRole("button", { name: "+ Ticket" }).click();
   const list = page.locator("#ticket-client-list");
@@ -192,9 +179,8 @@ test("a ticket saved offline queues, syncs on reconnect, and lands as a draft", 
   await expect(async () => {
     expect((await jobSelect.locator("option").count())).toBeGreaterThan(1);
   }).toPass({ timeout: 10_000 });
-  // Remember which job, so cleanup can walk back to it from the board.
-  const jobLabel = (await jobSelect.locator("option").nth(1).textContent()).trim();
-  const jobNumber = jobLabel.split(" — ")[0];
+  // The same job the sweep just cleared — the draft that replays lands there.
+  await expect(jobSelect.locator("option").nth(1)).toContainText(jobNumber);
   await jobSelect.selectOption({ index: 1 });
   await page.getByRole("button", { name: "Continue" }).click();
   const saveDraft = page.getByRole("button", { name: "Save draft" });
@@ -214,18 +200,10 @@ test("a ticket saved offline queues, syncs on reconnect, and lands as a draft", 
 
   // The replay minted a real draft on the job. Find it and cancel it.
   await drawerGo(page, "Home");
-  await page.getByPlaceholder(/^Search /).fill(jobNumber);
-  const jobRow = page.locator("table tbody tr", { hasText: jobNumber }).first();
-  await expect(jobRow).toBeVisible({ timeout: 15_000 });
-  await jobRow.click();
-
-  const draftRow = page.locator("tr", { hasText: TICKET_RX }).first();
-  await expect(draftRow).toBeVisible({ timeout: 15_000 });
-  await draftRow.click();
-  await expect(page.getByRole("button", { name: "Cancel this ticket" })).toBeVisible({ timeout: 15_000 });
-  page.once("dialog", d => d.accept());
-  await page.getByRole("button", { name: "Cancel this ticket" }).click();
-  await expect(page.getByText("Job detail")).toBeVisible({ timeout: 15_000 });
+  await openJobFromBoard(page, jobNumber);
+  await expect(page.locator("tr", { hasText: rx })).toHaveCount(1, { timeout: 20_000 });
+  await cancelDraftsOnJob(page, rx);
+  await expect(page.locator("tr", { hasText: rx })).toHaveCount(0);
 });
 
 test("a ticket queued on a shared tablet is not shown to the next person", async ({ page, context }) => {
@@ -241,9 +219,13 @@ test("a ticket queued on a shared tablet is not shown to the next person", async
   // not see it in the badge (it is not their work, and the panel would offer
   // them a Discard button for it) and must never replay it under their own
   // session, where the insert names someone else and is refused.
+  // The first technician's number shape, read now and kept for the whole test:
+  // the tablet changes hands halfway through, but the draft it queues is his.
+  const rx = await ticketRx(page);
   const jobNumber = await scoutJobNumber(page, 1);
   await openJobFromBoard(page, jobNumber);
-  await cancelDraftsOnJob(page, TICKET_RX);
+  await cancelDraftsOnJob(page, rx);
+  sweepAfter = { jobNumber, rx };
   await drawerGo(page, "Home");
 
   // Built in range — the picker and the job list are server searches.
@@ -255,6 +237,7 @@ test("a ticket queued on a shared tablet is not shown to the next person", async
   await expect(async () => {
     expect(await jobSelect.locator("option").count()).toBeGreaterThan(1);
   }).toPass({ timeout: 10_000 });
+  await expect(jobSelect.locator("option").nth(1)).toContainText(jobNumber);
   await jobSelect.selectOption({ index: 1 });
   await page.getByRole("button", { name: "Continue" }).click();
   const saveDraft = page.getByRole("button", { name: "Save draft" });
@@ -289,9 +272,9 @@ test("a ticket queued on a shared tablet is not shown to the next person", async
   await expect(page.getByRole("button", { name: /queued|won't sync/ })).toHaveCount(0, { timeout: 30_000 });
 
   await openJobFromBoard(page, jobNumber);
-  await expect(page.locator("tr", { hasText: TICKET_RX })).toHaveCount(1, { timeout: 20_000 });
-  await cancelDraftsOnJob(page, TICKET_RX);
-  await expect(page.locator("tr", { hasText: TICKET_RX })).toHaveCount(0);
+  await expect(page.locator("tr", { hasText: rx })).toHaveCount(1, { timeout: 20_000 });
+  await cancelDraftsOnJob(page, rx);
+  await expect(page.locator("tr", { hasText: rx })).toHaveCount(0);
 
   // Nothing was sent under the wrong name: the queue's owner filter kept the
   // item out of the second technician's flush, so it never reached the

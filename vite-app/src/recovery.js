@@ -16,6 +16,27 @@ import { sbClient } from "./config.js";
 let pending = typeof window !== "undefined" && window.location.hash.includes("type=recovery");
 const listeners = new Set();
 
+// A link that has expired, or has already been used once, never becomes a
+// recovery session at all: Auth bounces it back as
+// #error=access_denied&error_code=otp_expired&error_description=… and
+// supabase-js drops it. Read here, in the same evaluation as the hash above,
+// so the sign-in screen can say why rather than sitting there mute while the
+// person taps the dead link again.
+function readLinkError() {
+  if (typeof window === "undefined") return null;
+  const p = new URLSearchParams((window.location.hash || "").replace(/^#/, ""));
+  const code = p.get("error_code");
+  if (!code && !p.get("error")) return null;
+  if (code === "otp_expired" || /expired/i.test(p.get("error_description") || "")) {
+    return "That password link has expired or has already been used. Sign in below, or tap Forgot password for a fresh one.";
+  }
+  // Anything else: Auth's own words, which are written for people, plus the
+  // one thing they can do about it.
+  const desc = (p.get("error_description") || "").trim();
+  return (desc ? desc.replace(/\.$/, "") : "That password link didn't work") + ". Tap Forgot password for a fresh one.";
+}
+const linkError = readLinkError();
+
 sbClient.auth.onAuthStateChange(event => {
   if (event === "PASSWORD_RECOVERY" && !pending) {
     pending = true;
@@ -26,6 +47,9 @@ sbClient.auth.onAuthStateChange(event => {
 export const Recovery = {
   pending: () => pending,
   clear() { pending = false; },
+  // A plain sentence when the link landed with a complaint instead of a
+  // session; null on every ordinary start.
+  error: () => linkError,
   // fn(true) whenever a recovery session is detected after subscription.
   subscribe(fn) {
     listeners.add(fn);

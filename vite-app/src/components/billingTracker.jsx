@@ -185,7 +185,7 @@ export function BillingTrackerScreen({ onOpenTicket, currentUser }) {
     setError("");
     try {
       const list = await Db.listUnsignedTicketContacts();
-      let sent = 0, skipped = 0, failed = 0, recent = 0;
+      let sent = 0, skipped = 0, failed = 0, recent = 0, queried = 0;
       // Muted around the loop: sendTicketApproval fires an "Approval sent"
       // toast per call, so chasing N tickets would stack N toasts over the
       // one summary line this button is meant to show. Same pattern as
@@ -193,6 +193,11 @@ export function BillingTrackerScreen({ onOpenTicket, currentUser }) {
       Toasts.mute();
       try {
         for (const t of list) {
+          // A rep who pressed "Query this ticket" is waiting on the office,
+          // not on a reminder — and a resend clears the query, so chasing
+          // this one would rub out the question before anybody answered it
+          // and ask the same rep to sign the same figures again.
+          if (t.queriedAt) { queried++; continue; }
           // Chased in the last three days is chased: a client nudged on
           // Tuesday does not need the same email again on Thursday.
           if (withinDays(t.chasedAt, 3)) { recent++; continue; }
@@ -209,6 +214,7 @@ export function BillingTrackerScreen({ onOpenTicket, currentUser }) {
         }
       } finally { Toasts.unmute(); }
       const parts = [`Sent to ${sent} of ${list.length}`];
+      if (queried) parts.push(`${queried} left alone — the client has a question open`);
       if (recent) parts.push(`${recent} left alone — chased in the last 3 days`);
       if (skipped) parts.push(`${skipped} skipped — no client email on file`);
       if (failed) parts.push(`${failed} failed to send`);

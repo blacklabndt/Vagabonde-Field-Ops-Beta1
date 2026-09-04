@@ -52,6 +52,12 @@ export function EquipmentScreen({ currentUser }) {
     try {
       const { rows: r, total: t } = await Db.searchEquipment({ page: p, pageSize, filter: f, search: s });
       if (mine !== loadSeq.current) return;
+      // The page under us can empty out — retire the last item on the last
+      // page and this index has no rows left. The count comes off the first
+      // row, so an empty page also reports a total of zero: the screen said
+      // "No equipment on file yet." with no pager to get back. Start again
+      // at page 1 instead.
+      if (p > 0 && !r.length) { setPage(0); fetchPage(0, f, s); return; }
       setRows(r);
       setTotal(t);
       setLoadError("");

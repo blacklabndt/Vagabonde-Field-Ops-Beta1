@@ -130,10 +130,15 @@ async function drawJha(jha: any): Promise<Uint8Array> {
   // ── drawing helpers ────────────────────────────────────────────────
   const W = PAGE.w - M * 2;
 
+  // Deliberately no maxWidth. pdf-lib treats it as a wrap width, not a clip:
+  // the overflow is drawn on the lines BELOW, straight through whatever the
+  // next row of this hand-laid grid put there. Every caller that has text
+  // wider than its column runs it through wrapLines first and draws the
+  // lines itself, so the layout knows how tall it has become.
   const text = (s: string, x: number, yy: number, o: any = {}) =>
     page.drawText(foldAscii(s), {
       x, y: yy, size: o.size ?? 8, font: o.bold ? bold : font,
-      color: o.color ?? INK, maxWidth: o.maxWidth
+      color: o.color ?? INK
     });
 
   const rule = (yy: number, x = M, w = W) =>
@@ -150,17 +155,28 @@ async function drawJha(jha: any): Promise<Uint8Array> {
     y -= 6;
   };
 
-  // Label above value, in a cell of the given width.
+  // The value of a cell, split into the lines it actually needs. Measured
+  // before the row draws so the row can make room for them.
+  const cellLines = (value: string, w: number) => wrapLines(value || "—", w - 4, font, 8.5);
+
+  // Label above value, in a cell of the given width. A long project name or
+  // hospital address used to be handed to pdf-lib as a maxWidth, which wrapped
+  // it down over the row beneath — the LSD printed through the muster point.
   const cell = (label: string, value: string, x: number, yy: number, w: number) => {
     text(label.toUpperCase(), x, yy, { size: 6, color: MUTED });
-    text(value || "—", x, yy - 10, { size: 8.5, maxWidth: w - 4 });
+    cellLines(value, w).forEach((ln, i) => text(ln, x, yy - 10 - i * 10, { size: 8.5 }));
   };
 
-  // A row of cells across the page, evenly split.
+  // A row of cells across the page, evenly split. Its height is the tallest
+  // cell's, so a value that wraps pushes what follows down the page instead
+  // of printing through it. One line comes to exactly the old fixed 24.
   const row = (cells: [string, string][], h = 24) => {
     const w = W / cells.length;
+    const lines = Math.max(1, ...cells.map(([, v]) => cellLines(v, w).length));
+    const need = Math.max(h, 14 + lines * 10);
+    pageBreakIfNeeded(need);
     cells.forEach(([l, v], i) => cell(l, v, M + 4 + i * w, y, w));
-    y -= h;
+    y -= need;
   };
 
   const checkbox = (on: boolean, label: string, x: number, yy: number) => {
@@ -182,7 +198,10 @@ async function drawJha(jha: any): Promise<Uint8Array> {
   const footer = () => {
     rule(M + 16);
     text("GS-0113-25-01  ·  Field Level Hazard Assessment  ·  VagaboNDE Inc.", M, M + 6, { size: 6.5, color: MUTED });
-    text(`${job.job_number ?? ""} · ${assessmentDate}`, PAGE.w - M - 150, M + 6, { size: 6.5, color: MUTED, maxWidth: 150 });
+    // One line, always: a footer has nothing below it but the paper's edge,
+    // so a wrapped second line would print off the bottom of the sheet.
+    const foot = `${job.job_number ?? ""} · ${assessmentDate}`;
+    text(wrapLines(foot, 150, font, 6.5)[0] ?? "", PAGE.w - M - 150, M + 6, { size: 6.5, color: MUTED });
   };
 
   // ── identification band ────────────────────────────────────────────
@@ -193,9 +212,10 @@ async function drawJha(jha: any): Promise<Uint8Array> {
   const logoW = 96, logoH = logoW * (logo.height / logo.width);
   page.drawImage(logo, { x: M, y: y - logoH + 4, width: logoW, height: logoH });
   text("FIELD LEVEL HAZARD ASSESSMENT", M + logoW + 10, y - 22, { size: 9, bold: true, color: ACCENT });
-  text("GS-0113-25-01", PAGE.w - M - 90, y - 10, { size: 8, color: MUTED, maxWidth: 90 });
+  // Both fixed strings, and both fit their corner of the band at 8pt.
+  text("GS-0113-25-01", PAGE.w - M - 90, y - 10, { size: 8, color: MUTED });
   text(jha.status === "Closed" ? "CLOSED" : "OPEN — awaiting end readings",
-    PAGE.w - M - 150, y - 22, { size: 8, bold: true, color: jha.status === "Closed" ? MUTED : ACCENT, maxWidth: 150 });
+    PAGE.w - M - 150, y - 22, { size: 8, bold: true, color: jha.status === "Closed" ? MUTED : ACCENT });
   y -= 32;
   rule(y);
   y -= 6;
@@ -207,8 +227,9 @@ async function drawJha(jha: any): Promise<Uint8Array> {
   section("Site information");
   row([["Weather", site.weather ?? ""], ["Temperature", site.temperature ?? ""], ["Communication", site.communication ?? ""]]);
   row([["Muster point", site.muster ?? ""], ["First aid attendant", site.firstAid ?? ""]]);
+  // Full page width, and it grows with the address the same way a row does.
   cell("Nearest hospital", site.hospital ?? "", M + 4, y, W);
-  y -= 24;
+  y -= Math.max(24, 14 + cellLines(site.hospital ?? "", W).length * 10);
 
   // ── dosimetry ──────────────────────────────────────────────────────
   section("Nuclear energy worker dosimetry");
@@ -228,21 +249,26 @@ async function drawJha(jha: any): Promise<Uint8Array> {
     y -= 14;
   }
   workers.forEach(w => {
-    // Defensive rather than a fix for anything seen: a crew is two or
-    // three people and it would take about thirty-five to reach the foot
-    // of the page. But this is a dose record, and a row that runs off the
-    // sheet is not a row anybody notices is missing.
-    pageBreakIfNeeded(20);
-    cx = M + 2;
     const vals = [
       `(${w.slot}) ${w.name ?? ""}`, w.idCode ?? "", w.unit ?? "", w.tld ?? "", w.drd ?? "", w.alarm ?? "",
       "0", w.endReading == null ? "—" : String(w.endReading), w.doseMr == null ? "—" : String(w.doseMr)
     ];
-    vals.forEach((v, i) => {
-      text(v, cx, y, { size: 8, maxWidth: cols[i].w - 3, bold: i === 8 && w.doseMr != null });
+    // Split before anything is drawn, so the row knows its own height. A long
+    // name in a 116pt column is the common case; handing it to pdf-lib as a
+    // maxWidth wrapped it down over the next worker's dose figures.
+    const wrapped = vals.map((v, i) => wrapLines(String(v), cols[i].w - 3, font, 8));
+    const tall = Math.max(1, ...wrapped.map(l => l.length));
+    // Defensive rather than a fix for anything seen: a crew is two or
+    // three people and it would take about thirty-five to reach the foot
+    // of the page. But this is a dose record, and a row that runs off the
+    // sheet is not a row anybody notices is missing.
+    pageBreakIfNeeded(6 + tall * 10 + 6);
+    cx = M + 2;
+    wrapped.forEach((lines, i) => {
+      lines.forEach((ln, k) => text(ln, cx, y - k * 10, { size: 8, bold: i === 8 && w.doseMr != null }));
       cx += cols[i].w;
     });
-    y -= 14;
+    y -= 4 + tall * 10;
   });
   text("Start reading is 0 on every assessment; the end reading is the dose recorded for that worker.",
     M + 2, y, { size: 6.5, color: MUTED });
@@ -315,8 +341,9 @@ async function drawJha(jha: any): Promise<Uint8Array> {
   section("Review");
   row([["Filed by", jha.profiles?.name ?? ""], ["Filed", fmtStamp(jha.signed_at)],
        ["Site rep", jha.site_rep ?? ""], ["Closed out", jha.closed_at ? fmtStamp(jha.closed_at) : "—"]]);
-  text("Filed electronically through VagaboNDE Field Ops. The account filing this assessment is the record of who completed it; no handwritten signature is collected.",
-    M + 4, y, { size: 7, color: MUTED, maxWidth: W - 8 });
+  // Wider than the sheet, so it wraps by hand like everything else here.
+  wrapLines("Filed electronically through VagaboNDE Field Ops. The account filing this assessment is the record of who completed it; no handwritten signature is collected.",
+    W - 8, font, 7).forEach((ln, i) => text(ln, M + 4, y - i * 9, { size: 7, color: MUTED }));
 
   footer();
   return await doc.save();
@@ -393,13 +420,23 @@ const fmtDay = (day: string) => {
   return m ? `${m[3]} ${MONTHS[Number(m[2]) - 1]} ${m[1]}` : "";
 };
 
+// A real timestamp, unlike fmtDay above, so it must be told which zone to
+// land in: this function runs in UTC, and an assessment filed at half past
+// six on a Grande Prairie evening printed the next day's date on a document
+// the crew signs against the shift they worked. _shared/invoice.ts pins the
+// same zone in edmontonStamp for the invoice side, but render-jha
+// deploys as a single file (see the corsHeaders note at the top) and cannot
+// import it.
+const EDMONTON = "America/Edmonton";
 const fmtDate = (ts: string) => {
   if (!ts) return "";
   const d = new Date(ts);
-  return isNaN(+d) ? "" : d.toLocaleDateString("en-CA", { day: "2-digit", month: "short", year: "numeric" });
+  return isNaN(+d) ? "" : d.toLocaleDateString("en-CA", { timeZone: EDMONTON, day: "2-digit", month: "short", year: "numeric" });
 };
+// The year rides along: a hazard assessment is kept for years, and "02 Sep,
+// 18:30" on a filed record does not say which September.
 const fmtStamp = (ts: string) => {
   if (!ts) return "";
   const d = new Date(ts);
-  return isNaN(+d) ? "" : d.toLocaleString("en-CA", { day: "2-digit", month: "short", hour: "2-digit", minute: "2-digit", hour12: false });
+  return isNaN(+d) ? "" : d.toLocaleString("en-CA", { timeZone: EDMONTON, day: "2-digit", month: "short", year: "numeric", hour: "2-digit", minute: "2-digit", hour12: false });
 };

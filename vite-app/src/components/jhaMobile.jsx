@@ -354,7 +354,17 @@ export function JhaBuilderScreen({ job, jobRecord, contacts, currentUser, onSubm
       onSubmitted();
     } catch (e) {
       if (OfflineQueue.isNetworkError(e)) {
-        await OfflineQueue.enqueue("jha", jhaPayload);
+        try {
+          await OfflineQueue.enqueue("jha", jhaPayload);
+        } catch (queueErr) {
+          // The outbox is IndexedDB, and it can refuse — private browsing, a
+          // full disk, a wedged database. Unguarded, that threw straight out
+          // of submit: the button stayed on "Filing…" for ever and nobody was
+          // told. The recovery copy stays put, so the JHA is still here.
+          setSaving(false);
+          setError("No signal, and this device couldn't save it either — stay on this screen and try again once you're in range.");
+          return;
+        }
         // In the outbox now, which is a better home than the recovery copy.
         dropWip();
         setQueued(true);

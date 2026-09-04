@@ -7,23 +7,37 @@
 // against the live project's load-test data. Every ticket the suite creates
 // it also cancels; nothing else is written.
 import { test, expect } from "@playwright/test";
+import {
+  SEED_CLIENT, ticketRx, goHome, scoutJobNumber, openJobFromBoard,
+  cancelDraftsOnJob, cancelDraftsOnJobFromHome, openTicketRow, settledJobDetail
+} from "./helpers.js";
 
 const EMAIL = process.env.E2E_EMAIL;
 const PASSWORD = process.env.E2E_PASSWORD;
 
-// One client from the load-test seed with plenty of active jobs.
-const SEED_CLIENT = "Athabasca Energy";
-
-// This technician's ticket numbers today, by shape (initials-MMDD-YY-seq).
-const today = new Date();
-const mmdd = String(today.getMonth() + 1).padStart(2, "0") + String(today.getDate()).padStart(2, "0");
-const TICKET_RX = new RegExp(`AT-${mmdd}-\\d{2}-\\d{2}`);
+// The job a test minted a draft on, so afterEach can walk back and cancel it.
+// A test that dies between "Save draft" and "Cancel this ticket" used to leave
+// its draft on the live job — and with retries on, the retry left a second.
+let sweepAfter = null;
 
 test.beforeEach(async ({ page }) => {
   test.skip(!EMAIL || !PASSWORD, "Set E2E_EMAIL and E2E_PASSWORD in vite-app/e2e/.env");
+  sweepAfter = null;
   // Already signed in — auth.setup.js banked the session into storageState.
-  await page.goto("/");
-  await expect(page.getByRole("button", { name: "+ Ticket" })).toBeVisible({ timeout: 15_000 });
+  await goHome(page);
+});
+
+test.afterEach(async ({ page }) => {
+  const left = sweepAfter;
+  sweepAfter = null;
+  if (!left) return;
+  // Best effort: a sweep that cannot run must not turn a passing test red, and
+  // must not hide the real failure of one that already went wrong.
+  try {
+    await cancelDraftsOnJobFromHome(page, left.jobNumber, left.rx);
+  } catch (e) {
+    console.warn("Draft sweep on " + left.jobNumber + " did not finish:", e.message);
+  }
 });
 
 test("the board loads jobs from the live project", async ({ page }) => {
@@ -33,8 +47,11 @@ test("the board loads jobs from the live project", async ({ page }) => {
   expect(rows).toBeGreaterThan(0);
 });
 
-test("desktop keeps the new-work buttons at the row's right edge", async ({ page }, testInfo) => {
-  test.skip(testInfo.project.name !== "desktop", "desktop layout only");
+// @desktop tests are the ones the mobile project has no business running: a
+// desktop-only layout assertion, or a writer whose second copy would only mint
+// a second live draft. The mobile project greps them out (playwright.config.js)
+// rather than each test skipping itself into a fat skipped count.
+test("desktop keeps the new-work buttons at the row's right edge", { tag: "@desktop" }, async ({ page }) => {
   const buttons = page.locator(".home-new-work");
   const search = page.getByPlaceholder(/^Search /);
   const b = await buttons.boundingBox();
@@ -67,8 +84,8 @@ test("the client picker overflows the dialog instead of clipping", async ({ page
   expect(box.y + box.height).toBeLessThanOrEqual(viewport.height + 1);
 });
 
-test("every drawer screen renders without uncaught errors", async ({ page }, testInfo) => {
-  test.skip(testInfo.project.name !== "desktop", "same code both viewports — one sweep is enough");
+// Same code both viewports — one sweep is enough.
+test("every drawer screen renders without uncaught errors", { tag: "@desktop" }, async ({ page }) => {
   const errors = [];
   page.on("pageerror", e => errors.push(e.message));
 
@@ -84,20 +101,30 @@ test("every drawer screen renders without uncaught errors", async ({ page }, tes
   expect(errors, `Uncaught errors while touring: ${errors.join(" | ")}`).toEqual([]);
 });
 
-test("an empty draft saves, reopens and cancels", async ({ page }, testInfo) => {
-  test.skip(testInfo.project.name !== "desktop", "one writer is enough — mobile covers the picker");
+// One writer is enough — mobile covers the picker.
+test("an empty draft saves, reopens and cancels", { tag: "@desktop" }, async ({ page }) => {
+  // Whatever an earlier run left on this job goes first, and the job is
+  // registered for the afterEach sweep before a single row is written: the
+  // cancel at the end of this test is the happy path, not the only cleanup.
+  const rx = await ticketRx(page);
+  const jobNumber = await scoutJobNumber(page, 1);
+  await openJobFromBoard(page, jobNumber);
+  await cancelDraftsOnJob(page, rx);
+  sweepAfter = { jobNumber, rx };
+  await goHome(page);
 
   await page.getByRole("button", { name: "+ Ticket" }).click();
   const list = page.locator("#ticket-client-list");
   await expect(list).toBeVisible({ timeout: 10_000 });
   await list.locator("[role='option']", { hasText: SEED_CLIENT }).first().click();
 
-  // Jobs load for the client; pick the first real one.
+  // Jobs load for the client; pick the same one the sweep just cleared.
   const jobSelect = page.getByLabel("Active jobs for this client");
   await expect(async () => {
     const options = await jobSelect.locator("option").allTextContents();
     expect(options.length).toBeGreaterThan(1);
   }).toPass({ timeout: 10_000 });
+  await expect(jobSelect.locator("option").nth(1)).toContainText(jobNumber);
   await jobSelect.selectOption({ index: 1 });
   await page.getByRole("button", { name: "Continue" }).click();
 
@@ -113,44 +140,27 @@ test("an empty draft saves, reopens and cancels", async ({ page }, testInfo) => 
 
   await saveDraft.click();
   // Saving an empty draft lands back on Job detail.
-  await expect(page.getByText("Job detail")).toBeVisible({ timeout: 15_000 });
+  await settledJobDetail(page);
 
   // The draft is on the job's ticket list — reopen it.
-  await page.getByText(ticketId, { exact: false }).first().click();
+  await openTicketRow(page, ticketId);
   await expect(page.getByRole("button", { name: "Save draft" })).toBeEnabled({ timeout: 15_000 });
 
   // Cancel deletes it outright; accept the confirm.
   page.once("dialog", d => d.accept());
   await page.getByRole("button", { name: "Cancel this ticket" }).click();
-  await expect(page.getByText("Job detail")).toBeVisible({ timeout: 15_000 });
+  await settledJobDetail(page);
 });
 
-test("Create ticket on Job detail opens the editor without filing a draft", async ({ page }, testInfo) => {
-  test.skip(testInfo.project.name !== "desktop", "one writer is enough — mobile covers the picker");
-
+// One writer is enough — mobile covers the picker.
+test("Create ticket on Job detail opens the editor without filing a draft", { tag: "@desktop" }, async ({ page }) => {
   // Borrow the + Ticket dialog's job list to learn a seed job number, then
   // walk to that job from the board the way a technician would.
-  await page.getByRole("button", { name: "+ Ticket" }).click();
-  const list = page.locator("#ticket-client-list");
-  await expect(list).toBeVisible({ timeout: 10_000 });
-  await list.locator("[role='option']", { hasText: SEED_CLIENT }).first().click();
-  const jobSelect = page.getByLabel("Active jobs for this client");
-  await expect(async () => {
-    expect((await jobSelect.locator("option").count())).toBeGreaterThan(1);
-  }).toPass({ timeout: 10_000 });
-  const jobNumber = (await jobSelect.locator("option").nth(1).textContent()).trim().split(" — ")[0];
-  await page.getByRole("dialog").getByRole("button", { name: "Cancel" }).click();
+  const rx = await ticketRx(page);
+  const jobNumber = await scoutJobNumber(page, 1);
 
-  const openJob = async () => {
-    await page.getByPlaceholder(/^Search /).fill(jobNumber);
-    const row = page.locator("table tbody tr", { hasText: jobNumber }).first();
-    await expect(row).toBeVisible({ timeout: 15_000 });
-    await row.click();
-    await expect(page.getByText("Job detail")).toBeVisible({ timeout: 15_000 });
-    await expect(page.getByText("Tickets raised")).toBeVisible({ timeout: 15_000 });
-  };
-  await openJob();
-  const before = await page.locator("tr", { hasText: TICKET_RX }).count();
+  await openJobFromBoard(page, jobNumber);
+  const before = await page.locator("tr", { hasText: rx }).count();
 
   // The dialog used to insert an empty draft on Create; now it only chooses
   // the day and the reps and hands them to the editor.
@@ -162,6 +172,6 @@ test("Create ticket on Job detail opens the editor without filing a draft", asyn
   // Walk away without saving: nothing was filed, the job's list is as it was.
   await page.getByRole("button", { name: "Sections" }).click();
   await page.getByRole("navigation", { name: "Sections" }).getByRole("button", { name: "Home" }).first().click();
-  await openJob();
-  await expect(page.locator("tr", { hasText: TICKET_RX })).toHaveCount(before);
+  await openJobFromBoard(page, jobNumber);
+  await expect(page.locator("tr", { hasText: rx })).toHaveCount(before);
 });

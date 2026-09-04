@@ -257,10 +257,18 @@ export function App() {
         await checkpoint({ alreadyCreated: true, ticketId: id });
         // A row found by its key was the first attempt's, whose lines may
         // never have landed: write today's over it, as the editor does.
-        if (saved.existing) await Db.updateTicket({ ticketId: id, lines: payload.lines, status: payload.status, delays: payload.delays });
+        if (saved.existing) await Db.updateTicket({
+          ticketId: id, clientContact: payload.clientContact, contractorContact: payload.contractorContact,
+          lines: payload.lines, status: payload.status, delays: payload.delays
+        });
       } else {
         try {
-          await Db.updateTicket({ ticketId: id, lines: payload.lines, status: payload.status, delays: payload.delays });
+          // The reps ride along: the payload is the whole ticket as the field
+          // left it, and a rep edited on a reopened draft is part of it.
+          await Db.updateTicket({
+            ticketId: id, clientContact: payload.clientContact, contractorContact: payload.contractorContact,
+            lines: payload.lines, status: payload.status, delays: payload.delays
+          });
         } catch (e) {
           // The row was cancelled on another device while this sat in the
           // outbox. The payload still holds the whole day — the only copy
@@ -369,7 +377,7 @@ export function App() {
   // runs this same boot once the recovery is settled.
   const bootSession = async () => {
     try {
-      const { user, offline, reason } = await restoreSession({
+      const { user, offline, reason, signedOut } = await restoreSession({
           getSession: () => sbClient.auth.getSession(),
           fetchProfile: id => sbClient.from("profiles").select("*").eq("id", id).single(),
           // Guarded: if a recovery landing is detected while this boot is
@@ -394,6 +402,15 @@ export function App() {
           OfflineCache.noteServingCached(Date.now());
           restoredOffline.current = true;
         }
+      } else if (signedOut || !user) {
+        // The server answered, and the answer was nobody: either the account
+        // has nothing behind it any more (signedOut) or the session was
+        // ended elsewhere. Forget this device the way the online recheck
+        // does — otherwise the remembered identity outlives the server's
+        // "no session" and the next offline open comes back as that person,
+        // a locked account included, for the rest of the twelve hours.
+        try { await OfflineCache.remove(IDENTITY_KEY); } catch { /* the clear below tries again */ }
+        try { await OfflineCache.clear(); } catch (e) { console.error("Couldn't clear the offline cache after the session lapsed:", e); }
       }
       if (user) {
         setCurrentUser(user);

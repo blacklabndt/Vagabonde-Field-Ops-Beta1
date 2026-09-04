@@ -1,8 +1,9 @@
-import React, { useState } from "react";
+import React, { useState, useEffect } from "react";
 import { sbClient } from "../config.js";
 import { tabList, Blueprint, Btn, Field, ErrorBox } from "./common.jsx";
 import { OfflineCache } from "../offlineCache.js";
 import { IDENTITY_KEY } from "../session.js";
+import { Recovery } from "../recovery.js";
 
 export function SignInScreen({ onSignIn }) {
   const [email, setEmail] = useState("");
@@ -10,6 +11,16 @@ export function SignInScreen({ onSignIn }) {
   const [error, setError] = useState("");
   const [busy, setBusy] = useState(false);
   const [resetState, setResetState] = useState("idle"); // idle | sending | sent
+  // Read at module load, before anything could clear the hash: a reset link
+  // that has expired or already been used comes back here as an error in the
+  // URL and nothing else, and this screen used to answer it in silence.
+  const [linkError] = useState(Recovery.error);
+  useEffect(() => {
+    if (!linkError) return;
+    // Said out loud now, so take it out of the address bar — a reload
+    // shouldn't bring the same dead link's complaint back with it.
+    window.history.replaceState(null, "", window.location.pathname + window.location.search);
+  }, [linkError]);
 
   // The reset email carries a link back to this app; opening it starts a
   // recovery session, which App.jsx catches and answers with the
@@ -108,6 +119,10 @@ export function SignInScreen({ onSignIn }) {
             pair — neither worked when this was two loose inputs. */}
         <Blueprint as="form" onSubmit={submit} style={{ padding: "22px 20px", display: "flex", flexDirection: "column", gap: 12 }}>
           <h4 style={{ margin: 0, fontSize: 20 }}>Sign in</h4>
+          {/* Why they landed back on the sign-in screen instead of the
+              set-a-new-password one. Above the fields, not beside the
+              button, because it is about the link they just followed. */}
+          {linkError && <ErrorBox>{linkError}</ErrorBox>}
           <Field label="Email">
             <input className="input" style={{ minHeight: 42 }} type="email" value={email}
               name="email" autoComplete="username" required

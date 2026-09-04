@@ -30,19 +30,23 @@ Deno.serve(async (req) => {
   if (req.method === "OPTIONS") return new Response("ok", { headers: corsHeaders });
 
   try {
-    const { messageId } = await req.json();
-    if (!messageId) throw new Error("messageId is required");
-
     const admin = createClient(
       Deno.env.get("SUPABASE_URL")!,
       Deno.env.get("SUPABASE_SERVICE_ROLE_KEY")!
     );
 
+    // The door before the body, the way the JWT-checked functions do it.
+    // The parse below throws on junk and the catch writes that to
+    // function_errors: parsing first let an anonymous POST fill the error
+    // log one malformed request at a time.
     const { data: expected, error: secretErr } = await admin.rpc("internal_secret");
     if (secretErr) throw secretErr;
     if (!expected || req.headers.get("x-internal-secret") !== expected) {
       return json({ error: "Not authorized" }, 401);
     }
+
+    const { messageId } = await req.json();
+    if (!messageId) throw new Error("messageId is required");
 
     const { data: msg, error } = await admin
       .from("chat_messages")

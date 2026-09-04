@@ -253,7 +253,10 @@ export function UsersAccessScreen({ currentUser }) {
         </div>
       )}
 
-      {showNew && <NewUserDialog onClose={() => setShowNew(false)} onCreated={async () => { setShowNew(false); await load(); }} />}
+      {/* The dialog closes on a created account whether or not everything
+          after it landed; anything that didn't is said up here, where it
+          stays readable next to the list the admin now has to use. */}
+      {showNew && <NewUserDialog onClose={() => setShowNew(false)} onCreated={async warning => { setShowNew(false); setError(warning || ""); await load(); }} />}
     </div>
   );
 }
@@ -358,13 +361,17 @@ function NewUserDialog({ onClose, onCreated }) {
     setSaving(true);
     setError("");
     try {
-      await Db.createUserAccount({
+      const res = await Db.createUserAccount({
         firstName: form.firstName.trim(), lastName: form.lastName.trim(),
         email: form.email.trim(), password: form.password, role: form.role,
         cert: form.cert.trim() || form.role, level: form.level || null, isSubcontractor: form.isSubcontractor,
         invite: form.invite
       });
-      onCreated();
+      // An account that exists belongs in the list even when something after
+      // it went wrong — an invitation that didn't send, the name fields that
+      // didn't save. The warning rides up with it, because the way out of
+      // both is a button on the account this dialog is about to close over.
+      onCreated(res && res.warning);
     } catch (e) {
       setSaving(false);
       setError(e.message || "Couldn't create the account.");

@@ -50,9 +50,19 @@ export default defineConfig({
       dependencies: ["setup"],
       use: { ...devices["Desktop Chrome"], viewport: { width: 1440, height: 900 }, storageState: "e2e/.auth/state.json" }
     },
+    // The phone project exists for the layout and the client picker, and that
+    // is fieldOps.spec.js. The two-device and network suites are viewport-blind
+    // by their own admission, and running them again on a phone would only mint
+    // a second set of live drafts — so they are not in this project at all,
+    // rather than skipping themselves once per test. Same for the handful of
+    // fieldOps tests tagged @desktop: a desktop-only layout assertion, or a
+    // writer whose second copy proves nothing. What is left is what runs, so
+    // the run's skipped count means something again.
     {
       name: "mobile",
       dependencies: ["setup"],
+      testMatch: /fieldOps\.spec\.js/,
+      grepInvert: /@desktop/,
       use: { ...devices["Pixel 7"], storageState: "e2e/.auth/state.json" }
     }
   ],

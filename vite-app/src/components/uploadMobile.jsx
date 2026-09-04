@@ -99,10 +99,20 @@ export function UploadMobileScreen({ job, jobRecord, currentUser, onSent }) {
           }
         } catch (e) {
           if (!OfflineQueue.isNetworkError(e)) throw e;
-          await OfflineQueue.enqueue("report", {
-            jobDbId: job.dbId, jobNumber: job.id, file: it.file,
-            welds: it.welds.join(", "), interpretedBy: currentUser.name, recipient, clientKey: it.clientKey
-          });
+          try {
+            await OfflineQueue.enqueue("report", {
+              jobDbId: job.dbId, jobNumber: job.id, file: it.file,
+              welds: it.welds.join(", "), interpretedBy: currentUser.name, recipient, clientKey: it.clientKey
+            });
+          } catch (queueErr) {
+            // A whole PDF goes into the outbox, so this is the enqueue most
+            // likely to be refused for space. Unguarded, the raw IndexedDB
+            // complaint was what the tech read. This file (and everything
+            // after it) stays in the list, so nothing is lost by stopping.
+            setSending(false);
+            setError("No signal, and this device couldn't save it either — there may be no room left. The files are still listed here; try again once you're in range.");
+            return;
+          }
           queuedCount++;
         }
         // Stored or queued — either way this file is accounted for. Only a

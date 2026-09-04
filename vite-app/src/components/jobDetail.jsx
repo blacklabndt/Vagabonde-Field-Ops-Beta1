@@ -7,7 +7,7 @@ import { Toasts } from "../toastBus.js";
 
 // An idempotency key for a save (see Db.createTicket / uploadReport).
 const newClientKey = () => (crypto.randomUUID ? crypto.randomUUID() : null);
-import { Blueprint, Btn, TableScroll, TagX, Field, PdfGlyph, PdfLink, Dialog, ErrorBox, emailIn, contactLabel, splitContact, StatusTag, useMissingFields, SearchSelect, Loading, LoadingRow } from "./common.jsx";
+import { tabList, Blueprint, Btn, TableScroll, TagX, Field, PdfGlyph, PdfLink, Dialog, ErrorBox, emailIn, contactLabel, splitContact, StatusTag, useMissingFields, SearchSelect, Loading, LoadingRow } from "./common.jsx";
 
 export function JobDetailScreen({ job, currentUser, onStartJha, onOpenTicket, onStartTicket, jobRecord, setJobRecord, onJobChanged, onJobDeleted }) {
   // Prices — rate cards, ticket lines, the amounts they add up to — are for
@@ -15,6 +15,18 @@ export function JobDetailScreen({ job, currentUser, onStartJha, onOpenTicket, on
   // per the "round two" migration). Everyone else sees the ticket's number,
   // date and status, which is what a Helper needs.
   const seesPrices = pricesFor(currentUser);
+  // Raising a ticket needs the ticket tab. This is button visibility, not a
+  // tab change — the tabs themselves stay exactly as Users & access set them,
+  // and the billing screen is still reachable for anyone who has that tab
+  // even though CONTEXT_TABS keeps it out of the drawer. What it stops is a
+  // Helper (job tab, no ticket tab) starting a ticket the rate card would
+  // come back empty for: row-level security hands their account no rate
+  // lines, so the day filed as a numbered $0 draft with the crew's hours on
+  // it. Asked of tabList, the same question the drawer asks, so the two can
+  // never drift apart — and of seesPrices too, because the editor behind the
+  // button refuses a role that cannot read prices (a Coordinator holds the
+  // tab and would otherwise be sent to a screen that turns them away).
+  const canRaiseTickets = tabList(currentUser.tabs).includes("ticket") && seesPrices;
   const [showUpload, setShowUpload] = useState(false);
   const [showTicket, setShowTicket] = useState(false);
   const [editingRecord, setEditingRecord] = useState(false);
@@ -384,12 +396,14 @@ export function JobDetailScreen({ job, currentUser, onStartJha, onOpenTicket, on
             <div style={{ display: "flex", alignItems: "center", gap: 10, marginBottom: 12 }}>
               <h4 style={{ margin: 0, fontSize: 19 }}>Daily billing</h4>
               {awaitingApproval && <TagX variant="outline">Awaiting client approval</TagX>}
-              <Btn variant="primary" style={{ marginLeft: "auto" }} disabled={complete} onClick={() => setShowTicket(true)}>+ Create ticket</Btn>
+              {canRaiseTickets && <Btn variant="primary" style={{ marginLeft: "auto" }} disabled={complete} onClick={() => setShowTicket(true)}>+ Create ticket</Btn>}
             </div>
             <div style={{ fontSize: 12, color: "color-mix(in srgb, var(--color-text) 60%, transparent)", marginBottom: 10 }}>
-              {complete
-                ? "This job is complete. Tap a ticket to read it or send it to the client again."
-                : "Tap a draft to add the day's welds, hours and crew. Tap a sent ticket to read it."}
+              {!canRaiseTickets
+                ? "The day's tickets, as they were raised. Billing is the technician's to fill in."
+                : complete
+                  ? "This job is complete. Tap a ticket to read it or send it to the client again."
+                  : "Tap a draft to add the day's welds, hours and crew. Tap a sent ticket to read it."}
             </div>
             <TableScroll><table className="table">
               <thead><tr><th>Ticket</th><th>Date</th><th>Technician</th>{seesPrices && <th>Amount</th>}<th>Status</th><th></th></tr></thead>
@@ -406,15 +420,21 @@ export function JobDetailScreen({ job, currentUser, onStartJha, onOpenTicket, on
                   // save, and wrong about the rest — a finished job is exactly
                   // where someone needs to look up what was billed, and chase
                   // a client who never signed. Reading is not editing.
-                  const editable = t.status === "Draft" && !complete;
+                  // …and only for an account that may raise one: without the
+                  // ticket tab the editor opens onto an empty rate card, so
+                  // "open this draft" is an invitation to file a $0 day.
+                  const editable = t.status === "Draft" && !complete && canRaiseTickets;
                   // Reading a ticket is reading its bill; without the prices
                   // the row is information enough and opens nothing.
                   //
-                  // A draft waits for this job's record: the editor takes the
-                  // AFE, the LSD and the client rep from it, and tapped before
-                  // the record landed it opened showing the last job's — and
-                  // addressed the approval to that job's rep.
-                  const open = editable ? (recordLoaded ? () => onOpenTicket(t.id) : null)
+                  // A draft is tappable the moment it is listed, record or no
+                  // record: openTicketDraft will not mount the editor until
+                  // this job's record is in hand — it loads one itself when
+                  // the panel's read hasn't landed yet, and says so if that
+                  // fails. Making the row inert until then instead was a tap
+                  // that did nothing at all, for as long as the contacts read
+                  // takes, with only a tooltip to explain it.
+                  const open = editable ? () => onOpenTicket(t.id)
                     : seesPrices ? () => setViewingTicket(t.id) : null;
                   // Sent but not signed: still ours to pull back. The same
                   // people the tickets update policy names — that technician,
@@ -424,9 +444,7 @@ export function JobDetailScreen({ job, currentUser, onStartJha, onOpenTicket, on
                     <tr key={t.id} onClick={open || undefined}
                       tabIndex={open ? 0 : undefined}
                       role={open ? "button" : undefined}
-                      title={editable
-                        ? (recordLoaded ? "Open this draft to add the day's charges" : "Waiting for this job's details — see the Job record panel")
-                        : open ? "Read this ticket" : undefined}
+                      title={editable ? "Open this draft to add the day's charges" : open ? "Read this ticket" : undefined}
                       // Only the row's own key presses: an Enter on the cancel
                       // button bubbles up here too, and would open the ticket
                       // it just cancelled.
@@ -1311,10 +1329,20 @@ function UploadReportDialog({ job, jobRecord, currentUser, onClose, onSubmit }) 
       // the only way to file a report from a phone and had no offline path
       // at all: "Couldn't upload — try again", and the PDF died with the tab.
       if (!storedReport.current && OfflineQueue.isNetworkError(e)) {
-        await OfflineQueue.enqueue("report", {
-          jobDbId: job.dbId, jobNumber: job.id, file, welds: welds.trim(), interpretedBy: currentUser.name,
-          recipient: sent ? to.trim() : "", clientKey: uploadKey.current
-        });
+        // The outbox itself can refuse — a PDF is the biggest thing this app
+        // ever queues, and a tablet at its storage quota says no. Closing the
+        // dialog then would throw the file away silently, so the failure is
+        // shown here and the attachment stays on screen to try again.
+        try {
+          await OfflineQueue.enqueue("report", {
+            jobDbId: job.dbId, jobNumber: job.id, file, welds: welds.trim(), interpretedBy: currentUser.name,
+            recipient: sent ? to.trim() : "", clientKey: uploadKey.current
+          });
+        } catch (queueErr) {
+          setSaving(false);
+          setError("No connection, and this report couldn't be saved to the outbox on this device — the tablet may be out of storage.");
+          return;
+        }
         Toasts.show(sent
           ? "No connection — the report is in the outbox and will upload and send itself when you're back in range."
           : "No connection — the report is in the outbox and will upload when you're back in range.", "info");

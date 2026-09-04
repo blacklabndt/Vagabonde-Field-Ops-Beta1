@@ -2097,14 +2097,21 @@ export const Db = {
     // a still-unsigned ticket out of the chase without a word.
     const data = await fetchAllKeyset(async after => {
       let query = sbClient
-        .from("tickets").select("id, client_contact, chased_at")
+        .from("tickets").select("id, client_contact, chased_at, queried_at")
         .eq("status", "Awaiting approval");
       if (after != null) query = query.gt("id", after);
       const { data: rows, error } = await query.order("id").limit(RESPONSE_ROW_CAP);
       if (error) throw error;
       return rows || [];
     });
-    return data.map(t => ({ id: t.id, contactLabel: t.client_contact ? t.client_contact.name : "", chasedAt: t.chased_at || null }));
+    // queried_at comes along because a rep who pressed "Query this ticket"
+    // is waiting on the office, not on a reminder — and send-ticket-approval
+    // clears the query on every resend, so a bulk chase would wipe the
+    // question off the tracker before anyone had answered it.
+    return data.map(t => ({
+      id: t.id, contactLabel: t.client_contact ? t.client_contact.name : "",
+      chasedAt: t.chased_at || null, queriedAt: t.queried_at || null
+    }));
   },
 
   // The hazard assessments this person filed and has not closed out yet,
@@ -2393,11 +2400,29 @@ export const Db = {
     // so writing the new sum here would leave the row disagreeing with them
     // until the replacement below lands — which is the window the constraint
     // exists to close. Replacing the lines moves the total on its own.
-    const patch = { status };
+    //
+    // "Draft" is the word every save sends, not a decision anyone made about
+    // this ticket — the editor hardcodes it, and a queued replay carries the
+    // literal string it was enqueued with hours ago. If the office has sent
+    // the ticket for signature since, honouring that word would drag it back
+    // to Draft with a live approval token on it: out of the tracker's
+    // unsigned list, out of the chase, and still signable from the emailed
+    // link. Pulling a sent ticket back is withdraw_ticket_approval's job and
+    // nobody else's, so the rest of the patch lands and the status stays put.
+    // Written back as itself rather than left out of the patch: a save that
+    // carries neither delays nor a rep would otherwise update no columns at
+    // all, and an empty patch is not a request PostgREST will take — nor
+    // would it still be the permission probe the failure branch below reads.
+    const keepSent = status === "Draft" && row.status === "Awaiting approval";
+    const patch = { status: keepSent ? row.status : status };
     // undefined means the caller isn't touching delays; "" means cleared.
     if (delays !== undefined) patch.delays = delays || null;
-    if (clientContact) patch.client_contact = clientContact;
-    if (contractorContact) patch.contractor_contact = contractorContact;
+    // Same rule for the reps, and for the same reason: undefined is "not
+    // mine to touch", but a rep the technician deliberately cleared arrives
+    // as an empty name (or null) and has to be written, or the screen says
+    // one thing and the approval email goes to the old contact.
+    if (clientContact !== undefined) patch.client_contact = clientContact;
+    if (contractorContact !== undefined) patch.contractor_contact = contractorContact;
     // Ask for the row back: an update no policy allows reports success
     // having changed nothing (same trap as the delete below), which here
     // would mean quietly not-saving another technician's ticket — or, with
@@ -2430,9 +2455,15 @@ export const Db = {
     // the insert left the ticket empty at $0. The old lines are held here
     // and put back if the replacement fails; the edit fails, the money
     // doesn't vanish.
+    // line_order comes back with them, and orders them: it is the column the
+    // invoice prints by, and PostgREST hands rows over in heap order unless
+    // asked otherwise. Read unordered and put back on a sequence default, the
+    // restored ticket would keep every line and every dollar but lose the
+    // card's order — welds and charges interleaved on the client's bill,
+    // which is not the ticket the technician saved.
     const { data: oldLines, error: oErr } = await sbClient
-      .from("ticket_lines").select("kind, label, unit, quantity, unit_rate")
-      .eq("ticket_id", ticketId);
+      .from("ticket_lines").select("kind, label, unit, quantity, unit_rate, line_order")
+      .eq("ticket_id", ticketId).order("line_order");
     if (oErr) throw oErr;
     // Nothing read from a ticket that carries money means the lines are
     // there and this account can't see them (prices are Admins' and
@@ -2453,6 +2484,11 @@ export const Db = {
       );
       if (lErr) {
         if (oldLines && oldLines.length) {
+          // The spread carries each line's own line_order back with it —
+          // supplying the column is allowed (it is an ordinary insertable
+          // column whose default merely calls the sequence), so the restored
+          // lines land in the order they were saved in rather than in
+          // whatever order they were read out.
           await sbClient.from("ticket_lines")
             .insert(oldLines.map(l => ({ ticket_id: ticketId, ...l })))
             .then(() => {}, () => {});
@@ -2900,28 +2936,34 @@ export const Db = {
     });
     if (error) throw new Error(await readFnError(error));
     if (data && data.error) throw new Error(data.error);
+    // No account came back, so nothing exists to go on with: that is a
+    // failure, and the only one this call still throws.
+    if (!data || !data.user) throw new Error("The account wasn't created — the server didn't say who it made.");
     invalidate("profiles");
+    // Past this line the account EXISTS. Everything that can still go wrong
+    // is a thing to fix on the account, not a reason to hide it: these come
+    // back as a warning so the screen can list the new person and say what
+    // is left to do. Throwing them used to lose both.
+    const warnings = [];
+    // An invitation that didn't send — the function already says it in the
+    // voice of what to press next.
+    if (data.warning) warnings.push(data.warning);
     // The trigger provisions the profile from auth metadata, which has no
     // slot for the name parts or the subcontractor flag — so set them after.
-    if (data.user) {
-      try {
-        // Muted for the same reason as above: filling in the name parts is
-        // part of creating the account, so it should not also say "saved".
-        Toasts.mute();
-        try { await this.updateProfileDetails(data.user.id, { firstName, lastName, isSubcontractor, cert, level }); }
-        finally { Toasts.unmute(); }
-      } catch (e) {
-        // Half an account is not a success: without these the person prints
-        // with a blank level on the client's invoice and their mileage
-        // never appears. Say so, and say what to do — the account exists,
-        // so pressing Create again would only collide on the email.
-        throw new Error(`The account was created, but the name, level and subcontractor flag didn't save (${e.message || "the save failed"}). Close this, open the account in the list, and fill them in there.`);
-      }
+    try {
+      // Muted for the same reason as above: filling in the name parts is
+      // part of creating the account, so it should not also say "saved".
+      Toasts.mute();
+      try { await this.updateProfileDetails(data.user.id, { firstName, lastName, isSubcontractor, cert, level }); }
+      finally { Toasts.unmute(); }
+    } catch (e) {
+      // Half an account is not a success: without these the person prints
+      // with a blank level on the client's invoice and their mileage never
+      // appears. Say so, and say what to do — the account exists, so
+      // pressing Create again would only collide on the email.
+      warnings.push(`The account was created, but the name, level and subcontractor flag didn't save (${e.message || "the save failed"}). Open the account in the list and fill them in there.`);
     }
-    // The account exists either way; an invitation that didn't send is
-    // said in the same voice as the half-saved profile above.
-    if (data && data.warning) throw new Error(data.warning);
-    return data;
+    return { ...data, warning: warnings.join(" ") };
   },
 
   // ── The arcade ───────────────────────────────────────────────────────

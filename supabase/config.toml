@@ -419,7 +419,7 @@ enabled = true
 # format_options = "{\"keywordCase\":\"upper\",\"indent\":2,\"maxWidth\":80,\"commaStyle\":\"trailing\"}"
 
 # The approval page a client rep opens from their email. They have no account
-# — the single-use token in the link is the credential — so JWT verification
+# — the token in the link is the credential — so JWT verification
 # has to be off for this one function, or they see nothing but a 401. Declared
 # here rather than passed as --no-verify-jwt at deploy time, so it can't be
 # forgotten on a later deploy.
@@ -443,8 +443,10 @@ verify_jwt = false
 # The other side of the approval flow: this one mints the token and mails it,
 # so only a signed-in account may call it. The function checks the caller
 # itself (and that they are the ticket's technician, or an Admin or
-# Coordinator), but it was deployed with verification off, which left the
-# platform's own gate open and the whole guard resting on that one check.
-# Pinned here so a deploy cannot quietly hand it back.
+# Coordinator), but the live deployment still has verification off, which
+# leaves the platform's own gate open and the whole guard resting on that one
+# check. The `true` below is the intent, not yet the state: it takes effect on
+# the next CLI deploy of this function, and pins it so a later deploy cannot
+# quietly hand it back.
 [functions.send-ticket-approval]
 verify_jwt = true

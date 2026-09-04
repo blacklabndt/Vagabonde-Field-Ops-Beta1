@@ -16,9 +16,15 @@
 const fs = require("fs");
 const path = require("path");
 
+// Every hook React exports, not only the ones the app happens to use today:
+// the whole point of the scan is to catch the one that gets reached for next
+// and typed without its import, and a hook missing from this list is a hook
+// the scan silently approves.
 const HOOKS = [
   "useState", "useEffect", "useRef", "useCallback",
   "useMemo", "useReducer", "useContext", "useLayoutEffect",
+  "useId", "useSyncExternalStore", "useTransition", "useDeferredValue",
+  "useImperativeHandle", "useInsertionEffect",
 ];
 
 // Tags that are components to JSX but never imports.

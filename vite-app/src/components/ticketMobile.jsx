@@ -1,5 +1,5 @@
 import React, { useState, useEffect, useMemo, useRef } from "react";
-import { money, todayLocal, localDate, dayMonth, initialsOf, crewRoleFor, hours, lineTotal, gstOn } from "../data.js";
+import { money, todayLocal, localDate, dayMonth, initialsOf, crewRoleFor, hours, lineTotal, gstOn, seesPrices } from "../data.js";
 import { Db } from "../db.js";
 import { Blueprint, Btn, TagX, Field, ErrorBox, emailIn, NoJobSelected, QueuedPanel, NumField , Loading } from "./common.jsx";
 import { OfflineQueue } from "../offlineQueue.js";
@@ -57,8 +57,18 @@ const hasEntries = (weldLines, otherLines, crew, delays = "") =>
 // the work date and this ticket's own reps. Absent for a reopened draft and
 // for a ticket started from Home.
 export function TicketMobileScreen({ job, jobRecord, currentUser, onSaved, ticket, seed = null, onOpenJob = null }) {
+  // A ticket is a bill, and the rate card behind it is refused to anyone who
+  // isn't an Admin or a Technician — but refused row by row, so the catalog
+  // comes back as a real object with nothing in it. That is not a screen to
+  // open: the dropdowns would be empty and the day would file as a numbered
+  // $0 draft with the crew's hours on it. So the answer is settled here,
+  // before the first rates read, and the fetch never happens — which also
+  // keeps the emptied catalog from being written into this device's offline
+  // cache, where it would then price the next technician's ticket at zero.
+  const mayPrice = seesPrices(currentUser);
   const [rates, setRates] = useState(null);
-  const [loadError, setLoadError] = useState("");
+  const [loadError, setLoadError] = useState(mayPrice ? ""
+    : "Ticket prices are an Admin's or a Technician's — ask one of them to raise this ticket.");
   // Both belong to the in-progress-ticket recovery further down, but they are
   // read by the crew-seeding effect above it, so they are declared here.
   //
@@ -177,6 +187,7 @@ export function TicketMobileScreen({ job, jobRecord, currentUser, onSaved, ticke
   // each of those needlessly re-pulled the whole rate card and profile list.
   useEffect(() => {
     if (!job) return;
+    if (!mayPrice) return;
     (async () => {
       try {
         const r = await Db.getPublishedRatesForClient(job.clientId);
@@ -219,7 +230,7 @@ export function TicketMobileScreen({ job, jobRecord, currentUser, onSaved, ticke
   // from colliding with one raised in the meantime. Its own effect so a
   // work-date edit reprices the number without re-pulling rates or crew.
   useEffect(() => {
-    if (!job || ticket) return;
+    if (!job || ticket || !mayPrice) return;
     Db.nextTicketNumber(initialsOf(currentUser.name), workDate)
       .then(setTicketId)
       .catch(e => setLoadError(e.message || "Couldn't reserve a ticket number."));
@@ -590,14 +601,22 @@ export function TicketMobileScreen({ job, jobRecord, currentUser, onSaved, ticke
         setCreated(true);
         // A row that already existed for this key (the first save's answer
         // was lost) may hold an older set of lines: write today's over it.
-        if (saved.existing) await Db.updateTicket({ ticketId: savedId, lines: buildLines(), status: "Draft", delays });
+        if (saved.existing) await Db.updateTicket({
+          ticketId: savedId,
+          clientContact: { name: ticketClientContact || jobRecord.clientRep }, contractorContact: { name: ticketContractorContact || jobRecord.contractorRep },
+          lines: buildLines(), status: "Draft", delays
+        });
         await Db.saveCrewForTicket(savedId, crew);
       } else {
         // Already in the database — either a reopened draft, or a retry after
         // the approval email failed. Both want the same thing: write what is on
-        // screen now over what is stored.
+        // screen now over what is stored. The reps included: they are editable
+        // on this screen, and leaving them out of the patch silently kept the
+        // stored pair while the recovery copy was deleted as saved.
         await Db.updateTicket({
-          ticketId: savedId, lines: buildLines(),
+          ticketId: savedId,
+          clientContact: { name: ticketClientContact || jobRecord.clientRep }, contractorContact: { name: ticketContractorContact || jobRecord.contractorRep },
+          lines: buildLines(),
           status: "Draft",
           delays
         });

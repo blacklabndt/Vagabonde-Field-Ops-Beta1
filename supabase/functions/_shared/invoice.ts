@@ -70,6 +70,16 @@ const day = (s: string) => {
     dt.toLocaleDateString("en-CA", { month: "short" }).replace(".", "") + " " + y;
 };
 
+// A moment in time, in the crew's own zone. Edge Functions run in UTC, so a
+// ticket signed at half past six on a Grande Prairie evening stamped itself
+// with the next day's date on the bill the rep was signing. Every stamp a
+// client or the office reads goes through here.
+export const edmontonStamp = (iso: string) => {
+  const d = new Date(iso);
+  return isNaN(+d) ? "" : d.toLocaleString("en-CA",
+    { timeZone: "America/Edmonton", dateStyle: "medium", timeStyle: "short" });
+};
+
 // The contact is stored as one label — "Rep · phone · email". The header
 // prints all of it; the signature line wants only who is signing.
 const nameOnly = (v: unknown) => String(v ?? "").split("·")[0].trim();
@@ -280,7 +290,7 @@ export function renderInvoice(d: InvoiceData): string {
   ${signed ? `
   <div class="stamp">${sigImage(d.ticket.approved_signature)}<strong>Approved</strong><br>
     Signed by ${esc(d.ticket.approved_by_email || "")}${d.ticket.approved_at
-      ? " on " + esc(new Date(d.ticket.approved_at).toLocaleString("en-CA")) : ""}${d.ticket.approval_sent_to
+      ? " on " + esc(edmontonStamp(d.ticket.approved_at)) : ""}${d.ticket.approval_sent_to
       ? `<br><span class="mute">Approval link sent to ${esc(d.ticket.approval_sent_to)}</span>` : ""}
   </div>` : `
   <div class="wrap"><table style="margin-top:14px">

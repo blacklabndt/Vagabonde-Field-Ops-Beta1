@@ -53,6 +53,23 @@ keypair (`npx web-push generate-vapid-keys` — public key into
 secrets), then `supabase db push`, deploy all functions, set secrets, and
 deploy the Worker. Path A avoids all of this.
 
+> **Check the `.env` actually took.** `vite-app/src/config.js` falls back
+> to this beta project's URL and publishable key when
+> `VITE_SUPABASE_URL` / `VITE_SUPABASE_ANON_KEY` are missing — which is
+> what keeps a fresh `npm run dev` working, and also means a `.env` that
+> is absent, misnamed, or added after the build silently produces an app
+> pointed at the original live project rather than one that refuses to
+> start. It is a build-time substitution, so it is settled when
+> `npm run build` runs, not when the Worker serves. Verify before handing
+> the address out: sign in on the new deployment and confirm the data is
+> the new project's, or grep the built bundle in `vite-app/dist/` for the
+> old project ref (`eielmvxzdwwprmmfamlq`) and expect no hits.
+>
+> Before `supabase db push`, look in `supabase/handover/` for a
+> `PENDING-*.sql` — that is where a schema fix lives once it is written
+> and before it has been applied anywhere. Anything still sitting there is
+> not in `migrations/` and will not be in the fresh project.
+
 ## The custom domain
 
 Client-facing links currently use the Worker's `workers.dev` address. A

@@ -21,7 +21,10 @@ Cloudflare Worker `solitary-snowflake-ee22` (assets + `/approve` proxy in
   at `20260817040000_beta1_baseline.sql` — the whole schema squashed into
   one file, generated from the live catalogs; the 77 evolutionary
   migrations it replaced live in the prototype archive. Never apply the
-  baseline to the live project; it is for fresh environments.
+  baseline to the live project; it is for fresh environments. A DB fix that
+  is written but not yet applied waits in
+  `supabase/handover/PENDING-audit-migration.sql` (probes beside it) — it is
+  a draft, not history, until it is applied and filed under migrations.
 - RLS changes get probed live with `set_config('request.jwt.claims', …)`
   role simulation before they ship. Permissive policies OR together — a
   new `FOR ALL` policy can silently void an older condition.
@@ -35,12 +38,22 @@ Cloudflare Worker `solitary-snowflake-ee22` (assets + `/approve` proxy in
   schedule has `follows_default` on prices from the house card, live.
   Publishing matters exactly once per card — after that, edits go live as
   they save — which is why the Publish button hides once pressed.
+- A saved ticket can hold lines the card no longer offers. linesToForm
+  returns them as `orphans`; the ticket screen lists them read-only under
+  "No longer on the rate card" (× to drop one), buildLines writes them back
+  verbatim — label, unit and the rate they were filed at — and their cents
+  are in the total. Silently dropping them would rewrite somebody's bill.
 - Crew hours are private: the ticket_crew read policy is own rows, Admin/
   Coordinator, or crewmates on a shared ticket (private.shares_ticket).
   Never widen it back to a tab check.
 - PostgREST silently caps responses at 1,000 rows. Anything that means
-  "all of them" goes through fetchAllPages (the reference lists and the
-  exports already do).
+  "all of them" pages, and `paging.js` has two shapes: fetchAllPages
+  (concurrent, by OFFSET) for the reference lists, where a row deleted
+  mid-walk only costs a reappearance next load; fetchAllKeyset
+  (sequential, "the next thousand after this id") for anything people are
+  paid or billed from, where an OFFSET walk can skip a row silently.
+  listTicketsForExport is the exception: search_tickets is an RPC with no
+  cursor, so it pages by page_num and keeps that caveat.
 - The offline queue is for work only — scores, telemetry and other
   nice-to-haves call the API directly and fail soft.
 - Tabs are PERMISSION; drawer visibility is code. The contextual screens
@@ -48,8 +61,11 @@ Cloudflare Worker `solitary-snowflake-ee22` (assets + `/approve` proxy in
   menu — they open from a job's own page, per Kyle. Never "hide" a screen
   by removing its tab from a profile: that revokes RLS/storage access too,
   which is exactly the invisible breakage that rule replaced.
-- Client-facing HTML is rendered by `supabase/functions/_shared/invoice.ts`
-  and escaped with `esc()`; the in-app viewer iframe stays sandboxed.
+- Client-facing HTML: the invoice body is
+  `supabase/functions/_shared/invoice.ts`; the approval page's own chrome
+  (`page`, `signForm`, `queryForm`) is approve-ticket's. Both escape every
+  interpolated value with `esc()`, which lives in `_shared/mail.ts`. The
+  in-app viewer iframe stays sandboxed.
 - Accounts are created by the create-user Edge Function (Admin-gated,
   service key, arrives email-confirmed), never by client signUp: the
   signup endpoint answers to anyone with the publishable key, so the
@@ -76,13 +92,21 @@ Cloudflare Worker `solitary-snowflake-ee22` (assets + `/approve` proxy in
   mail.ts translates that refusal into a plain message naming the fix.
 - Approval tokens are stored hashed (`sha256:` + hex, see
   `_shared/approvalToken.ts` and migration 20260902211209); the raw token
-  exists only in the emailed link. Approving is the service role's act
-  alone: the tickets UPDATE policy's WITH CHECK pins the approval columns,
-  so no signed-in account can set Approved. Probe it with role simulation
-  if you touch that policy.
-  The role→tabs defaults live in TWO places that must move together:
+  exists only in the emailed link. The token is NOT single-use — signing
+  does not null it, so the link stays the rep's way back to the read-only
+  signed page until the 30-day expiry (a resend refuses an Approved
+  ticket, so burning it left them with no copy). Re-signing is refused
+  three ways over: the already-approved branch returns before the POST
+  handler, the sign UPDATE carries `.is("approved_at", null)`, and
+  `authenticated` has no grant on the column. Only a resend replaces a
+  token, and `withdraw_ticket_approval` nulls one on purpose. Approving is
+  the service role's act alone: the tickets UPDATE policy's WITH CHECK
+  pins the approval columns, so no signed-in account can set Approved.
+  Probe it with role simulation if you touch that policy.
+- The role→tabs defaults live in TWO places that must move together:
   ROLE_PRESETS in vite-app/src/data.js and tabs_for_role() in the
-  database (create-user provisions from the latter).
+  database (create-user provisions from the latter). data.test.mjs reads
+  the migration back and fails on drift.
 - Chat push: an insert trigger fires the chat-push function via pg_net;
   it sends Web Push (VAPID_* secrets) to push_subscriptions minus the
   sender and prunes endpoints answering 404/410. The handlers live in
@@ -154,6 +178,12 @@ session has set `app.confirm_total_wipe = 'yes'`.
   `seesPrices(user)` in data.js is the one client-side answer; Job detail,
   Open tickets and the tracker all ask it. A Coordinator cannot price a
   ticket until the role is added to those policies.
+- Money that leaves the building is read with the service role, not taken
+  from the caller: send-ticket-approval builds the emailed summary from its
+  own `loadInvoice` read, because the database hands a non-price role null
+  totals and the browser's figures are whatever that role could see. Same
+  reason the tracker's money buttons ("Chase all unsigned") sit behind
+  `seesPrices` — one tap would otherwise mail every client a $0.00 approval.
 - tickets has a column-level UPDATE grant: signed-in accounts write
   status, client_contact, contractor_contact, delays and chased_at, nothing
   else. The approval plumbing (approval_token/sent_at/expires_at/sent_to/
@@ -198,6 +228,12 @@ session has set `app.confirm_total_wipe = 'yes'`.
   them), and the client removes the PDFs from the two buckets. Jobs are
   chosen by created_at on local days. It is the one bulk delete in the app;
   keep every one of those gates.
+- The archive build reads inside `OfflineCache.liveOnly(fn)`: a remembered
+  copy must never stand in for the server's answer when the clear behind it
+  is a real delete. Inside it readThrough rethrows instead of falling back,
+  and the failed read becomes a missing entry, which blocks the clear. The
+  flag is module-wide and depth-counted, so nothing else may read from the
+  cache while a build runs — keep the build's reads inside it.
 - `authenticated` has USAGE on schema `private` (migration 20260903055300).
   A policy expression is stored resolved and never needed it; a SQL or
   plpgsql function that runs as the caller and names `private.user_role()`
