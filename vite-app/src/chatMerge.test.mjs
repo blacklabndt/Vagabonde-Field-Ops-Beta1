@@ -6,7 +6,7 @@
 
 import test from "node:test";
 import assert from "node:assert/strict";
-import { mergeIn, inOrder, quotedKey, reactionsKey } from "./chatMerge.js";
+import { mergeIn, inOrder, quotedKey, reactionsKey, reconcileWindow } from "./chatMerge.js";
 
 const msg = (id, over = {}) => ({
   id, profileId: "p1", name: "Aaron Toews", body: "hello",
@@ -102,4 +102,47 @@ test("the keys tell apart what matters and ignore order", () => {
   );
   assert.notEqual(quotedKey({ name: "A", body: "x" }), quotedKey({ name: "A", body: "y" }));
   assert.equal(quotedKey(null), "");
+});
+
+// reconcileWindow — the other half of the merge: what the refresh page says
+// has been deleted. The stamps here are the shape the database really sends
+// (an offset, not a Z) precisely because readAt is an epoch and the two
+// cannot be compared as text.
+const iso = (h, m, s = 0) =>
+  `2026-08-20T${String(h).padStart(2, "0")}:${String(m).padStart(2, "0")}:${String(s).padStart(2, "0")}.000+00:00`;
+const at = (id, h, m) => msg(id, { createdAt: iso(h, m) });
+
+test("a message deleted inside the page's window leaves the room", () => {
+  const prev = [at("a", 10, 0), at("b", 10, 1), at("c", 10, 2)];
+  // b was deleted while realtime was down, so the refresh page skips it.
+  const out = reconcileWindow(prev, [prev[0], prev[2]], Date.parse(iso(10, 5)));
+  assert.deepEqual(out.map(m => m.id), ["a", "c"]);
+});
+
+test("history older than the page is not the page's to judge", () => {
+  const prev = [at("h", 9, 0), at("a", 10, 0), at("c", 10, 2)];
+  const out = reconcileWindow(prev, [prev[1], prev[2]], Date.parse(iso(10, 5)));
+  assert.deepEqual(out.map(m => m.id), ["h", "a", "c"]);
+});
+
+test("a send that landed after the fetch was asked for is kept", () => {
+  // The page carries a message from 10:20, so its window reaches that far —
+  // but ours was sent at 10:10, after the 10:05 read, and the page snapshot
+  // could not have carried it.
+  const prev = [at("a", 10, 0), at("mine", 10, 10)];
+  const out = reconcileWindow(prev, [prev[0], at("later", 10, 20)], Date.parse(iso(10, 5)));
+  assert.deepEqual(out.map(m => m.id), ["a", "mine"]);
+});
+
+test("a stale cached page cannot delete what arrived after it", () => {
+  // A poll that failed on a blip is answered from the read cache, so the
+  // page is old news; the realtime message that followed it stays.
+  const prev = [at("a", 10, 0), at("b", 10, 3), at("live", 10, 30)];
+  const out = reconcileWindow(prev, [prev[0], prev[1]], Date.parse(iso(10, 40)));
+  assert.equal(out, prev, "nothing removed, so nothing re-renders");
+});
+
+test("an empty page removes nothing", () => {
+  const prev = [at("a", 10, 0), at("b", 10, 1)];
+  assert.equal(reconcileWindow(prev, [], Date.now()), prev);
 });

@@ -10,6 +10,8 @@ cp .env.example .env      # already has the public URL + publishable key
 npm run dev               # http://localhost:5173
 npm run build             # -> dist/, static files to host anywhere
 npm run preview           # serve that build locally
+npm test                  # render-name scan + node --test on src/*.test.mjs
+npm run test:e2e          # Playwright, against the live project
 ```
 
 Two things worth knowing before editing:

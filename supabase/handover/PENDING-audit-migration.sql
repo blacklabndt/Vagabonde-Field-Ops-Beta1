@@ -2,8 +2,9 @@
 -- then file this under supabase/migrations/<version>_the_token_is_not_the_
 -- record.sql with the version the applier gave it.
 --
--- Round six: three seams the fourth review found, and three more that the
--- hard review of this draft found in the draft itself and beside it.
+-- Round six: three seams the fourth review found, three more that the hard
+-- review of this draft found in the draft itself and beside it, and one the
+-- adversarial-flow pass found in the two policies that let a report be filed.
 --
 -- 1 · The token is a copy of the record, not the record. tab_access() and
 --     user_role() read the access token's app_metadata first and only asked
@@ -90,6 +91,21 @@
 --     days behind it and the four quarters beside the total. It is
 --     SECURITY INVOKER on purpose: RLS is what keeps crew hours private,
 --     and it must stay what keeps them private.
+-- 7 · A Helper could file a radiographic report. reports_insert and the
+--     storage policy `reports write` each took the job tab as well as the
+--     upload tab, and the job tab is one a Helper holds — so an account
+--     that is on site to assist could put a PDF in the reports bucket and
+--     a row against any job, and the report screen would then mail that
+--     interpretation to the contractor over the company's name. Tabs are
+--     the permission, and the permission for filing a report is `upload`:
+--     neither ROLE_PRESETS nor tabs_for_role() has ever given a Helper
+--     that tab, which is exactly the promise these two policies weren't
+--     keeping. The job arm comes off both WRITE predicates and stays on
+--     both READ ones — anyone who can open a job may read what is filed
+--     against it, which is how a Helper sees the reports for the day they
+--     worked. Job detail's "+ Upload report" button asks the same question
+--     of tabList in this round, but the button is the courtesy and this is
+--     the gate: the API took the insert whether it was rendered or not.
 
 -- The two policy drops in section 2 take an ACCESS EXCLUSIVE lock on
 -- profiles — the table every single request reads through user_role(). If
@@ -518,3 +534,32 @@ comment on function public.dose_totals(date, date) is
 -- default EXECUTE to public and anon comes off, authenticated keeps it.
 revoke execute on function public.dose_totals(date, date) from public, anon;
 grant  execute on function public.dose_totals(date, date) to authenticated;
+
+-- ── 7 · Filing a report needs the report tab ────────────────────────────
+-- Both predicates are the live ones verbatim with the 'job' arm removed and
+-- nothing else touched: same policy names, same commands, same roles.
+-- reports_insert is `to public` in the catalog and stays `to public` — the
+-- anon key could never satisfy has_any_tab() anyway, and widening or
+-- narrowing that grant is not this finding's to do. It keeps has_any_tab
+-- with one member left in its array for the same reason: it is the live
+-- call with an arm gone, not a rewrite.
+--
+-- The two read policies are deliberately absent from this section.
+-- reports_select and storage's `reports read` keep every tab they have,
+-- including 'job': reading what is filed against a job you worked is not
+-- filing one.
+--
+-- Each drop takes an ACCESS EXCLUSIVE lock on its table, and one of them is
+-- storage.objects — every PDF the app opens goes through it. The `set local
+-- lock_timeout` at the top of this file covers these two as well; if the
+-- migration fails here it has failed on the wait, not on the change.
+
+drop policy if exists reports_insert on public.reports;
+create policy reports_insert
+  on public.reports for insert to public
+  with check ((select private.has_any_tab(variadic array['upload'::text])));
+
+drop policy if exists "reports write" on storage.objects;
+create policy "reports write"
+  on storage.objects for insert to authenticated
+  with check (((bucket_id = 'reports'::text) and (select private.has_tab('upload'::text))));

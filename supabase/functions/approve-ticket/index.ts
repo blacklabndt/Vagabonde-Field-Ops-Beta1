@@ -317,28 +317,50 @@ async function handle(req: Request): Promise<Response> {
       if (!who || !text) {
         return page(ask + header + `<div class="actions"><p style="color:#8a3b3b;font-size:13px">Please give your name and say what needs looking at.</p></div>` + signForm(fingerprint) + queryForm(fingerprint, who, text));
       }
-      // The rep's words always land. The cooldown used to ride on this
-      // update's own filter, which meant a second — different — query inside
-      // the window wrote nothing while the page still told the rep it had
-      // been sent: whatever they came back to say was simply lost. The write
-      // is unconditional now, bar approved_at, because a signed ticket takes
-      // no query.
+      // The rep's words always land, and they land FIRST — before anything
+      // is spent. The cooldown used to ride on this update's own filter,
+      // which meant a second — different — query inside the window wrote
+      // nothing while the page still told the rep it had been sent: whatever
+      // they came back to say was simply lost. The write is unconditional
+      // now, bar approved_at, because a signed ticket takes no query.
       //
-      // It is the EMAIL that is throttled instead, which is what the limit
-      // was ever for: this link is the whole credential and it travels —
-      // forwarded round a client's office, or double-tapped on a slow phone —
-      // and a mail per request is an inbox flood and the Resend quota that
-      // every other mail in this app draws on spent by one rep.
+      // The order matters as much as the condition. The gate below spends a
+      // quarter of an hour of the office's peace by moving a timestamp; when
+      // it moved first and this write then failed, the window had been spent
+      // on a ticket carrying nothing new for anyone to read — a rep silenced
+      // by a hiccup. Words on the record, then the window.
       //
-      // The gate is therefore a conditional UPDATE of its own, and it runs
-      // FIRST. Deciding it from the queried_at that came back with the ticket
-      // was no gate at all: that read happens at the top of handle(), before
-      // any of the racing requests has written anything, so every one of them
+      // Note what this no longer writes: queried_at. Setting it here on every
+      // post slid the window forward each time, so the throttle lifted only
+      // after fifteen minutes of complete silence rather than fifteen minutes
+      // after the last mail — a rep with something to add every ten minutes
+      // was never mailed about again.
+      const { error: qErr } = await admin.from("tickets")
+        .update({ query_text: text, query_by: who })
+        .eq("id", ticket.id).is("approved_at", null);
+      if (qErr) throw qErr;
+
+      // Then the mail gate, which is what the limit was ever for: this link
+      // is the whole credential and it travels — forwarded round a client's
+      // office, or double-tapped on a slow phone — and a mail per request is
+      // an inbox flood and the Resend quota that every other mail in this app
+      // draws on spent by one rep.
+      //
+      // queried_at is the office's timestamp now, not the rep's: it means
+      // "when we last told them". This conditional UPDATE is the only writer
+      // of it, so a burst moves it exactly once and mails exactly once.
+      // Deciding that from the queried_at that came back with the ticket was
+      // no gate at all: that read happens at the top of handle(), before any
+      // of the racing requests has written anything, so every one of them
       // sees the same stale null and every one of them mails — the flood the
       // limit exists to stop, arriving by the one door it was watching. The
-      // database decides instead. The row's timestamp moves past the window
-      // exactly once, and .select() is what makes a zero-row update — the
-      // requests that lost — tell itself apart from the one that won.
+      // database decides instead, and .select() is what makes a zero-row
+      // update — the requests that lost — tell itself apart from the winner.
+      //
+      // The tracker and the archive print queried_at as when the query came
+      // in, which for a second query inside the window is a few minutes early
+      // against the fresher words beside it. They show Queried either way and
+      // a resend clears the lot, so nothing downstream is misled by the gap.
       const cooledSince = new Date(Date.now() - QUERY_COOLDOWN_MS).toISOString();
       const { data: won, error: gateErr } = await admin.from("tickets")
         .update({ queried_at: new Date().toISOString() })
@@ -347,19 +369,12 @@ async function handle(req: Request): Promise<Response> {
         .select("id");
       if (gateErr) throw gateErr;
       const mayMail = (won?.length ?? 0) > 0;
-      // Then the words, unconditionally bar approved_at. Whoever lost the
-      // gate still came back with something to say, and the tracker is where
-      // it has to appear.
-      const { error: qErr } = await admin.from("tickets")
-        .update({ queried_at: new Date().toISOString(), query_text: text, query_by: who })
-        .eq("id", ticket.id).is("approved_at", null);
-      if (qErr) throw qErr;
       if (mayMail) {
         // A send that throws still spends the window, deliberately. Putting
-        // queried_at back would date the query earlier than the words that
-        // are now on the ticket — a timestamp that lies about when the rep
-        // spoke, to buy a retry nobody has asked for. The office is told by
-        // the logError below and the query is on the tracker either way.
+        // queried_at back would say the office had not been told when the
+        // telling was attempted, to buy a retry nobody has asked for. The
+        // failure is on the error log below and the query is on the tracker
+        // either way.
         try { await notifyQuery(admin, row, who, text); }
         catch (e) { await logError("approve-ticket", "Queried, but the office wasn't told: " + (e as Error).message, { ticket: ticket.id }); }
       }

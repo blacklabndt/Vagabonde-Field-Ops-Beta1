@@ -161,6 +161,32 @@ test("a lost signal stops the flush and leaves everything exactly as it was", as
   assert.deepEqual(left.map(i => i.lastError), [null, null], "and nothing is marked as stuck — it is only waiting");
 });
 
+test("a refusal the server actually gave is a reason even with the radio down", async () => {
+  // The truck is between towers by the time the flush runs, but the answer
+  // being replayed came from the server all the same: db.js flags those
+  // `plain`. isNetworkError says "offline" for ANY error while onLine is
+  // false, so without the `.plain` check first this stopped the flush, wrote
+  // no reason, and left the crew with a lit badge and nothing to read.
+  nav.onLine = false;
+  await queuedAt(1_000, "ticket", { n: 1 });
+  await queuedAt(2_000, "ticket", { n: 2 });
+
+  const seen = [];
+  const r = await OfflineQueue.flush({
+    ticket: async p => {
+      seen.push(p.n);
+      if (p.n === 1) throw Object.assign(new Error("J-77 was completed — no more tickets can be raised against it."), { plain: true });
+    }
+  });
+
+  assert.deepEqual(seen, [1, 2], "a refusal is not a dead radio: the rest of the day still goes");
+  assert.deepEqual(r, { synced: 1, stillOffline: false });
+  const left = await OfflineQueue.list();
+  assert.equal(left.length, 1);
+  assert.equal(left[0].payload.n, 1);
+  assert.match(left[0].lastError, /was completed/, "the reason is on the item, not lost to the weather");
+});
+
 test("an item this build has no handler for says so instead of blinking forever", async () => {
   await queuedAt(1_000, "somethingFromANewerBuild", { n: 1 });
 
@@ -273,4 +299,18 @@ test("attachAutoFlush replays at once and again on every `online`", async () => 
 
   globalThis.window.addEventListener = () => {};
   globalThis.window.removeEventListener = () => {};
+});
+
+test("a flagged failure is a lost connection even with the radio showing bars", () => {
+  // An Edge Function call that never left the device comes back from
+  // functions-js as "Failed to send a request to the Edge Function" — words
+  // no pattern here can match — so db.js flags the Error instead. Without
+  // the flag the item is parked as unsyncable and the next flush cries that
+  // charges weren't applied.
+  nav.onLine = true;
+  const flagged = new Error("Failed to send a request to the Edge Function");
+  flagged.networkFailure = true;
+  assert.equal(isNetworkError(flagged), true);
+  assert.equal(isNetworkError(new Error("Failed to send a request to the Edge Function")), false,
+    "unflagged, the same words are just words — the flag is the evidence");
 });

@@ -43,6 +43,69 @@ function linesToForm(lines, keepQuantities, catalog) {
   return { welds, others, orphans };
 }
 
+// Catalog keys are kind:label, and the catalog dresses that label up for the
+// dropdown — " · RT film" for the three RT modes, " — per weld" for a method
+// — which is the label the ticket line then stores. Both halves are built in
+// getPublishedRatesForClient; read the other way round, this is how a line
+// carrying nothing but a key the card has since dropped is matched back to
+// the row it was saved as.
+const KEY_LABEL_SUFFIX = {
+  rt_film: " · RT film", rt_cr: " · RT CR", rt_dr: " · RT DR",
+  method: " — per weld", custom_method: " — per weld"
+};
+const storedLabelForKey = key => {
+  const at = String(key).indexOf(":");
+  return at < 0 ? String(key) : key.slice(at + 1) + (KEY_LABEL_SUFFIX[key.slice(0, at)] || "");
+};
+
+// The recovery copy holds a line the way the card knew it — a key and a
+// quantity — and the card goes on being edited underneath it. A line that
+// leaves the card between the copy being written and the draft being
+// reopened leaves the copy naming a key nothing answers to: the render drops
+// it, buildLines never writes it, and the next Save deletes a charge that is
+// sitting on the stored ticket. The loader had already put that same row in
+// `orphans`, verbatim; restoring the copy over the top threw the orphan away
+// as well, so the money went with it in silence.
+//
+// So the two sources each answer the half they know. The stored rows are the
+// authority for what exists and what it is priced at; the copy is the
+// authority for what was taken off — an off-card charge someone removed on
+// purpose must stay removed, which is why an orphan the copy already carries
+// is left exactly as the copy left it and never rebuilt from the row. The
+// quantity is the copy's: the line was still live when that figure was
+// typed, and the day's figures are the whole reason there is a copy at all.
+function reconcileRecoveredLines({ weldLines, otherLines, orphanLines }, draftRows, catalog) {
+  if (!catalog || !draftRows || !draftRows.length) return { weldLines, otherLines, orphanLines };
+  const liveWeld = new Set(catalog.welds.map(w => w.key));
+  const liveService = new Set(catalog.others.map(s => s.key));
+  // Labels already spoken for, so one stored row can never become two
+  // charges on the same ticket.
+  const spokenFor = new Set(orphanLines.map(o => o.label));
+  const rescued = [];
+  const keep = (lines, live) => lines.filter(l => {
+    if (live.has(l.key)) return true;
+    const row = draftRows.find(r => r.label === storedLabelForKey(l.key));
+    // Nothing stored under that key — a new ticket's copy, or a line that
+    // left the ticket as well as the card. There is no price to put on it,
+    // so it stays where it is and the render goes on ignoring it.
+    if (!row) return true;
+    if (!spokenFor.has(row.label)) {
+      spokenFor.add(row.label);
+      rescued.push({
+        kind: row.kind, label: row.label, unit: row.unit,
+        quantity: Number(l.qty) || 0, unit_rate: Number(row.unit_rate) || 0
+      });
+    }
+    return false;
+  });
+  const welds = keep(weldLines, liveWeld);
+  const others = keep(otherLines, liveService);
+  return {
+    weldLines: welds, otherLines: others,
+    orphanLines: rescued.length ? [...orphanLines, ...rescued] : orphanLines
+  };
+}
+
 // Everything a crew row carries that is a measurement of today.
 const CREW_FIGURES = ["straight", "ot", "solo", "soloOt", "dose", "mileage"];
 // A typed standby explanation counts too: a ticket that is nothing but a
@@ -252,6 +315,10 @@ export function TicketMobileScreen({ job, jobRecord, currentUser, onSaved, ticke
   // once: the rates object is refetched when the work date changes, and
   // re-running this then would wipe edits back to the stored draft.
   const draftLoaded = useRef(false);
+  // The stored ticket's lines exactly as the loader read them. Kept because
+  // the recovery reader below has to be able to name and price a line the
+  // card dropped after the copy was written — see reconcileRecoveredLines.
+  const draftRows = useRef(null);
   // The read itself, kept out of the effect because "Start empty" on a
   // reopened draft runs it a second time: throwing away an unsaved copy has
   // to mean going back to what is STORED, not to a blank ticket. Every field
@@ -260,6 +327,7 @@ export function TicketMobileScreen({ job, jobRecord, currentUser, onSaved, ticke
   const loadDraft = async () => {
     try {
       const [row, savedCrew] = await Promise.all([Db.getTicket(ticket), Db.listCrewForTicket(ticket)]);
+      draftRows.current = row.ticket_lines || [];
       const { welds, others, orphans } = linesToForm(row.ticket_lines, true, rates);
       setWeldLines(welds);
       setOtherLines(others);
@@ -340,14 +408,28 @@ export function TicketMobileScreen({ job, jobRecord, currentUser, onSaved, ticke
         const w = hit && hit.value;
         if (w && hasEntries(w.weldLines || [], w.otherLines || [], w.crew || [], w.delays || "", w.orphanLines || [])) {
           wipRestored.current = true;
-          if (w.weldLines) setWeldLines(w.weldLines);
-          if (w.otherLines) setOtherLines(w.otherLines);
-          // The off-card charges as the copy left them — a removed one has
-          // to stay removed. An empty list is a real answer here, unlike the
-          // fields below, so it is the key's presence that decides: a copy
-          // written before this was saved has none, and its stored orphans
-          // are left as the loader read them rather than emptied.
-          if (Array.isArray(w.orphanLines)) setOrphanLines(w.orphanLines);
+          // The stored ticket in the shape the form holds it: what stands in
+          // for anything the copy doesn't carry, and the material a line the
+          // card has dropped since is rebuilt from. Only a reopened draft has
+          // rows — this effect waits on loadingTicket, so by here the loader
+          // has been and gone — and only then is the catalog certain to have
+          // arrived, which is why both are asked for rather than assumed.
+          const stored = draftRows.current && rates
+            ? linesToForm(draftRows.current, true, rates)
+            : { welds: [], others: [], orphans: [] };
+          const merged = reconcileRecoveredLines({
+            weldLines: w.weldLines || stored.welds,
+            otherLines: w.otherLines || stored.others,
+            // The off-card charges as the copy left them — a removed one has
+            // to stay removed. An empty list is a real answer here, unlike the
+            // fields below, so it is the key's presence that decides: a copy
+            // written before this was saved has none, and the stored rows
+            // answer for it instead of being emptied.
+            orphanLines: Array.isArray(w.orphanLines) ? w.orphanLines : stored.orphans
+          }, draftRows.current, rates);
+          setWeldLines(merged.weldLines);
+          setOtherLines(merged.otherLines);
+          setOrphanLines(merged.orphanLines);
           if (w.crew) setCrew(w.crew);
           // What the Create ticket dialog chose just now — the day, this
           // ticket's reps — outranks what the recovery copy remembers: the
@@ -671,7 +753,18 @@ export function TicketMobileScreen({ job, jobRecord, currentUser, onSaved, ticke
             jobDbId: job.dbId, technicianId: currentUser.id, workDate,
             clientContact: { name: ticketClientContact || jobRecord.clientRep }, contractorContact: { name: ticketContractorContact || jobRecord.contractorRep },
             lines: buildLines(), status: "Draft",
-            crew, delays, alreadyCreated: inDb, sendForApproval, approvalTo: to, clientKey
+            crew, delays, alreadyCreated: inDb, sendForApproval, approvalTo: to, clientKey,
+            // Marked when it was the SEND whose answer went missing, not the
+            // save — `stage` is "email" only once sendTicketApproval has been
+            // called. The send is what moves the row to Awaiting approval, so
+            // one that landed after the radio dropped the reply leaves this
+            // item looking exactly like a ticket the office sent out from
+            // under it: the next flush meets the refused update, sounds the
+            // alarm about billing nobody re-entered, and parks a ticket that
+            // was in fact complete. The queue sets the same flag on its own
+            // send for the same reason (App.jsx). Only a send the radio lost
+            // is ambiguous, and this branch is the network-error branch.
+            sendAttempted: stage === "email"
           });
         } catch (queueErr) {
           // The outbox is IndexedDB, and it can refuse — private browsing, a

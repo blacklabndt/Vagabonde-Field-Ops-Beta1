@@ -38,9 +38,13 @@ Cloudflare Pages) — React, ReactDOM and Supabase-js are bundled in. Four
 libraries are not: SheetJS (the Excel export), jsPDF and its autotable
 plugin (the timesheet approval PDF) and pdf.js with its worker (the report
 preview) lazy-load from `cdn.jsdelivr.net` the first time a button needs
-them, pinned to an exact version and checked against an SRI hash. The
-service worker caches them from there (`cdn-libraries`, CacheFirst), so each
-device needs a connection for them once and they work offline after that.
+them, pinned to an exact version and checked against an SRI hash. The one
+exception is pdf.js's worker: pdf.js fetches it itself, as a Worker, so no
+`integrity` attribute can be put on it — and a worker runs in its own scope
+with no DOM and no cookies, which is why the main script is the one that has
+to be pinned. The service worker caches them from there (`cdn-libraries`,
+CacheFirst), so each device needs a connection for them once and they work
+offline after that.
 
 ## Deploying
 
@@ -494,8 +498,11 @@ doesn't download it.
 - Four libraries lazy-load from `cdn.jsdelivr.net` on first use rather than
   riding in every page load: SheetJS for the Excel export (~900 KB behind one
   button), jsPDF and its autotable plugin for the timesheet approval PDF, and
-  pdf.js with its worker for the report preview. Each is pinned to an exact
-  version and checked against an SRI hash, and the service worker caches them
+  pdf.js with its worker for the report preview. Each script tag is pinned to
+  an exact version and checked against an SRI hash — except pdf.js's worker,
+  which pdf.js fetches itself as a Worker and so can carry no `integrity`
+  attribute; a worker has its own scope, no DOM and no cookies, so pinning
+  the main script is what matters. The service worker caches them
   (`cdn-libraries`, CacheFirst) — so a device needs a connection the first
   time it opens one of those, and never again.
 - Every signed-in account can read every row of `profiles`, including the

@@ -81,6 +81,11 @@ async function oqGetAll() {
 // silently, or the crew never finds out something is actually wrong.
 export function isNetworkError(e) {
   if (typeof navigator !== "undefined" && navigator.onLine === false) return true;
+  // Some failures can only be recognised where they were caught. An Edge
+  // Function call that never reached the network arrives from functions-js
+  // wearing a fixed message with no network words in it, so db.js flags the
+  // Error it throws (fnError) instead of hoping a pattern below matches.
+  if (e && e.networkFailure) return true;
   const msg = String((e && e.message) || "");
   return /failed to fetch|networkerror|load failed|network request failed|ERR_INTERNET_DISCONNECTED/i.test(msg);
 }

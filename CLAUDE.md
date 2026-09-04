@@ -202,6 +202,12 @@ session has set `app.confirm_total_wipe = 'yes'`.
   account out of the API, not only the menu. delete-user locks (Auth ban +
   `profiles.deactivated_at` + no tabs) an account with work on file instead
   of deleting it, because the foreign keys keep history's names.
+- Filing a report needs the `upload` tab, never the `job` tab (pending
+  migration, section 7): reports_insert and the storage `reports write`
+  policy name upload alone, so a Helper — who holds job — cannot file a
+  radiographic report; both READ policies keep their job arm. Job detail's
+  "+ Upload report" asks tabList the same question; the button is the
+  courtesy, the policy is the gate.
 - A role change is an Admin's (`profiles_update` WITH CHECK); the users tab
   alone grants tabs, never rank.
 - Signed-in accounts may update only a JHA's close-out columns (column
@@ -247,11 +253,20 @@ session has set `app.confirm_total_wipe = 'yes'`.
   the ticket and only the welds and charges were not. Retrying is safe (a
   refused update and a crew delete-then-insert, the same refusal again);
   discarding is how it ends. The one exception is this item's own send:
-  `checkpoint({ sendAttempted: true })` is written before sendTicketApproval,
-  so a refusal met with `sendAttempted` set is the row this same item moved
-  to Awaiting approval — its lines are already there, and the replay
-  completes quietly. `withdraw_ticket_approval` is the only way to re-price
-  the ticket.
+  `checkpoint({ sendAttempted: true })` is written in sendTicketApproval's
+  CATCH, and only when `isNetworkError` — a reply the radio lost is the
+  ambiguous case, because the send may well have moved the row. A send the
+  server refused (a 403, a bad address) never moved it, so marking that one
+  would dress a later send by the office up as this item's own. The ticket
+  editor sets the same flag on its own enqueue (`sendAttempted: stage ===
+  "email"`) when the reply it lost was its own send's. A refusal met
+  with `sendAttempted` set is therefore the row this same item moved to
+  Awaiting approval — its lines are already there, and the replay completes
+  quietly. `withdraw_ticket_approval` is the only way to re-price the ticket.
+  A refusal the server actually gave (`.plain`) is a reason whatever the
+  radio says: oqFlushOnce checks `.plain` BEFORE isNetworkError, which calls
+  any error "offline" while navigator.onLine is false — a refusal rethrown
+  into a dead spot would otherwise stop the flush with no reason written.
 - Invoicing is `mark_tickets_invoiced(ids, invoiced)` (Admin, definer) —
   Approved ↔ Invoiced with `invoiced_at`; the approved-ticket immutability
   policies are untouched and this RPC is the only door.
@@ -266,15 +281,26 @@ session has set `app.confirm_total_wipe = 'yes'`.
   `is_staff()` too, so a locked account's unexpired token reads nothing.
 - A client rep's "Query this ticket" (approval page) writes tickets.
   queried_at/query_text/query_by with the service role; the tracker shows
-  it; send-ticket-approval clears it on resend. The rep's words always land:
-  the write is unconditional bar `approved_at`, because a filter on
-  `queried_at` once dropped a second — different — query inside the window
-  while the page still told the rep it had been sent. Only the EMAIL is
-  throttled, one per ticket per 15 minutes, off the `queried_at` that came
-  back with THIS request's read, so two racing posts may each mail once:
-  two mails carrying two real queries is the harmless side of that trade, a
-  lost query was not. The page gives the same receipt either way, because
-  the link is the whole credential and it gets forwarded.
+  it; send-ticket-approval clears it on resend. It is two updates, in this
+  order. First the words: `query_text`/`query_by`, unconditional bar
+  `approved_at` and touching no timestamp (a filter on `queried_at` once
+  dropped a second — different — query inside the window while the page still
+  told the rep it had been sent). Then the mail gate: a conditional UPDATE of
+  `queried_at` alone, `.is("approved_at", null)` plus `.or(queried_at.is.null,
+  queried_at.lt.<15 min ago>)`, with `.select("id")` — a row back means this
+  request won the window and may mail, zero rows means another one just took
+  it. That order is the point: the gate spends the window, so nothing is spent
+  before the rep's words are on the record. `queried_at` means "when we last
+  told the office", not when the rep last spoke, and the gate is its only
+  writer — writing it beside the words slid the window forward on every post,
+  so the throttle lifted only after 15 minutes of total silence. notifyQuery
+  runs only for the winner, so a burst mails once. The ticket read at the top
+  of handle() deliberately does NOT select `queried_at`: deciding the gate
+  from that copy is no gate at all — every racing request reads the same
+  stale null and every one of them mails, which is the flood arriving by the
+  one door the limit was watching. A send that throws still spends the
+  window. The page gives the same receipt either way, because the link is
+  the whole credential and it gets forwarded.
   jobs.last_activity_at is kept by definer triggers on tickets/jhas/reports
   (private.touch_job_activity) and orders the board (search_jobs).
   search_tickets also returns filtered_total (null for non-price roles).

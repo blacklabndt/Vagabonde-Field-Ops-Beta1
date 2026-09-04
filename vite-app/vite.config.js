@@ -121,21 +121,52 @@ export default defineConfig({
             }
           },
           {
-            // The four libraries the app fetches on demand — SheetJS,
-            // jsPDF, its autotable plugin, and pdf.js with its worker —
-            // are pinned to an exact version, so the URL names bytes that
-            // never change. Without this every timesheet approval and
-            // every dropped report needed a live connection, on the two
-            // screens most likely to be opened in a truck: the precache
-            // holds the app itself but a script tag added at runtime is
-            // an ordinary network fetch. CacheFirst means each library
-            // crosses a field connection once per device, and after that
-            // those buttons work with no signal at all.
-            urlPattern: /^https:\/\/cdn\.jsdelivr\.net\//,
+            // The libraries the app fetches on demand — SheetJS, jsPDF, its
+            // autotable plugin and pdf.js — are pinned to an exact version,
+            // so the URL names bytes that never change. Without this every
+            // timesheet approval and every dropped report needed a live
+            // connection, on the two screens most likely to be opened in a
+            // truck: the precache holds the app itself but a script tag
+            // added at runtime is an ordinary network fetch. CacheFirst
+            // means each library crosses a field connection once per device,
+            // and after that those buttons work with no signal at all.
+            //
+            // statuses [200] and nothing else. These four are loaded by
+            // script tags carrying crossOrigin="anonymous", so the responses
+            // are CORS-typed and their real status is visible here — which
+            // means a captive portal's login page or a CDN 502 is seen for
+            // what it is and refused. Allowing 0 as well would have let an
+            // opaque error response be filed under the library's own URL and
+            // served back for a year.
+            urlPattern: /^https:\/\/cdn\.jsdelivr\.net\/npm\/(?:xlsx@[^/]+\/dist\/xlsx\.full\.min\.js|jspdf@[^/]+\/dist\/jspdf\.umd\.min\.js|jspdf-autotable@[^/]+\/dist\/jspdf\.plugin\.autotable\.min\.js|pdfjs-dist@[^/]+\/build\/pdf\.min\.js)$/,
             handler: "CacheFirst",
             options: {
               cacheName: "cdn-libraries",
               expiration: { maxEntries: 20, maxAgeSeconds: 60 * 60 * 24 * 365 },
+              cacheableResponse: { statuses: [200] }
+            }
+          },
+          {
+            // pdf.js's worker, which is a route of its own because it is the
+            // one file here that cannot be judged. pdf.js loads it itself as
+            // a Worker, so the fetch is no-cors and the response comes back
+            // opaque: status 0, whether it is the worker or a hotel wifi
+            // sign-in page. Under CacheFirst with statuses [0, 200] that
+            // portal page was stored under the worker's URL and handed back
+            // for the next year, on a device that would then never read a
+            // PDF again — and no amount of reconnecting would dislodge it.
+            //
+            // NetworkFirst inverts the risk: online, the network answer wins
+            // every time, so a bad one is replaced the moment there is a real
+            // connection; offline, the cached copy still answers and the
+            // Upload dialog keeps working in the truck, which is the whole
+            // reason any of this is cached. 0 has to stay allowed — an opaque
+            // response is all this fetch can ever produce.
+            urlPattern: /^https:\/\/cdn\.jsdelivr\.net\/npm\/pdfjs-dist@[^/]+\/build\/pdf\.worker\.min\.js$/,
+            handler: "NetworkFirst",
+            options: {
+              cacheName: "cdn-pdf-worker",
+              expiration: { maxEntries: 4, maxAgeSeconds: 60 * 60 * 24 * 365 },
               cacheableResponse: { statuses: [0, 200] }
             }
           }

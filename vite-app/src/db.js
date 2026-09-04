@@ -118,6 +118,32 @@ async function readFnError(error) {
   return error.message || "The email service didn't respond.";
 }
 
+// The Error every failed invoke throws — so a lost connection stays
+// recognisable as one.
+//
+// functions-js answers a fetch that never left the device with a
+// FunctionsFetchError, whose message is the fixed string "Failed to send a
+// request to the Edge Function" and whose `context` is the underlying
+// TypeError rather than a Response. Nothing in those words says "network",
+// so the offline queue read a dead radio as a real refusal: the item was
+// parked as unsyncable and the next flush raised the false "charges weren't
+// applied" alarm. It also buried config.js's timeout rewrite, which turns an
+// aborted /functions/v1 call into "Failed to fetch" precisely so the queue
+// would know. So the underlying failure's own words are kept, and the Error
+// carries a flag — the queue asks the flag, never the prose.
+async function fnError(error) {
+  const context = error && error.context;
+  // A Response carries the function's own JSON body; anything else means the
+  // request never got an answer to read.
+  const network = !!error && (error.name === "FunctionsFetchError" || !!(context && typeof context.json !== "function"));
+  if (network) {
+    const e = new Error((context && context.message) || error.message || "The request couldn't be sent.");
+    e.networkFailure = true;
+    return e;
+  }
+  return new Error(await readFnError(error));
+}
+
 // Shapes a raw jobs row (with its client/contractor/created-by joins) into
 // what every screen expects — shared by the job lists and the single-row
 // lookups below so a job reads the same way wherever it's fetched from.
@@ -688,6 +714,27 @@ export const Db = {
     await OfflineCache.remove("jhas." + jobId);
     await OfflineCache.remove("reports." + jobId);
     await OfflineCache.remove("tickets." + jobId);
+    // The half-entered ticket and assessment copies too, and for the same
+    // reason the archive's clear sweeps them: they are keyed by the job's
+    // dbId, so they outlive the job that gave them meaning and are counted
+    // for ever after in the "half-entered work on this device" warning at
+    // sign-out — for a screen that can no longer be opened to finish or
+    // discard them. "jha.last" is a cache rather than a draft, and just as
+    // dead. (A ticket already saved is keyed by its own id, and there is
+    // nothing here to match that against.) Both paths: transferred or
+    // deleted with its work, this job is gone either way.
+    await OfflineCache.remove("ticket.wip." + jobId);
+    await OfflineCache.remove("jha.wip." + jobId);
+    await OfflineCache.remove("jha.last." + jobId);
+    // A transfer moves the JHAs, reports and tickets onto the target job, so
+    // the target's remembered history is now the one that is wrong — it names
+    // none of what it has just been given.
+    if (transferToId) {
+      await OfflineCache.remove("jhas." + transferToId);
+      await OfflineCache.remove("reports." + transferToId);
+      await OfflineCache.remove("tickets." + transferToId);
+      await OfflineCache.remove("jha.last." + transferToId);
+    }
     await dropClientJobLists();
     return { ...(data || {}), filesLeft };
   },
@@ -1132,6 +1179,21 @@ export const Db = {
       rows: [job, ...rows.filter(r => r.dbId !== id)],
       total: (board && board.value ? board.value.total : 0) + 1
     });
+    // And the client's open-jobs list, which is the New ticket dialog's only
+    // source out of range: without this the crew can raise a job in the field
+    // and then not be able to bill against it until the queue drains.
+    // Only when a list is already remembered, though — writing one where
+    // there was none turns "this device doesn't know that client's jobs" into
+    // "that client has exactly one open job", and the dialog states it as
+    // fact. Same head-of-list, dedupe-by-dbId as the board above, because a
+    // retried createJob comes back here with the id it already minted.
+    if (clientId) {
+      const listKey = "jobs.client." + clientId;
+      const list = await OfflineCache.read(listKey).catch(() => null);
+      if (list && Array.isArray(list.value)) {
+        OfflineCache.put(listKey, [job, ...list.value.filter(r => r.dbId !== id)]);
+      }
+    }
 
     return job;
   },
@@ -1338,7 +1400,7 @@ export const Db = {
   // stored document always matches the row.
   async renderJhaPdf(jhaId) {
     const { data, error } = await sbClient.functions.invoke("render-jha", { body: { jhaId } });
-    if (error) throw new Error(await readFnError(error));
+    if (error) throw await fnError(error);
     return data;
   },
 
@@ -1350,7 +1412,7 @@ export const Db = {
     const { data, error } = await sbClient.functions.invoke("send-jha", {
       body: { jhaId, to, cc, message }
     });
-    if (error) throw new Error(await readFnError(error));
+    if (error) throw await fnError(error);
     if (data && data.error) throw new Error(data.error);
     return data;
   },
@@ -1552,7 +1614,7 @@ export const Db = {
     const { data, error } = await sbClient.functions.invoke("send-report", {
       body: { reportId, to, cc, message }
     });
-    if (error) throw new Error(await readFnError(error));
+    if (error) throw await fnError(error);
     if (data && data.error) throw new Error(data.error);
     return data;
   },
@@ -1566,7 +1628,7 @@ export const Db = {
   // the app drops this into an iframe anyway.
   async renderTicketInvoice(ticketId) {
     const { data, error } = await sbClient.functions.invoke("render-invoice", { body: { ticketId } });
-    if (error) throw new Error(await readFnError(error));
+    if (error) throw await fnError(error);
     if (data && data.error) throw new Error(data.error);
     return data.html;
   },
@@ -1628,7 +1690,7 @@ export const Db = {
   // verified domain.
   async sendTestEmail(to) {
     const { data, error } = await sbClient.functions.invoke("mail-test", { body: { to } });
-    if (error) throw new Error(await readFnError(error));
+    if (error) throw await fnError(error);
     if (data && data.error) throw new Error(data.error);
     return data;
   },
@@ -1637,7 +1699,7 @@ export const Db = {
     const { data, error } = await sbClient.functions.invoke("send-ticket-approval", {
       body: { ticketId, to, cc }
     });
-    if (error) throw new Error(await readFnError(error));
+    if (error) throw await fnError(error);
     if (data && data.error) throw new Error(data.error);
     return data;
   },
@@ -3075,7 +3137,7 @@ export const Db = {
   // service-role key this can never touch client-side.
   async deleteUserAccount(userId) {
     const { data, error } = await sbClient.functions.invoke("delete-user", { body: { userId } });
-    if (error) throw error;
+    if (error) throw await fnError(error);
     if (data && data.error) throw new Error(data.error);
     invalidate("profiles");
     // { ok } when the account is gone; { ok, deactivated, message } when it
@@ -3097,7 +3159,7 @@ export const Db = {
   // function checks, and looks the address up itself from the account.
   async sendPasswordReset(userId) {
     const { data, error } = await sbClient.functions.invoke("password-reset", { body: { userId } });
-    if (error) throw new Error(await readFnError(error));
+    if (error) throw await fnError(error);
     if (data && data.error) throw new Error(data.error);
     return data;
   },
@@ -3109,7 +3171,7 @@ export const Db = {
     const { data, error } = await sbClient.functions.invoke("create-user", {
       body: { email, password: invite ? "" : password, name, role, cert, invite: !!invite }
     });
-    if (error) throw new Error(await readFnError(error));
+    if (error) throw await fnError(error);
     if (data && data.error) throw new Error(data.error);
     // No account came back, so nothing exists to go on with: that is a
     // failure, and the only one this call still throws.
@@ -3286,7 +3348,7 @@ export const Db = {
   async _klipyKey() {
     if (this._klipyKeyCache) return this._klipyKeyCache;
     const { data, error } = await sbClient.functions.invoke("gif-search", { body: {} });
-    if (error) throw new Error(await readFnError(error));
+    if (error) throw await fnError(error);
     if (data && data.error) throw new Error(data.error);
     this._klipyKeyCache = data && data.appKey;
     if (!this._klipyKeyCache) throw new Error("GIF search isn't set up yet.");

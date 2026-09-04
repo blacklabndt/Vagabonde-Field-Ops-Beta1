@@ -3,7 +3,7 @@ import { Db } from "../db.js";
 import { initialsOf } from "../data.js";
 // The merge every message path funnels through — see chatMerge.js,
 // where the regression tests hold the door on the "Someone" bug.
-import { mergeIn } from "../chatMerge.js";
+import { mergeIn, reconcileWindow } from "../chatMerge.js";
 import { Blueprint, Btn, Dialog, ErrorBox, Loading, Switch } from "./common.jsx";
 
 // Team chat — one room for the whole crew.
@@ -547,31 +547,45 @@ export function TeamChatScreen({ currentUser, onOpenJob, onRead }) {
       })
       .catch(() => {}); // names degrade to "Someone", the room still works
 
-    const loadLatest = initial => Promise.all([Db.listChatMessages(), Db.listPinnedChatMessages()])
-      .then(([{ messages: page, hasMore: more }, pinned]) => {
-        if (!live) return;
-        // The room you walk into holds still; only what arrives after
-        // you is animated.
-        if (initial) page.forEach(m => quietIds.current.add(m.id));
-        // Messages that arrive by poll — the room's only pulse while the
-        // realtime channel is down — are read on screen like any other,
-        // so the bookmark moves for them too; it used to move only for
-        // the realtime path, and the drawer badge grew over messages the
-        // reader was looking at. Decided out here, before the merge, from
-        // the ids: an updater has to stay pure (React may run it twice),
-        // and "the array changed" also fires for a reaction on an old row.
-        const fresh = page.some(m => !seenIds.current.has(m.id));
-        setMessages(prev => mergeIn(prev, page));
-        if (!initial && fresh && stickToBottom.current && document.visibilityState === "visible") noteRead();
-        setPins(pinned);
-        if (initial) setHasMore(more);
-        setLoadError("");
-      })
-      .catch(e => {
-        if (!live) return;
-        if (initial) setLoadError(e.message || "Couldn't load the chat.");
-      })
-      .finally(() => { if (live && initial) setLoading(false); });
+    const loadLatest = initial => {
+      // The instant this refresh was asked for, kept for reconcileWindow:
+      // anything sent after it cannot be in the page that comes back, and
+      // must not be read as a message the server no longer has.
+      const readAt = Date.now();
+      return Promise.all([Db.listChatMessages(), Db.listPinnedChatMessages()])
+        .then(([{ messages: page, hasMore: more }, pinned]) => {
+          if (!live) return;
+          // The room you walk into holds still; only what arrives after
+          // you is animated.
+          if (initial) page.forEach(m => quietIds.current.add(m.id));
+          // Messages that arrive by poll — the room's only pulse while the
+          // realtime channel is down — are read on screen like any other,
+          // so the bookmark moves for them too; it used to move only for
+          // the realtime path, and the drawer badge grew over messages the
+          // reader was looking at. Decided out here, before the merge, from
+          // the ids: an updater has to stay pure (React may run it twice),
+          // and "the array changed" also fires for a reaction on an old row.
+          const fresh = page.some(m => !seenIds.current.has(m.id));
+          // Merge what the page brought, then let it take away what it says
+          // is gone — a message deleted while realtime was down otherwise
+          // sat here for the life of the open room, and replying to it is
+          // refused by the reply_to foreign key.
+          setMessages(prev => reconcileWindow(mergeIn(prev, page), page, readAt));
+          // Including the one being replied to: the composer must not hold
+          // a parent the room has just dropped. Asked of reconcileWindow
+          // itself so the answer cannot drift from the room's.
+          setReplyTarget(rt => (rt && !reconcileWindow([rt], page, readAt).length ? null : rt));
+          if (!initial && fresh && stickToBottom.current && document.visibilityState === "visible") noteRead();
+          setPins(pinned);
+          if (initial) setHasMore(more);
+          setLoadError("");
+        })
+        .catch(e => {
+          if (!live) return;
+          if (initial) setLoadError(e.message || "Couldn't load the chat.");
+        })
+        .finally(() => { if (live && initial) setLoading(false); });
+    };
 
     loadLatest(true);
 

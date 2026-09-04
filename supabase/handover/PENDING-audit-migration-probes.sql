@@ -5,8 +5,8 @@
 -- HOW TO RUN
 --   Run each numbered block WHOLE — the begin/rollback pair is what makes
 --   `set local role` and `set local request.jwt.claims` local. Run block 0
---   first (it names the fixtures the rest pick up), then run blocks 1-12
---   BEFORE applying the migration and keep the output; apply; run 1-12
+--   first (it names the fixtures the rest pick up), then run blocks 1-13
+--   BEFORE applying the migration and keep the output; apply; run 1-13
 --   again and diff. Each block says what the two runs should say.
 --   Block 12 is the exception: it calls a function that does not exist yet,
 --   so before the migration it raises 42883 and that IS its "before".
@@ -985,3 +985,111 @@ select '12c · what the ledger reads today' as probe,
  where t.work_date >= date_trunc('year', now() at time zone 'America/Edmonton')::date
    and t.work_date <= (now() at time zone 'America/Edmonton')::date
    and c.dose_mr > 0;
+
+
+-- ═══ 13 · Filing a report needs the report tab ══════════════════════════
+-- Finding 7. reports_insert and storage's "reports write" both accepted the
+-- job tab as well as the upload tab, and the job tab is one every Helper
+-- holds — so a Helper could put a PDF in the reports bucket and file the row
+-- that goes with it, and the report screen would then mail that
+-- interpretation to the contractor. Nothing here inserts anything: each
+-- block evaluates the predicate the way the CATALOG currently spells it —
+-- the two tab reads are live, and whether the job arm is still in the policy
+-- is read out of pg_policies — so one and the same statement answers true
+-- before the migration and false after it.
+--
+-- The READ policies keep their job arm on purpose, and these blocks watch
+-- them for it: a Helper who worked the day must go on seeing the reports
+-- filed against that job, in both runs.
+
+-- 13a · A Helper. The block this finding is about.
+--       BEFORE: may_insert_report_row and may_write_reports_bucket are both
+--               true, on the job tab alone — that pair IS the hole.
+--       AFTER:  both false. has_upload_tab is false in both runs (no Helper
+--               has ever held that tab) and may_read_report_rows is true in
+--               both, or the migration has taken a read it was told to keep.
+begin;
+select set_config('request.jwt.claims', json_build_object(
+    'sub',  (select id::text from public.profiles
+              where role = 'Helper' and deactivated_at is null
+              order by created_at limit 1),
+    'role', 'authenticated',
+    'app_metadata', json_build_object(
+      'app_role',   'Helper',
+      'tab_access', public.tabs_for_role('Helper'))
+  )::text, true);
+set local role authenticated;
+
+select '13a · Helper' as probe,
+       (select private.user_role())       as caller_role,
+       (select private.has_tab('job'))    as has_job_tab,
+       (select private.has_tab('upload')) as has_upload_tab,
+       -- reports_insert as the catalog holds it at this moment.
+       ((select private.has_tab('upload'))
+        or ((select private.has_tab('job')) and job_arm.on_row))    as may_insert_report_row,
+       -- storage "reports write" — the same question about the bucket.
+       ((select private.has_tab('upload'))
+        or ((select private.has_tab('job')) and job_arm.on_object)) as may_write_reports_bucket,
+       -- Untouched by this migration, and meant to stay true.
+       (select private.has_any_tab(variadic array['upload','job','users'])) as may_read_report_rows
+  from (select
+          exists (select 1 from pg_policies
+                   where schemaname = 'public' and tablename = 'reports'
+                     and policyname = 'reports_insert'
+                     and with_check like '%''job''::text%') as on_row,
+          exists (select 1 from pg_policies
+                   where schemaname = 'storage' and tablename = 'objects'
+                     and policyname = 'reports write'
+                     and with_check like '%''job''::text%') as on_object
+       ) job_arm;
+rollback;
+
+-- 13b · A Technician — the person who actually files reports, and the one
+--       who must lose nothing. Every column true in both runs: the upload
+--       tab is what is answering, so the job arm coming off changes none of
+--       it. Admins hold the same tab and read the same way.
+begin;
+select set_config('request.jwt.claims', json_build_object(
+    'sub',  (select id::text from public.profiles
+              where role = 'Technician' and deactivated_at is null
+              order by created_at limit 1),
+    'role', 'authenticated',
+    'app_metadata', json_build_object(
+      'app_role',   'Technician',
+      'tab_access', public.tabs_for_role('Technician'))
+  )::text, true);
+set local role authenticated;
+
+select '13b · Technician' as probe,
+       (select private.user_role())       as caller_role,
+       (select private.has_tab('job'))    as has_job_tab,
+       (select private.has_tab('upload')) as has_upload_tab,
+       ((select private.has_tab('upload'))
+        or ((select private.has_tab('job')) and job_arm.on_row))    as may_insert_report_row,
+       ((select private.has_tab('upload'))
+        or ((select private.has_tab('job')) and job_arm.on_object)) as may_write_reports_bucket,
+       (select private.has_any_tab(variadic array['upload','job','users'])) as may_read_report_rows
+  from (select
+          exists (select 1 from pg_policies
+                   where schemaname = 'public' and tablename = 'reports'
+                     and policyname = 'reports_insert'
+                     and with_check like '%''job''::text%') as on_row,
+          exists (select 1 from pg_policies
+                   where schemaname = 'storage' and tablename = 'objects'
+                     and policyname = 'reports write'
+                     and with_check like '%''job''::text%') as on_object
+       ) job_arm;
+rollback;
+
+-- 13c · The six policies as the catalog holds them.
+--       BEFORE: reports_insert's with_check names 'upload' and 'job', and
+--               so does "reports write".
+--       AFTER:  each names 'upload' alone. reports_select, "reports read"
+--               and the two deletes must read identically in both runs —
+--               the roles column included, since reports_insert is
+--               `to public` and is meant to stay that way.
+select '13c · catalog' as probe, schemaname, policyname, cmd, roles::text, qual, with_check
+  from pg_policies
+ where (schemaname = 'public'  and tablename = 'reports')
+    or (schemaname = 'storage' and tablename = 'objects' and policyname like 'reports %')
+ order by schemaname, policyname;

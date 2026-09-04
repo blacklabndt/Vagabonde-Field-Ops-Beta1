@@ -281,11 +281,13 @@ max_frequency = "5s"
 # uri = "pg-functions://postgres/auth/before-user-created-hook"
 
 # This hook runs before a token is issued and allows you to add additional claims based on the authentication method used.
-# Puts the signed-in account tab_access (and role) into the token, so the
-# row-level security policies can read them from the JWT instead of querying
-# profiles on every single statement. See the tab_access_from_jwt migration —
-# the policies fall back to the table whenever the claim is absent, so this
-# can be turned off again without breaking anything.
+# Puts the signed-in account tab_access (and role) into the token. It is only
+# ever an optimisation: profiles is the authority either way, so a policy that
+# consults the claim and falls back to the table and one that reads the table
+# outright give the same answer. Nothing breaks if the claim is absent, stale,
+# or read by nobody at all — so the hook stays on until somebody deliberately
+# turns it off, rather than being switched off as a side effect of a migration
+# that stops reading it.
 [auth.hook.custom_access_token]
 enabled = true
 uri = "pg-functions://postgres/public/custom_access_token_hook"

@@ -27,6 +27,14 @@ export function JobDetailScreen({ job, currentUser, onStartJha, onOpenTicket, on
   // button refuses a role that cannot read prices (a Coordinator holds the
   // tab and would otherwise be sent to a screen that turns them away).
   const canRaiseTickets = tabList(currentUser.tabs).includes("ticket") && seesPrices;
+  // Filing a report needs the report tab, for the same reason and in the
+  // same words: a Helper holds the job tab, and the job tab was all
+  // reports_insert and the reports bucket ever asked for — so the button
+  // was there for them and the API took the upload. Asked of tabList, so it
+  // can't drift from what Users & access set. The button is only half of
+  // it: round six's migration takes the job arm off both write policies,
+  // because a button is a courtesy and the policy is the gate.
+  const canUploadReports = tabList(currentUser.tabs).includes("upload");
   const [showUpload, setShowUpload] = useState(false);
   const [showTicket, setShowTicket] = useState(false);
   const [editingRecord, setEditingRecord] = useState(false);
@@ -362,7 +370,21 @@ export function JobDetailScreen({ job, currentUser, onStartJha, onOpenTicket, on
             <div style={{ display: "flex", alignItems: "center", gap: 10, marginBottom: 12 }}>
               <h4 style={{ margin: 0, fontSize: 19 }}>Radiographic reports</h4>
               <span style={{ fontSize: 12, color: "color-mix(in srgb, var(--color-text) 55%, transparent)" }}>{reports.length} on file</span>
-              <Btn variant="primary" style={{ marginLeft: "auto" }} disabled={complete} onClick={() => setShowUpload(true)}>+ Upload report</Btn>
+              {/* Waits on the record for the same reason Create ticket does:
+                  the dialog seeds the address it sends to from
+                  jobRecord.contractorRep, so a record that hasn't landed —
+                  or whose reps couldn't be read — mails the interpretation
+                  to whoever the last job or the client's usual contact
+                  happens to be. */}
+              {canUploadReports && (
+                <Btn variant="primary" style={{ marginLeft: "auto" }}
+                  disabled={complete || !recordLoaded || !!jobRecord.repsUnknown}
+                  title={complete ? undefined
+                    : !recordLoaded ? "Waiting for this job's details"
+                    : jobRecord.repsUnknown ? "This job's reps couldn't be read — the panel is showing the client's usual contacts. Reopen the job when you're back in signal."
+                    : undefined}
+                  onClick={() => setShowUpload(true)}>+ Upload report</Btn>
+              )}
             </div>
             <TableScroll><table className="table">
               <thead><tr><th>File</th><th>Last numbers</th><th>Uploaded</th><th>Sent</th><th></th></tr></thead>
