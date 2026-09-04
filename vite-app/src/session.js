@@ -55,9 +55,20 @@ export async function restoreSession({
   isOffline = () => typeof navigator !== "undefined" && navigator.onLine === false,
   timeoutMs = 4000
 }) {
+  // "Nobody is remembered here" and "this device's memory could not be read"
+  // wore the same face: a rejected IndexedDB read (a transaction aborted
+  // under storage pressure, a store being upgraded in another tab) came back
+  // as a plain null, indistinguishable from an expired identity. That is the
+  // answer the boot reads to decide whether anybody still owns what is
+  // stored, and a moment's IDB fault is no evidence that nobody does — so the
+  // failure is reported as itself and the caller can refuse to act on it.
   const cached = async reason => {
-    const identity = await Promise.resolve(readIdentity()).catch(() => null);
-    return identity ? { user: identity, offline: true, reason } : { user: null, offline: true, reason };
+    let identity = null;
+    let identityUnreadable = false;
+    try { identity = await Promise.resolve(readIdentity()); }
+    catch (e) { identityUnreadable = true; }
+    if (identity) return { user: identity, offline: true, reason };
+    return { user: null, offline: true, reason, identityUnreadable };
   };
 
   let sessionResult;

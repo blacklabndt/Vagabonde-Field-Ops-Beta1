@@ -246,6 +246,28 @@ test("an unclaimed device whose remembered identity is this person keeps its cac
   assert.equal(await OfflineCache.read("ticket.wip.J-77"), null, "the last crew's hours are not the new signer's to see");
 });
 
+test("a clear that fails leaves the device the last owner's, and says so out loud", async () => {
+  // The handover's one hard guarantee: the new owner is recorded only once
+  // the store has actually emptied. A claim that recorded B over a store
+  // still full of A's work would make it A's hours that B reads the moment
+  // the signal drops — and every later claimFor would see B as the owner and
+  // never try the clear again. So it stays A's, and it throws: the sign-in
+  // screen and the boot both refuse to sign anyone in on this.
+  await OfflineCache.claimFor("tech-a");
+  await OfflineCache.put("ticket.wip.J-77", { weldLines: [{ key: "rt_film:2in", qty: 14 }] });
+
+  const realClear = OfflineCache.clear;
+  OfflineCache.clear = async () => { throw new Error("the store would not empty"); };
+  try {
+    await assert.rejects(() => OfflineCache.claimFor("tech-b"), /would not empty/);
+  } finally {
+    OfflineCache.clear = realClear;
+  }
+
+  assert.equal(await OfflineCache.owner(), "tech-a", "still A's device, so the next try clears again");
+  assert.ok(await OfflineCache.read("ticket.wip.J-77"), "and A's half-entered ticket is still on it");
+});
+
 test("a device nobody has claimed is emptied on the next sign-in", async () => {
   // Either a store written before owners were recorded, or one whose owner
   // was cleared with it. Unknown provenance is not "mine".

@@ -19,3 +19,6 @@ supabase/.temp/
 # it, so it must never be committable, in any variant.
 .dev.vars
 .dev.vars.*
+
+# Claude Code worktrees live under the repo; never part of the project
+.claude/worktrees/

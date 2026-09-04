@@ -56,6 +56,32 @@ export function QueueBadge({ items, onOpen }) {
   );
 }
 
+// The refusal updateTicket raises when a queued Draft lands on a row the
+// office has since sent out (data.js, ticketStatusWriteRefusal). Matched on
+// its words rather than a flag because the queue only ever kept the message.
+const SENT_FOR_SIGNATURE = /sent for the client's signature/i;
+
+// What discarding actually throws away. For most items the outbox holds the
+// only copy, which is what this prompt has always said — and for those it is
+// still true. Two of them it was never true of: a ticket reopened offline, or
+// one whose replay got as far as creating the row before the signal went, is
+// alreadyCreated and has its number; a report whose PDF uploaded carries the
+// reportId its checkpoint wrote, and only the emailing is still owed. Telling
+// either of those "nothing else holds a copy" invited a discard on the belief
+// the whole thing would go with it. It doesn't — only the day's edits do, and
+// those are the part that can't be got back.
+const discardPrompt = item => {
+  const what = (LABELS[item.type] || item.type).toLowerCase();
+  const p = item.payload || {};
+  if (item.type === "ticket" && p.alreadyCreated) {
+    return `Discard this ${what}? The ticket itself is already saved${p.ticketId ? ` as ${p.ticketId}` : ""}${SENT_FOR_SIGNATURE.test(item.lastError || "") ? " and has gone to the client for signature" : ""} — it stays exactly as it is. Only the changes made on this device are thrown away, and they can't be got back.`;
+  }
+  if (item.type === "report" && p.reportId) {
+    return `Discard this ${what}? The PDF is already uploaded and on the job — it stays there. Only what is still owed here${p.recipient ? `, the email to ${p.recipient},` : ""} is thrown away. This can't be undone.`;
+  }
+  return `Discard this ${what}? It has never reached the database, and nothing else holds a copy of it. This can't be undone.`;
+};
+
 export function QueueDialog({ items, onRetry, onClose }) {
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState("");
@@ -71,7 +97,7 @@ export function QueueDialog({ items, onRetry, onClose }) {
   };
 
   const discard = async item => {
-    if (!confirm(`Discard this ${(LABELS[item.type] || item.type).toLowerCase()}? It has never reached the database, and nothing else holds a copy of it. This can't be undone.`)) return;
+    if (!confirm(discardPrompt(item))) return;
     setError("");
     try { await OfflineQueue.remove(item.id); }
     catch (e) { setError(e.message || "Couldn't discard that item."); }

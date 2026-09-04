@@ -46,6 +46,20 @@ export function backoffMs(attempt) {
   return 1000 * Math.pow(2, attempt - 1);
 }
 
+// The longest any single wait is honoured for. Retry-After is the far end's
+// number, not ours, and it is free to say 3600: a worker that took that at
+// face value would park one ticket for an hour while four thousand others
+// waited behind it. A minute is longer than any real rate-limit window and
+// short enough that giving up and reporting the ticket unchased is the better
+// answer past it.
+export const MAX_WAIT_MS = 60000;
+
+// Long waits are slept in slices so Stop can be answered while one is running.
+// The check used to come after the sleep, so a Stop pressed one second into a
+// Retry-After of a minute was read fifty-nine seconds later — the button said
+// "Stopping…" and the pool carried on.
+const WAIT_SLICE_MS = 250;
+
 // Runs `send(item)` over `items`.
 //
 // Options, all with sane defaults so a caller only names what it cares about:
@@ -92,6 +106,20 @@ export async function runSendPool(items, send, opts = {}) {
     if (wait > 0) await sleep(wait);
   };
 
+  // Waits `ms` (capped) in slices, and answers true if Stop was pressed at
+  // any point during it — including before the first slice, so a Stop that
+  // landed while the send was still in flight costs no wait at all.
+  const waitOrStop = async ms => {
+    let left = Math.min(ms, MAX_WAIT_MS);
+    for (;;) {
+      if (shouldStop()) return true;
+      if (left <= 0) return false;
+      const slice = Math.min(left, WAIT_SLICE_MS);
+      await sleep(slice);
+      left -= slice;
+    }
+  };
+
   const attempt = async item => {
     for (let n = 1; ; n++) {
       try {
@@ -99,11 +127,10 @@ export async function runSendPool(items, send, opts = {}) {
       } catch (e) {
         if (n > retries || !isRetryable(e)) throw e;
         const told = retryAfter(e);
-        await sleep(told == null ? backoff(n) : told);
         // A Stop pressed during a two-second backoff should be a stop, not
         // another try — the sends already in flight are the ones we promised
         // to finish, and this one isn't in flight.
-        if (shouldStop()) throw e;
+        if (await waitOrStop(told == null ? backoff(n) : told)) throw e;
       }
     }
   };

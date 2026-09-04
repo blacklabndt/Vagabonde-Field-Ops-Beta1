@@ -29,8 +29,11 @@ export const Toasts = {
     return () => listeners.delete(fn);
   },
 
-  show(text, tone = "ok") {
-    if (!text || muted) return;
+  // `force` is for the one message a muted replay must still deliver: the
+  // outbox completed an item but could not apply all of it, and nobody
+  // would otherwise hear.
+  show(text, tone = "ok", force = false) {
+    if (!text || (muted && !force)) return;
     const now = Date.now();
     if (text === last.text && now - last.at < DEDUPE_MS) return;
     last = { text, at: now };

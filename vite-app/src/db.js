@@ -1,5 +1,5 @@
 import { sbClient, VAPID_PUBLIC_KEY } from "./config.js";
-import { todayLocal, localDate, dayMonth, ticketDateStamp, primaryContact, ageInDays, storageKeySafe, STANDARD_RATE_LINES, nonNegative, lineTotal, decimalString } from "./data.js";
+import { todayLocal, localDate, dayMonth, ticketDateStamp, primaryContact, ageInDays, storageKeySafe, STANDARD_RATE_LINES, nonNegative, lineTotal, decimalString, ticketStatusWriteRefusal } from "./data.js";
 import { OfflineCache } from "./offlineCache.js";
 import { Toasts } from "./toastBus.js";
 import { OfflineQueue, isNetworkError } from "./offlineQueue.js";
@@ -673,6 +673,7 @@ export const Db = {
     invalidate("job_numbers");
     await OfflineCache.remove("jobs.recent");
     await OfflineCache.remove("job." + jobId);
+    await OfflineCache.remove("job.reps." + jobId);
     await OfflineCache.remove("jhas." + jobId);
     await OfflineCache.remove("reports." + jobId);
     await OfflineCache.remove("tickets." + jobId);
@@ -958,6 +959,25 @@ export const Db = {
   // the device is also what lets a create whose response went missing be
   // retried instead of duplicated — see the lookup below.
   async createJob({ id, jobNumber, project, clientName, lsd, afe, createdBy, clientRep, contractorName, contractorRep }) {
+    // Writing the two reps back into the directory — persisted server-side
+    // now, not localStorage, so the next job for this client/contractor is
+    // pre-filled for every coordinator, not just this browser.
+    //
+    // A local because both early returns below are replays of a job whose
+    // insert already landed, and the filing is precisely the step that may
+    // not have: it is what fails after the insert and leaves the item
+    // queued. Reached only by the tail, the retry that finally succeeded
+    // returned the existing row and never filed anybody, so the job showed
+    // the organisation's primary rep for ever.
+    const fileReps = async (clientId, contractorId) => {
+      if (clientId && clientRep && clientRep.name) {
+        await this.rememberContact("client", clientId, clientRep);
+      }
+      if (contractorId && contractorRep && contractorRep.name) {
+        await this.rememberContact("contractor", contractorId, contractorRep);
+      }
+    };
+
     // Replaying a queued job has to be safe to do twice. The insert can
     // succeed and a later step fail — filing the reps into the directory, say
     // — which leaves the item queued; without this, every retry from then on
@@ -965,14 +985,21 @@ export const Db = {
     // syncing. Because the id was minted on the device, "did this already
     // land?" is a question we can actually answer.
     if (id) {
-      const { data: already, error: keyErr } = await sbClient.from("jobs").select("id").eq("id", id).maybeSingle();
+      // The two org ids come back with it, because the reps are filed
+      // against them and this branch has no other way to know them: the
+      // client lookup below is skipped entirely on the way out.
+      const { data: already, error: keyErr } = await sbClient.from("jobs")
+        .select("id, client_id, contractor_id").eq("id", id).maybeSingle();
       // A discarded error here is how a queued job pins itself for ever: the
       // lookup fails on a stalled connection, the insert below then dies on
       // jobs_job_number_key because an earlier attempt did land, and the
       // outbox keeps retrying a job that the database already holds. Thrown,
       // a network failure is one the queue simply tries again later.
       if (keyErr) throw keyErr;
-      if (already) return already;
+      if (already) {
+        await fileReps(already.client_id, already.contractor_id);
+        return already;
+      }
     }
 
     const { data: client, error: cErr } = await sbClient.from("clients").select("id").eq("name", clientName).single();
@@ -1007,8 +1034,13 @@ export const Db = {
         // to "create this job" is the row it already made. Only if the id
         // isn't there is the number really somebody else's.
         if (id) {
-          const { data: mine } = await sbClient.from("jobs").select("id, job_number").eq("id", id).maybeSingle();
-          if (mine && mine.job_number === jobNumber) return { id: mine.id };
+          const { data: mine } = await sbClient.from("jobs").select("id, job_number, client_id, contractor_id").eq("id", id).maybeSingle();
+          if (mine && mine.job_number === jobNumber) {
+            // Its own replay, one step further on than the lookup above —
+            // and owed the same filing, for the same reason.
+            await fileReps(mine.client_id, mine.contractor_id);
+            return { id: mine.id };
+          }
         }
         throw new Error(jobNumberTakenMessage(jobNumber));
       }
@@ -1018,15 +1050,7 @@ export const Db = {
     // should linkify on the next chat visit, not after a TTL.
     invalidate("job_numbers");
 
-    // Write contacts back to the directory — persisted server-side now,
-    // not localStorage, so the next job for this client/contractor is
-    // pre-filled for every coordinator, not just this browser.
-    if (clientRep && clientRep.name) {
-      await this.rememberContact("client", client.id, clientRep);
-    }
-    if (contractorId && contractorRep && contractorRep.name) {
-      await this.rememberContact("contractor", contractorId, contractorRep);
-    }
+    await fileReps(client.id, contractorId);
     return job;
   },
 
@@ -1637,22 +1661,36 @@ export const Db = {
     // it is what it always showed — but Edit is not offered, because Save
     // would write the primary back as this job's named rep.
     let repsUnknown = false;
-    const { data: namedRow, error: namedErr } = await sbClient.from("jobs")
-      .select("client_contact_id, contractor_contact_id").eq("id", job.dbId).maybeSingle();
-    if (namedErr) {
-      // postgrest-js reports a failure in `error`; it does not throw. This
-      // was a try/catch, which meant the branch below never ran and every
-      // failure — a refusal as much as a dead connection — silently became
-      // "this job names nobody".
+    try {
+      // Remembered under its own key rather than folded into "job.<id>":
+      // that one is written wholesale by the board for every job on the page
+      // and holds the job row, which does not carry these two columns.
       //
-      // Offline, the primaries are a fine stand-in for reading — except for
-      // the archive, which asked for the record as it is or not at all.
-      // Anything that is not the network is a real answer and belongs to the
-      // caller.
-      if (OfflineCache.isLiveOnly() || !isNetworkError(namedErr)) throw namedErr;
+      // Read straight from PostgREST, this was the one thing on the panel
+      // that could not be had offline — and isNetworkError is true for
+      // anything attempted while the radio is off, so every job opened out
+      // of range came back repsUnknown and had Create ticket and Edit greyed
+      // out for the day, while Home's + Ticket and + New JHA opened on the
+      // same record. A job whose record was opened once in range now answers
+      // with its own reps.
+      named = await OfflineCache.readThrough("job.reps." + job.dbId, async () => {
+        // postgrest-js reports a failure in `error`; it does not throw, so
+        // the refusal has to be raised by hand for readThrough to see it —
+        // and this was a try/catch once, which meant the branch below never
+        // ran and every failure, a refusal as much as a dead connection,
+        // silently became "this job names nobody".
+        const { data, error } = await sbClient.from("jobs")
+          .select("client_contact_id, contractor_contact_id").eq("id", job.dbId).maybeSingle();
+        if (error) throw error;
+        return data || {};
+      }) || {};
+    } catch (e) {
+      // Nothing cached and the read really failed. The primaries are a fine
+      // stand-in for reading — except for the archive, which asked for the
+      // record as it is or not at all. Anything that is not the network is a
+      // real answer and belongs to the caller.
+      if (OfflineCache.isLiveOnly() || !isNetworkError(e)) throw e;
       repsUnknown = true;
-    } else if (namedRow) {
-      named = namedRow;
     }
 
     const byId = id => (id && contacts.find(c => c.id === id)) || null;
@@ -1780,6 +1818,11 @@ export const Db = {
       procedure: record.procedure || null
     }).eq("id", job.dbId);
     if (error) throw error;
+    // The remembered copy of this job's reps is now the previous pair, and
+    // the next time the panel opens out of range it would show them as
+    // though they were the edit that just landed. Removed rather than
+    // rewritten: the next read in range fills it again.
+    await OfflineCache.remove("job.reps." + job.dbId);
     return contractorId;
   },
 
@@ -2486,9 +2529,21 @@ export const Db = {
       throw plainError(`Ticket ${ticketId} no longer exists — it was cancelled on another device, so there is nothing to save onto.`, { ticketGone: true });
     }
     await this.assertJobOpen(row.job_id);
-    if (row.status === "Approved" || row.status === "Invoiced") {
-      throw new Error(`Ticket ${ticketId} is ${row.status.toLowerCase()} — it can't be changed. Raise a new ticket for any correction.`);
-    }
+    // Whether this save may land on that row at all. The rule itself is
+    // ticketStatusWriteRefusal in data.js, so it can be read and tested
+    // without a database; both of its clauses are about money that has
+    // already gone to the client. Asked before the lines are priced, since a
+    // save that isn't allowed to land should not be costed first. In the
+    // editor it is the message on screen; the outbox's replay reads the flag
+    // below and goes on to write the crew hours, which are still the day's
+    // pay whatever has happened to the billing.
+    const refusal = ticketStatusWriteRefusal(row.status, status, ticketId);
+    // Flagged, not left to be recognised by its wording: the outbox's replay
+    // has to tell "the client already has this ticket" apart from every other
+    // refusal, because the day's crew hours are still writable and still have
+    // to be saved. A string match would break the first time the sentence is
+    // reworded, and the sentence is written for a technician, not for code.
+    if (refusal) throw plainError(refusal, row.status === "Awaiting approval" ? { sentForApproval: true } : undefined);
     lines = lines.map(cleanLine);
     const total = totalOf(lines);
     assertBillable(total);
@@ -2497,23 +2552,6 @@ export const Db = {
     // until the replacement below lands — which is the window the constraint
     // exists to close. Replacing the lines moves the total on its own.
     //
-    // "Draft" is the word every save sends, not a decision anyone made about
-    // this ticket — the editor hardcodes it, and a queued replay carries the
-    // literal string it was enqueued with hours ago. If the office has sent
-    // the ticket for signature since, this save doesn't land at all.
-    //
-    // Keeping the status and writing the rest anyway (what this used to do)
-    // was not enough: the lines are replaced below, the trigger recomputes
-    // the total from them, and the callers replace the crew hours next. The
-    // money moves under a live approval link and the rep signs a different
-    // bill from the one they were sent. Pulling a sent ticket back is
-    // withdraw_ticket_approval's job and nobody else's, so refuse here —
-    // which is also what stops saveCrewForTicket from running. In the outbox
-    // the item stays put with this as its error; in the editor it is the
-    // message on screen.
-    if (row.status === "Awaiting approval" && status === "Draft") {
-      throw plainError(`Ticket ${ticketId} has been sent for the client's signature — cancel the approval before changing it.`);
-    }
     // Written back as itself rather than left out of the patch: a save that
     // carries neither delays nor a rep would otherwise update no columns at
     // all, and an empty patch is not a request PostgREST will take — nor

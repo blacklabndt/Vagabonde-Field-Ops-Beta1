@@ -124,6 +124,25 @@ test("a deliberate sign-out still lands on sign-in, even with no network", async
   assert.equal(r.user, null);
 });
 
+// The boot treats "offline and nobody remembered" as an unclaimed device.
+// A rejected IndexedDB read used to arrive as exactly that, so a transient
+// storage fault looked like a tablet nobody owns.
+test("an unreadable identity is reported as unreadable, not as nobody", async () => {
+  const r = await restoreSession(base({
+    getSession: never,
+    readIdentity: async () => { throw new Error("IDB transaction aborted"); }
+  }));
+  assert.equal(r.user, null);
+  assert.equal(r.offline, true);
+  assert.equal(r.identityUnreadable, true);
+});
+
+test("an identity that is simply absent is not called unreadable", async () => {
+  const r = await restoreSession(base({ getSession: never, readIdentity: async () => null }));
+  assert.equal(r.user, null);
+  assert.equal(r.identityUnreadable, false);
+});
+
 test("identityFrom refuses an account with no tabs", () => {
   assert.equal(identityFrom({ id: "u", tab_access: [] }, "a@b.c"), null);
   assert.equal(identityFrom(null, "a@b.c"), null);

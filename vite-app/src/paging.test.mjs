@@ -58,6 +58,33 @@ test("keyset paging keeps every surviving row when one is deleted mid-walk", asy
   for (const r of s.rows) assert.ok(ids.has(r.id), `row ${r.id} was skipped`);
 });
 
+test("offset paging reads every page of a still source, in order", async () => {
+  // Three pages, asked for concurrently and reassembled: the CSV inherits the
+  // query's order, so "all of them" is only half the promise — "in this
+  // order" is the other half, and it is the half concurrency could break.
+  const s = source(RESPONSE_ROW_CAP * 2 + 3);
+  let asked = 0;
+  const all = await fetchAllPages(async p => { asked++; return s.page(p); });
+  assert.equal(asked, 3);
+  assert.equal(all.length, RESPONSE_ROW_CAP * 2 + 3);
+  assert.deepEqual(all.map(r => r.id), s.rows.map(r => r.id));
+});
+
+test("a source that gives no total is taken at its first page", async () => {
+  // PostgREST omits the count unless the read asks for one. The pager used to
+  // divide by that missing number and hand `new Array` a NaN length, which
+  // throws — a reference list that answered nothing at all rather than the
+  // thousand rows it did have.
+  let asked = 0;
+  const rows = Array.from({ length: RESPONSE_ROW_CAP }, (_, i) => ({ id: i + 1 }));
+  const all = await fetchAllPages(async () => { asked++; return { rows }; });
+  assert.equal(asked, 1, "nothing to page towards when nobody said how many there are");
+  assert.equal(all.length, RESPONSE_ROW_CAP);
+
+  const nulled = await fetchAllPages(async () => ({ rows: [{ id: 1 }], total: null }));
+  assert.deepEqual(nulled.map(r => r.id), [1]);
+});
+
 test("offset paging skips a row when one is deleted mid-walk", async () => {
   // The reason the paid-from reads moved off it: this is not a hypothetical.
   const s = source(RESPONSE_ROW_CAP * 2 + 5);

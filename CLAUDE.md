@@ -55,8 +55,12 @@ Cloudflare Worker `solitary-snowflake-ee22` (assets + `/approve` proxy in
 - The Timesheets dose ledger sums in the database: `dose_totals(start, end)`
   — SECURITY INVOKER on purpose, narrowed again to own rows or Admin — so a
   year is forty-odd numbers, not 30k crew rows over the wire. It lives in
-  the PENDING migration, so the screen falls back to the old row walk on
-  PGRST202 (that one error only) until it is applied.
+  the PENDING migration, so until it is applied the screen falls back to
+  the old row walk on PGRST202, or on an error whose message names dose_totals and says it
+  could not be found, because older gateways only say it in words. Both
+  halves of that test matter: no other code falls back, and no message
+  falls back unless it names the function, so a permission refusal or a
+  timeout still reaches the screen as itself.
 - PostgREST silently caps responses at 1,000 rows. Anything that means
   "all of them" pages, and `paging.js` has two shapes: fetchAllPages
   (concurrent, by OFFSET) for the reference lists, where a row deleted
@@ -75,9 +79,11 @@ Cloudflare Worker `solitary-snowflake-ee22` (assets + `/approve` proxy in
   signing in — and a session restored at boot — empties the store first
   unless this same account already owns it, so a shared tablet never hands
   over the last crew's jobs, rates and half-entered tickets. Boot clears
-  outright on offline-with-no-identity and on the server's `signedOut`; a
-  merely lapsed session forgets only the identity, so the same person's
-  recovery copies survive signing back in. Sign-out clears everything, and
+  outright only on the server's `signedOut`; offline-with-no-identity and a
+  merely lapsed session forget the identity and nothing else, so the same
+  person's recovery copies survive going out of range or signing back in —
+  `cache.owner` and `claimFor` are the gate that keeps a stranger from them,
+  not a boot-time wipe. Sign-out clears everything, and
   still asks first when drafts or queued work would go with it.
 - auth-js does not remove the stored session when `signOut` fails — offline
   it refreshes an expired token first and returns the failure, leaving the

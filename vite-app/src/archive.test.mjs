@@ -215,6 +215,36 @@ test("a ticket read that fails is a gap, not the end of the build", async () => 
   assert.match(summary.missing[0], /^S-1004: The details of 1 ticket\(s\): Failed to fetch/);
 });
 
+test("an invoice that would not render is a named gap, and the ticket is still archived", async () => {
+  // The invoice is an Edge Function call per ticket — the likeliest thing in
+  // the build to refuse. The ticket's own record still belongs in the zip;
+  // what must not happen is the count saying an invoice is in there and the
+  // README calling the archive complete, because the clear behind it deletes
+  // the ticket for real.
+  const { blob, summary } = await build(fakeDb({
+    renderTicketInvoice: async () => { throw new Error("the invoice service is unavailable"); }
+  }));
+  assert.equal(summary.tickets, 1, "the ticket is in the archive");
+  assert.equal(summary.invoices, 0, "but nothing is counted as an invoice");
+  assert.equal(summary.missing.length, 1);
+  assert.match(summary.missing[0], /^S-1004: Invoice KK-0818-26-01: the invoice service is unavailable$/);
+  const txt = await zipText(blob);
+  assert.match(txt, /NOT RETRIEVED — this archive is not complete/);
+  assert.match(txt, /Invoice KK-0818-26-01: the invoice service is unavailable/);
+});
+
+test("a report PDF that would not download is a named gap too", async () => {
+  const { blob, summary } = await build(fakeDb({
+    listReportsForJob: async () => [{ file: "RT report.pdf", pdfKey: "reports/rt.pdf" }],
+    downloadObject: async () => { throw new Error("storage said no"); }
+  }));
+  assert.equal(summary.reports, 0, "nothing was retrieved, so nothing is counted");
+  assert.deepEqual(summary.missing, ["S-1004: Report RT report.pdf: storage said no"]);
+  const txt = await zipText(blob);
+  assert.match(txt, /NOT RETRIEVED — this archive is not complete/);
+  assert.match(txt, /Report RT report\.pdf: storage said no/);
+});
+
 test("the build records what each job held, for the clear to check against", async () => {
   const db = fakeDb({
     listJhasForJob: async () => [{ workDate: "2026-08-18", pdfKey: "" }],

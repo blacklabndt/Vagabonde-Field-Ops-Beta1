@@ -18,7 +18,7 @@ import assert from "node:assert/strict";
 import { readdirSync, readFileSync } from "node:fs";
 import {
   money, todayLocal, tabList, UNIVERSAL_TABS,
-  primaryContact, crewRoleFor, seesPrices, ROLE_PRESETS
+  primaryContact, crewRoleFor, seesPrices, ROLE_PRESETS, ticketStatusWriteRefusal
 } from "./data.js";
 
 // ── money ────────────────────────────────────────────────────────────────
@@ -188,6 +188,42 @@ test("nobody else sees a price, including nobody at all", () => {
   assert.equal(typeof seesPrices(null), "boolean");
 });
 
+// ── which saves a ticket's status lets through ───────────────────────────
+// updateTicket asks this before it prices a line or touches a crew row. Every
+// clause of it is about a bill the client has already been shown.
+
+test("an approved or invoiced ticket refuses a save outright", () => {
+  assert.equal(
+    ticketStatusWriteRefusal("Approved", "Draft", "KK-0818-26-01"),
+    "Ticket KK-0818-26-01 is approved — it can't be changed. Raise a new ticket for any correction.");
+  assert.match(ticketStatusWriteRefusal("Invoiced", "Draft", "KK-1"), /is invoiced — it can't be changed/);
+  // The status the save carries makes no difference: what the client agreed
+  // to pay is not editable by any route the app offers.
+  assert.ok(ticketStatusWriteRefusal("Approved", "Awaiting approval", "KK-1"));
+  assert.ok(ticketStatusWriteRefusal("Approved", "Approved", "KK-1"));
+});
+
+test("a Draft save over a ticket sent for signature is refused", () => {
+  // "Draft" is what every save sends — the editor hardcodes it, and a queued
+  // replay carries the string it was enqueued with hours ago. Letting it land
+  // moves the money under a live approval link.
+  assert.match(
+    ticketStatusWriteRefusal("Awaiting approval", "Draft", "KK-0818-26-01"),
+    /^Ticket KK-0818-26-01 has been sent for the client's signature — cancel the approval/);
+  // Sending it for signature, though, is exactly the save that has to land.
+  assert.equal(ticketStatusWriteRefusal("Awaiting approval", "Awaiting approval", "KK-1"), null);
+});
+
+test("an ordinary draft save is not refused", () => {
+  assert.equal(ticketStatusWriteRefusal("Draft", "Draft", "KK-1"), null);
+  assert.equal(ticketStatusWriteRefusal("Draft", "Awaiting approval", "KK-1"), null);
+  // A status nobody has heard of is not a reason to refuse a save — the
+  // database's own policies are the backstop, and inventing a refusal here
+  // would strand a ticket with nothing on screen to explain it.
+  assert.equal(ticketStatusWriteRefusal("Queried", "Draft", "KK-1"), null);
+  assert.equal(ticketStatusWriteRefusal(null, "Draft", "KK-1"), null);
+});
+
 // ── ROLE_PRESETS against the database ────────────────────────────────────
 // The drift check CLAUDE.md asks for. The role → tabs defaults live in two
 // places that must move together: ROLE_PRESETS here, and public.tabs_for_role()
@@ -200,11 +236,13 @@ test("nobody else sees a price, including nobody at all", () => {
 // redefines it wins, because migrations apply in filename order.
 
 const MIGRATIONS = new URL("../../supabase/migrations/", import.meta.url);
+const HANDOVER = new URL("../../supabase/handover/", import.meta.url);
+const DEFINES_TABS_FOR_ROLE = /(create|replace)\s+function\s+public\.tabs_for_role/i;
 
 function tabsForRoleFromSql() {
   const files = readdirSync(MIGRATIONS).filter(f => f.endsWith(".sql")).sort();
   const defining = files.filter(f =>
-    /(create|replace)\s+function\s+public\.tabs_for_role/i.test(readFileSync(new URL(f, MIGRATIONS), "utf8")));
+    DEFINES_TABS_FOR_ROLE.test(readFileSync(new URL(f, MIGRATIONS), "utf8")));
   assert.ok(defining.length, "no migration defines public.tabs_for_role");
 
   const latest = defining[defining.length - 1];
@@ -235,4 +273,26 @@ test("ROLE_PRESETS matches tabs_for_role() in the migrations", () => {
       [...roles[role]].sort(), [...ROLE_PRESETS[role]].sort(),
       `${role}'s tabs differ between data.js and ${file} — move both together`);
   }
+});
+
+test("no unapplied handover SQL quietly redefines tabs_for_role", () => {
+  // supabase/handover holds SQL that has not been applied and is not part of
+  // the migration history — the PENDING-* files waiting on Kyle's word, and
+  // the wipes. The check above reads the migrations, so a redefinition
+  // parked in here would be invisible to it: the test would go on comparing
+  // ROLE_PRESETS against the old migration and pass, right up to the day the
+  // pending file was applied and every new account came out with the wrong
+  // tabs.
+  //
+  // Asserting there is none, rather than folding these into "last definition
+  // wins": an unapplied file is not what the database is running, so treating
+  // it as the winner would be its own kind of wrong. If one ever does define
+  // the function, this fails and the person adding it decides — most likely
+  // by applying it and writing the migration, which puts it back where the
+  // check above can see it.
+  const stray = readdirSync(HANDOVER)
+    .filter(f => f.endsWith(".sql"))
+    .filter(f => DEFINES_TABS_FOR_ROLE.test(readFileSync(new URL(f, HANDOVER), "utf8")));
+  assert.deepEqual(stray, [],
+    "handover SQL defines public.tabs_for_role — apply it and write the migration, or the drift check above is reading the wrong definition");
 });

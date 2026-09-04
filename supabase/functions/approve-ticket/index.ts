@@ -12,9 +12,11 @@
 // meant a rep who refreshed, pressed back, or opened the link again a week
 // later was told their link had been used up — and a resend refuses an
 // approved ticket, so there was no way back to the copy they had signed.
-// The link is now the rep's own receipt until it expires: re-signing is
-// impossible either way (the already-approved branch returns before the
-// POST handler, and the update is conditional on approved_at being null).
+// The link is now the rep's own receipt, and once the ticket is signed it
+// keeps working past the 30 days — expiry is only there to stop an old link
+// SIGNING something, and re-signing is impossible either way (the
+// already-approved branch returns before both the expiry check and the POST
+// handler, and the update is conditional on approved_at being null).
 //
 // The row holds a hash of the token, never the token (see
 // _shared/approvalToken.ts): the tickets table is readable by every staff
@@ -39,9 +41,11 @@ const MAX_BODY_BYTES = 1_000_000;
 const MAX_NAME_CHARS = 120;
 const MAX_QUERY_CHARS = 2000;
 
-// How long a ticket stays queried before another query on it is taken. A rep
-// with a second thing to say a quarter of an hour later is a real person; a
-// hundred posts in a minute is a forwarded link, a double tap, or worse.
+// How long after a query the office is left in peace before another one
+// mails them. Every query is recorded whatever this says; only the mail
+// waits. A rep with a second thing to say a quarter of an hour later is a
+// real person; a hundred posts in a minute is a forwarded link, a double
+// tap, or worse.
 const QUERY_COOLDOWN_MS = 15 * 60 * 1000;
 
 // The invoice supplies its own .sheet and its own table styling, so this adds
@@ -236,7 +240,7 @@ async function handle(req: Request): Promise<Response> {
   // invoice itself is loaded through loadInvoice below.
   const { data: row, error: readErr } = await admin
     .from("tickets")
-    .select(TICKET_INVOICE_SELECT + ", approval_expires_at, approval_sent_by")
+    .select(TICKET_INVOICE_SELECT + ", approval_expires_at, approval_sent_by, queried_at")
     .eq("approval_token", await hashToken(token)).maybeSingle();
   // deno-lint-ignore no-explicit-any
   const ticket = row as any;
@@ -252,11 +256,6 @@ async function handle(req: Request): Promise<Response> {
     return notice("This link is no longer valid",
       "A newer approval email may have replaced it — check for a more recent one from VagaboNDE. Otherwise, ask them to send a fresh approval link.");
   }
-  if (ticket.approval_expires_at && new Date(ticket.approval_expires_at) < new Date()) {
-    return notice("This link has expired",
-      "Approval links are good for 30 days. Ask VagaboNDE to send a new one.");
-  }
-
   // Loaded through the shared reader, so this page, the emailed copy and the
   // office view cannot drift apart in what they print. Service role here: the
   // person following the link has no account, which is the whole point.
@@ -268,10 +267,22 @@ async function handle(req: Request): Promise<Response> {
   // a token but is already signed — an approval link re-sent by mistake, say —
   // used to fall straight through into the POST handler and be re-signed,
   // overwriting the original signature, time and IP on a finished record.
+  //
+  // And checked before the expiry below, not after it. Expiry is what stops
+  // an old link being SIGNED; a signed ticket cannot be signed again in any
+  // case. Refusing it on day 31 took away nothing but the rep's own copy of
+  // what they put their name to — and a resend refuses an approved ticket, so
+  // there was no other way back to it. Signed is permanent; the expiry that
+  // follows is for tickets still waiting for a signature.
   if (ticket.status === "Approved" || ticket.approved_at) {
     // renderInvoice prints the approval stamp itself once the ticket is
     // signed — including the drawn signature, which rides the select.
     return page(header + `<div class="actions">${downloadButton()}</div>`);
+  }
+
+  if (ticket.approval_expires_at && new Date(ticket.approval_expires_at) < new Date()) {
+    return notice("This link has expired",
+      "Approval links are good for 30 days. Ask VagaboNDE to send a new one.");
   }
 
   // What this page is asking the rep to sign for, as of right now.
@@ -303,34 +314,36 @@ async function handle(req: Request): Promise<Response> {
       if (!who || !text) {
         return page(ask + header + `<div class="actions"><p style="color:#8a3b3b;font-size:13px">Please give your name and say what needs looking at.</p></div>` + signForm(fingerprint) + queryForm(fingerprint, who, text));
       }
-      // Throttled, and throttled in the database rather than here. This link
-      // is the whole credential and it travels: forwarded round a client's
-      // office, or double-tapped on a slow phone, an unconditional write
-      // rewrote the query columns and posted another email on every request —
-      // an inbox flood, and the Resend quota that every other mail in this
-      // app draws on spent by one rep. The cooldown rides on the update's own
-      // filter so two simultaneous posts cannot both pass it, the way the
-      // approval below leans on approved_at rather than on a prior read. The
-      // value is quoted because an ISO stamp carries dots of its own and
-      // PostgREST would otherwise read the milliseconds as more syntax.
-      const cooledSince = new Date(Date.now() - QUERY_COOLDOWN_MS).toISOString();
-      const { data: queriedRows, error: qErr } = await admin.from("tickets")
+      // The rep's words always land. The cooldown used to ride on this
+      // update's own filter, which meant a second — different — query inside
+      // the window wrote nothing while the page still told the rep it had
+      // been sent: whatever they came back to say was simply lost. The write
+      // is unconditional now, bar approved_at, because a signed ticket takes
+      // no query.
+      //
+      // It is the EMAIL that is throttled instead, which is what the limit
+      // was ever for: this link is the whole credential and it travels —
+      // forwarded round a client's office, or double-tapped on a slow phone —
+      // and a mail per request is an inbox flood and the Resend quota that
+      // every other mail in this app draws on spent by one rep. The gate
+      // reads the queried_at that came back with the ticket for THIS request,
+      // so two posts racing inside the window may each still send one. That
+      // is two mails carrying two real queries, which is the harmless side of
+      // the trade — a lost query was not.
+      const previouslyQueriedAt = ticket.queried_at as string | null;
+      const { error: qErr } = await admin.from("tickets")
         .update({ queried_at: new Date().toISOString(), query_text: text, query_by: who })
-        .eq("id", ticket.id).is("approved_at", null)
-        .or(`queried_at.is.null,queried_at.lt."${cooledSince}"`)
-        .select("id");
+        .eq("id", ticket.id).is("approved_at", null);
       if (qErr) throw qErr;
-      // Mail only for the request that actually wrote. A zero-row update is a
-      // query the ticket already carries, and the office has already been told.
-      if (queriedRows && queriedRows.length > 0) {
+      if (!previouslyQueriedAt || Date.now() - new Date(previouslyQueriedAt).getTime() > QUERY_COOLDOWN_MS) {
         try { await notifyQuery(admin, row, who, text); }
         catch (e) { await logError("approve-ticket", "Queried, but the office wasn't told: " + (e as Error).message, { ticket: ticket.id }); }
       }
-      // The same receipt whether the write landed or the cooldown swallowed
-      // it. A page that said "you've already queried this" would teach anyone
-      // holding the link exactly what the limit is and when it lifts, and a
-      // rep who sent one query legitimately has nothing to learn from the
-      // difference anyway.
+      // The same receipt whether the office was mailed or the cooldown held
+      // the mail back. A page that said "you've already queried this" would
+      // teach anyone holding the link exactly what the limit is and when it
+      // lifts, and a rep who sent one query legitimately has nothing to learn
+      // from the difference anyway — their words are on the ticket either way.
       return page(ask + header + `
         <div class="actions"><p class="signnote">Thank you — your query has been sent to VagaboNDE. This link stays live:
         once the ticket has been looked at, you can come back here and sign it, or you'll be sent a fresh one.</p></div>`);

@@ -5,7 +5,10 @@ import { OfflineCache } from "../offlineCache.js";
 import { IDENTITY_KEY } from "../session.js";
 import { Recovery } from "../recovery.js";
 
-export function SignInScreen({ onSignIn }) {
+// `notice` is what the boot has to say about why it landed them here rather
+// than opening the app — see App.jsx's bootSession. Shown beside the reset
+// link's own complaint, since both are about how they arrived at this screen.
+export function SignInScreen({ onSignIn, notice = "" }) {
   const [email, setEmail] = useState("");
   const [password, setPassword] = useState("");
   const [error, setError] = useState("");
@@ -101,11 +104,18 @@ export function SignInScreen({ onSignIn }) {
     // a lapsed session removes the remembered identity but leaves the work.
     try { await OfflineCache.claimFor(profile.id); }
     catch (e) {
-      // A store that would not empty leaves no owner recorded, so the next
-      // sign-in tries again rather than treating it as claimed. Signing in
-      // still goes ahead: nobody is trapped on the sign-in screen because
-      // IndexedDB is wedged.
+      // A store that would not empty still holds the last crew's jobs, rates
+      // and half-entered tickets. Signing in over it used to go ahead anyway
+      // — "nobody is trapped because IndexedDB is wedged" — which put this
+      // person's name on somebody else's work and handed it to them the
+      // moment the signal dropped. The session ends here instead: claimFor
+      // records no owner when the clear fails, so trying again clears from
+      // scratch, and a device that never clears is one to take out of the
+      // truck rather than one to sign in on.
       console.error("Couldn't clear the previous account's cached data:", e);
+      setError("This device couldn't clear the previous person's data — try again.");
+      { const { error: outErr } = await sbClient.auth.signOut(); if (outErr) forgetStoredSession(); }
+      return;
     }
     // Remembered so the next start with no signal knows who this is, rather
     // than showing a sign-in form that cannot reach the server anyway.
@@ -138,6 +148,7 @@ export function SignInScreen({ onSignIn }) {
               set-a-new-password one. Above the fields, not beside the
               button, because it is about the link they just followed. */}
           {linkError && <ErrorBox>{linkError}</ErrorBox>}
+          {notice && <ErrorBox>{notice}</ErrorBox>}
           <Field label="Email">
             <input className="input" style={{ minHeight: 42 }} type="email" value={email}
               name="email" autoComplete="username" required

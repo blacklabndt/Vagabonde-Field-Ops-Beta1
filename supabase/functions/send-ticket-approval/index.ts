@@ -63,8 +63,11 @@ Deno.serve(async (req) => {
 
     const job = ticket.jobs as any;
 
-    // Single-use token, 30 days. Long enough to survive a rep's holiday,
-    // short enough that a stale forwarded email stops working.
+    // 30 days to sign. Long enough to survive a rep's holiday, short enough
+    // that a stale forwarded email stops opening a ticket nobody has signed.
+    // Not single-use: approve-ticket leaves the token on the row, so once the
+    // ticket is signed this same link is the rep's own way back to the copy
+    // they put their name to — expiry or no.
     const token = crypto.randomUUID().replace(/-/g, "") + crypto.randomUUID().replace(/-/g, "");
     const expires = new Date(Date.now() + 30 * 86400000).toISOString();
 
@@ -140,7 +143,7 @@ Deno.serve(async (req) => {
     const html = wrapEmail(`
       ${summary}
       <p style="margin-top:24px"><a href="${link}" style="display:inline-block;background:#5980a6;color:#f2f2f3;text-decoration:none;padding:13px 24px;font-weight:600">Review &amp; approve this ticket</a></p>
-      <p style="font-size:11px;color:#6b6d6e">A copy is attached for your records. The approval link works for 30 days and can only be used once.</p>
+      <p style="font-size:11px;color:#6b6d6e">A copy is attached for your records. The approval link is good for 30 days to sign; afterwards it stays your way back to the signed copy.</p>
     `);
 
     const text = [

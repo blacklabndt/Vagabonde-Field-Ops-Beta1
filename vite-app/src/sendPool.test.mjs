@@ -10,7 +10,7 @@
 
 import test from "node:test";
 import assert from "node:assert/strict";
-import { runSendPool, isTransientSendError, retryAfterFromError, backoffMs } from "./sendPool.js";
+import { runSendPool, isTransientSendError, retryAfterFromError, backoffMs, MAX_WAIT_MS } from "./sendPool.js";
 
 // A clock whose sleep is instantaneous but still moves time forward, so the
 // pacing arithmetic is exercised for real without waiting for it.
@@ -167,6 +167,45 @@ test("Stop during a backoff abandons the retry", async () => {
   }, { concurrency: 1, sleep: clock.sleep, now: clock.now, shouldStop: () => stop });
   assert.equal(attempts, 1, "the wait was interrupted rather than tried again");
   assert.equal(out.failed.length, 1);
+});
+
+test("Stop is answered part-way through a long wait, not at the end of it", async () => {
+  // The stepped clock is the whole point: Stop is pressed one second into a
+  // Retry-After of a minute, and the pool has to come back at about that
+  // second. Waited in one piece it came back at sixty — the office pressed
+  // Stop, the button said "Stopping…", and nothing happened for a minute.
+  const clock = fakeClock();
+  let attempts = 0;
+  const out = await runSendPool(["T-1"], async () => {
+    attempts++;
+    const e = new Error("Resend is rate-limiting: slow down");
+    e.retryAfter = 60;
+    throw e;
+  }, {
+    concurrency: 1, sleep: clock.sleep, now: clock.now,
+    shouldStop: () => clock.now() >= 1000
+  });
+  assert.equal(attempts, 1, "the wait was abandoned rather than retried");
+  assert.ok(clock.now() < 2000, `came back mid-wait at ${clock.now()}ms, not at the end of the minute`);
+  assert.equal(out.stopped, true);
+  assert.deepEqual(out.failed.map(f => f.item), ["T-1"]);
+});
+
+test("a Retry-After of an hour is capped, not obeyed", async () => {
+  // Resend's header is the far end's number to choose. An hour of it would
+  // hold one worker — and one ticket of four thousand — for the hour.
+  const clock = fakeClock();
+  let attempts = 0;
+  const out = await runSendPool(["T-1"], async () => {
+    attempts++;
+    if (attempts < 2) {
+      const e = new Error("Resend is rate-limiting: come back later (retry after 3600s)");
+      e.retryAfter = 3600;
+      throw e;
+    }
+  }, { concurrency: 1, sleep: clock.sleep, now: clock.now });
+  assert.equal(clock.now(), MAX_WAIT_MS, "waited the ceiling, not the hour it was told");
+  assert.deepEqual(out.sent, ["T-1"]);
 });
 
 test("progress is reported once per settled item, in order", async () => {

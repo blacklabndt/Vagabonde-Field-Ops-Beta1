@@ -354,6 +354,86 @@ rollback;
 --          (select public.is_staff())   as is_staff;
 -- rollback;
 
+-- 5d · The other half of what section 1 sets loose: delete_job. Its admin
+--      test was `is_admin := user_role() = 'Admin'`, and the three gates
+--      under it all read `not is_admin` — null on a locked account, and
+--      null takes the false branch, so the ban that section 1 exists to
+--      enforce would have handed that account the discard. This is the
+--      block that calls the function for real rather than reading it, and
+--      it is read-only twice over: the inner block is a subtransaction, so
+--      anything raised inside it unwinds the deletes — including the
+--      sentinel this probe raises ITSELF when delete_job returns instead
+--      of refusing — and the outer transaction ends in ROLLBACK regardless.
+--
+--      Like 5b it refuses to run without a locked account, because with
+--      none the 'sub' is null, auth.uid() is null, and it would refuse for
+--      the wrong reason. Uncomment 5c's update at the top of THIS
+--      transaction, or lock a seed account, then rerun.
+--
+--      BEFORE: '5d · WENT THROUGH …' — the discard ran and was undone.
+--      AFTER:  '5d · refused 42501 …' — the door test turned it away.
+begin;
+do $$
+declare
+  v_dead uuid;
+  v_job  uuid;
+  v_out  jsonb;
+begin
+  select id into v_dead from public.profiles where deactivated_at is not null limit 1;
+  if v_dead is null then
+    raise exception
+      '5d NEEDS A DEACTIVATED ACCOUNT: none is locked, so this block would refuse for the wrong reason. Run 5c''s update in this transaction, or lock a seed account, then rerun.';
+  end if;
+  -- Aim at a job the function would otherwise go all the way through for,
+  -- or the "before" run refuses for a reason that has nothing to do with
+  -- the finding: created_by present (a null one raises "no longer exists"
+  -- off is_creator), and nothing approved or invoiced on it (that raise
+  -- stands for everybody, admin included, and rightly).
+  select j.id into v_job
+    from public.jobs j
+   where j.created_by is not null
+     and not exists (
+       select 1 from public.tickets t
+        where t.job_id = j.id
+          and (t.approved_at is not null or t.status in ('Approved', 'Invoiced')))
+   order by j.created_at desc
+   limit 1;
+  if v_job is null then
+    raise exception '5d NEEDS A JOB to aim at: none is both attributed and free of approved billing.';
+  end if;
+
+  perform set_config('request.jwt.claims', json_build_object(
+      'sub',  v_dead::text,
+      'role', 'authenticated',
+      'app_metadata', json_build_object(
+        'app_role',   'Technician',
+        'tab_access', public.tabs_for_role('Technician'))
+    )::text, true);
+  -- set_config rather than SET, which plpgsql does not take; is_local so
+  -- it dies with the transaction either way.
+  perform set_config('role', 'authenticated', true);
+
+  begin
+    v_out := public.delete_job(v_job, null, true);
+    raise exception 'sentinel' using errcode = 'PRB01';
+  exception
+    when sqlstate 'PRB01' then
+      perform set_config('probe.r5d', format(
+        '5d · WENT THROUGH — a locked account discarded job %s and got back %s (rolled back)',
+        v_job, v_out), true);
+    when others then
+      perform set_config('probe.r5d', format(
+        '5d · refused %s — %s', sqlstate, sqlerrm), true);
+  end;
+end $$;
+
+-- The DO block's answer, carried out on a custom GUC so it lands in a
+-- result row and not only in the client's NOTICE stream, which not every
+-- SQL client shows.
+select '5d · delete_job as a locked account' as probe,
+       current_setting('probe.r5d', true)    as outcome;
+rollback;
+
 
 -- ═══ 6 · profiles_insert / profiles_delete, as a matrix ═════════════════
 -- Finding 2. Each row evaluates the OLD predicate and the NEW predicate
@@ -369,6 +449,21 @@ rollback;
 --     del_new needs Admin.
 
 -- 6a · caller is a users-tab Technician (the hole)
+--
+--      THE TAB GATE IS HELD TRUE BY HAND HERE, and it has to be. The claim
+--      below grants the users tab, which is what this block used to lean
+--      on — but section 1 stops tab_access() believing the claim, and no
+--      Technician holds that tab in profiles (0 live today). So on the
+--      "after" run the real read is false, every column collapses to
+--      false, and the block would look like a pass while proving the tab
+--      gate twice and section 2's RANK gate not at all. Satisfying the tab
+--      half as a literal leaves the rank half alone to answer, and it
+--      answers identically before and after — which is the point: section
+--      2 is not about the tab.
+--
+--      has_users_tab_real beside it is the honest read, and it is MEANT to
+--      change: true before (the forged claim), false after. That is
+--      section 1 showing through, and 2c is where it is argued.
 begin;
 select set_config('request.jwt.claims', json_build_object(
     'sub',  (select id::text from public.profiles
@@ -383,19 +478,20 @@ select set_config('request.jwt.claims', json_build_object(
   )::text, true);
 set local role authenticated;
 
-select '6a · users-tab Technician' as probe, payload_role,
-       (select private.user_role()) as caller_role,
-       -- OLD profiles_insert
-       (select private.has_any_tab('users'))                                   as ins_old,
-       -- NEW profiles_insert
-       ((select private.has_any_tab('users'))
-        and ((select private.user_role()) = 'Admin'
-             or payload_role = any (array['Technician','Helper'])))            as ins_new,
-       -- OLD profiles_delete (against someone else's row)
-       ((select private.has_any_tab('users')) and true)                        as del_old,
-       -- NEW profiles_delete
+select '6a · users-tab Technician (tab held true)' as probe, payload_role,
+       (select private.user_role())          as caller_role,
+       (select private.has_any_tab('users')) as has_users_tab_real,
+       -- OLD profiles_insert, with the tab granted: true for every payload
+       -- rank, and that flat row of trues IS the hole — the tab was the
+       -- whole predicate.
+       true                                                                    as ins_old,
+       -- NEW profiles_insert, with the tab granted: the rank gate alone.
        ((select private.user_role()) = 'Admin'
-        and (select private.has_any_tab('users')) and true)                    as del_new
+        or payload_role = any (array['Technician','Helper']))                  as ins_new,
+       -- OLD profiles_delete (against someone else's row)
+       true                                                                    as del_old,
+       -- NEW profiles_delete: Admin, and this caller is not one.
+       ((select private.user_role()) = 'Admin')                                as del_new
   from unnest(array['Admin','Coordinator','Technician','Helper']) as payload_role;
 rollback;
 

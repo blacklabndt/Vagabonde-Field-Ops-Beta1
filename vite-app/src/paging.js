@@ -38,9 +38,15 @@ export const RESPONSE_ROW_CAP = 1000;
 const PAGE_CONCURRENCY = 6;
 export async function fetchAllPages(fetchPage) {
   const first = await fetchPage(0);
-  const total = first.total;
   const rows = first.rows.slice();
-  if (!first.rows.length || rows.length >= total) return rows;
+  // A page 0 that came back without a usable total has said nothing about
+  // what follows it, and the arithmetic below turns that into `new Array(NaN)`
+  // — a RangeError thrown out of a read that was only ever asked for a list.
+  // Every caller here passes `count ?? rows.length`, so the count is the
+  // server's or the page's own length; anything else is a source that never
+  // counted, and page 0 is all it is offering.
+  const total = Number(first.total);
+  if (!first.rows.length || !Number.isFinite(total) || rows.length >= total) return rows;
 
   const pageCount = Math.ceil(total / RESPONSE_ROW_CAP);
   const pages = new Array(pageCount);

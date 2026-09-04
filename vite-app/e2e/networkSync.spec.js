@@ -100,9 +100,11 @@ async function jhaDraftOnDisk(page, muster) {
   }, muster);
 }
 
-test.beforeEach(async ({ page }, testInfo) => {
+// The desktop project is the only one that matches this file at all (see
+// playwright.config.js), so there is no project check here — a skip that can
+// never fire is not a decision, it is noise in the skipped count.
+test.beforeEach(async ({ page }) => {
   test.skip(!EMAIL || !PASSWORD, "Set E2E_EMAIL and E2E_PASSWORD in vite-app/e2e/.env");
-  test.skip(testInfo.project.name !== "desktop", "network behavior is viewport-blind");
   sweepAfter = null;
   await goHome(page);
 });

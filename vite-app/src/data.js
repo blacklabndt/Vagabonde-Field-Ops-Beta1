@@ -137,6 +137,34 @@ export const crewRoleFor = profile => CREW_ROLE_OF[profile && profile.role] || "
 // answer, which is how Open tickets and Job detail came to disagree.
 export const seesPrices = user => !!user && (user.role === "Admin" || user.role === "Technician");
 
+// Whether a save may land on a ticket, given the status the row is at and the
+// status the save is carrying. Returns the refusal to show, or null.
+//
+// Lifted out of db.js's updateTicket so the rule can be read and tested on its
+// own: it is two sentences of prose in the middle of a long function, and both
+// of them are about money that has already left the building.
+//
+// The Approved/Invoiced half is the obvious one — what the client agreed to
+// pay is not something the app may quietly rewrite afterwards.
+//
+// The Awaiting-approval half is the one that reads like an accident and
+// isn't. "Draft" is the word every save sends: the editor hardcodes it, and a
+// queued replay carries the literal string it was enqueued with hours ago. So
+// a Draft arriving over a ticket the office has since sent for signature is
+// not somebody choosing to un-send it — it is a stale save about to move the
+// money under a live approval link, and the rep would sign a different bill
+// from the one they were emailed. Pulling a sent ticket back is
+// withdraw_ticket_approval's job and nobody else's.
+export function ticketStatusWriteRefusal(rowStatus, requestedStatus, ticketId = "This ticket") {
+  if (rowStatus === "Approved" || rowStatus === "Invoiced") {
+    return `Ticket ${ticketId} is ${rowStatus.toLowerCase()} — it can't be changed. Raise a new ticket for any correction.`;
+  }
+  if (rowStatus === "Awaiting approval" && requestedStatus === "Draft") {
+    return `Ticket ${ticketId} has been sent for the client's signature — cancel the approval before changing it.`;
+  }
+  return null;
+}
+
 // ── Pay periods ────────────────────────────────────────────────────────
 // Semi-monthly: the 1st–15th, then the 16th to the end of the month. Dates
 // are handled as plain YYYY-MM-DD strings, never Date objects, because a

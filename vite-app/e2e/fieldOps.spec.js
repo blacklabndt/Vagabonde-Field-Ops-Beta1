@@ -84,19 +84,90 @@ test("the client picker overflows the dialog instead of clipping", async ({ page
   expect(box.y + box.height).toBeLessThanOrEqual(viewport.height + 1);
 });
 
+// What each drawer screen puts on the page once it has actually arrived —
+// a heading where the screen has one, the composer where it does not.
+// Keyed by the drawer's own label, and the tour below fails on a label that
+// isn't here: a screen added to TABS then goes red rather than being toured
+// as "no uncaught errors" while never rendering anything.
+const SCREEN_LANDMARK = {
+  "Home": p => p.getByRole("button", { name: "+ Ticket" }),
+  "Open tickets": p => p.getByRole("heading", { name: "Open tickets" }),
+  // Chat's heading is the crew's own messages, so the composer's Send is what
+  // says the screen is up.
+  "Team chat": p => p.getByRole("button", { name: "Send", exact: true }),
+  "Files": p => p.getByRole("heading", { name: "Files" }),
+  "Contacts": p => p.getByRole("heading", { name: "Contacts" }),
+  "Equipment": p => p.getByRole("heading", { name: "Equipment" }),
+  "Timesheets": p => p.getByRole("heading", { name: "Timesheets" }),
+  // The screen calls itself by what it holds, not by its menu label.
+  "Rate admin": p => p.getByRole("heading", { name: "Billing rates" }),
+  "Billing tracker": p => p.getByRole("heading", { name: "Billing tracker" }),
+  "Users & access": p => p.getByRole("heading", { name: "Users & access" }),
+  "Admin": p => p.getByRole("heading", { name: "Admin", exact: true })
+};
+
+// Every "still fetching" marker the screens use: common.jsx's Loading carries
+// .loading, and the chat's own spinner names itself instead. Waiting for both
+// to go is waiting for the screen to have finished, where the old fixed sleep
+// only hoped 1.5 s was enough — and passed regardless when it wasn't.
+const stillLoading = page => page.locator(".loading, [aria-label='Loading the chat']");
+
 // Same code both viewports — one sweep is enough.
-test("every drawer screen renders without uncaught errors", { tag: "@desktop" }, async ({ page }) => {
+test("every drawer screen this account has opens and renders", { tag: "@desktop" }, async ({ page }) => {
+  // One test, but a live fetch per screen and as many screens as the account
+  // has tabs — the suite's 45 s default is a per-test budget written for tests
+  // that touch one screen.
+  test.setTimeout(120_000);
   const errors = [];
   page.on("pageerror", e => errors.push(e.message));
 
-  // The technician's menu, as Users & access grants it.
-  for (const label of ["Open tickets", "Team chat", "Files", "Contacts"]) {
-    await page.getByRole("button", { name: "Sections" }).click();
-    // Not exact: a drawer item's accessible name can carry its unread badge
-    // ("Open tickets 3"), and exact matching would miss it.
-    await page.getByRole("button", { name: label }).first().click();
-    // Let the screen fetch and settle before moving on.
-    await page.waitForTimeout(1500);
+  // The menu as Users & access actually grants it to E2E_EMAIL, read off the
+  // drawer rather than written in here: a hardcoded four toured four of the
+  // eleven screens and called itself "every". Direct children of the nav are
+  // the tab buttons; the footer's name and Sign out live in a div below them.
+  await page.getByRole("button", { name: "Sections" }).click();
+  const drawer = page.getByRole("navigation", { name: "Sections" });
+  await expect(drawer.locator("> button").first()).toBeVisible({ timeout: 15_000 });
+  // The unread badge rides inside the button's text ("Team chat3"), so trim a
+  // trailing count off before matching the label.
+  const labels = (await drawer.locator("> button").allTextContents())
+    .map(t => t.replace(/\s*\d+\s*$/, "").trim());
+  expect(labels.length, "the drawer should list this account's screens").toBeGreaterThan(0);
+  // Shut it again before the tour starts — the Sections button is a toggle,
+  // and the drawer only unmounts once its slide-away animation has ended.
+  await page.keyboard.press("Escape");
+  await expect(drawer).toBeHidden({ timeout: 10_000 });
+
+  for (const label of labels) {
+    const landmark = SCREEN_LANDMARK[label];
+    expect(landmark, `no landmark known for the drawer screen "${label}"`).toBeTruthy();
+    // Open the drawer and take the screen, click and check retried as one
+    // step — the drawer slides away as the screen changes, so a click can be
+    // dispatched at the very moment the item detaches, and an unbounded retry
+    // then waits forever for a button that has already done its job. Same
+    // shape as openTicketRow in helpers.js, and the same reason.
+    let clicked = false;
+    await expect(async () => {
+      if (!clicked || !(await landmark(page).isVisible().catch(() => false))) {
+        // The Sections button is a toggle: clicking it on an open drawer
+        // would shut the very menu this is trying to use.
+        if (!(await drawer.isVisible().catch(() => false))) {
+          await page.getByRole("button", { name: "Sections" }).click({ timeout: 8_000 });
+        }
+        // Inside the drawer, not the page: an accessible name matches as a
+        // substring, so a page-wide "Home" also finds the top bar's wordmark
+        // ("VagaboNDE — go to home") — which the open drawer is covering, so
+        // the click sat there being intercepted until the test ran out of
+        // time. Still not exact, though: a drawer item's name can carry its
+        // unread badge ("Open tickets 154").
+        await drawer.getByRole("button", { name: label }).first().click({ timeout: 8_000 });
+        clicked = true;
+      }
+      await expect(landmark(page), `${label} should render its own screen`)
+        .toBeVisible({ timeout: 10_000 });
+    }).toPass({ timeout: 40_000 });
+    await expect(stillLoading(page), `${label} should finish fetching`)
+      .toHaveCount(0, { timeout: 25_000 });
   }
   expect(errors, `Uncaught errors while touring: ${errors.join(" | ")}`).toEqual([]);
 });
@@ -134,16 +205,20 @@ test("an empty draft saves, reopens and cancels", { tag: "@desktop" }, async ({ 
   await expect(saveDraft).toBeEnabled({ timeout: 15_000 });
   await expect(send).toBeDisabled();
 
-  // The ticket number on screen is what we clean up by.
-  const ticketId = (await page.locator(".tabular").first().textContent()).trim();
-  expect(ticketId).toMatch(/^[A-Z]{1,3}-\d{4}-\d{2}-\d{2}$/);
+  // The number on screen before the save is a preview: the sequence at the
+  // end is minted against the day's tickets when the row lands, so another
+  // ticket raised in between makes the saved number differ from this one.
+  // Worth asserting the shape, never worth hunting the row by.
+  const preview = (await page.locator(".tabular").first().textContent()).trim();
+  expect(preview).toMatch(/^[A-Z]{1,3}-\d{4}-\d{2}-\d{2}$/);
 
   await saveDraft.click();
   // Saving an empty draft lands back on Job detail.
   await settledJobDetail(page);
 
-  // The draft is on the job's ticket list — reopen it.
-  await openTicketRow(page, ticketId);
+  // The draft is on the job's ticket list — reopen it. By today's shape for
+  // whoever is signed in, which is what the sweeps clean up by too.
+  await openTicketRow(page, rx);
   await expect(page.getByRole("button", { name: "Save draft" })).toBeEnabled({ timeout: 15_000 });
 
   // Cancel deletes it outright; accept the confirm.

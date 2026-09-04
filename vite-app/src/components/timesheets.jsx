@@ -618,9 +618,10 @@ export function TimesheetsScreen({ currentUser }) {
 //
 // The function is newer than the app, and a database that has not had the
 // migration yet still has to show the ledger. PostgREST answers PGRST202 for
-// a routine it cannot find; that one error, and only that one, falls back to
-// the read this screen has always used. Anything else — a permission
-// refusal, a timeout — is a real failure and reaches the screen as itself.
+// a routine it cannot find, and older gateways say the same in words; that
+// answer — and only that one, see isMissingDoseTotals — falls back to the
+// read this screen has always used. Anything else — a permission refusal, a
+// timeout — is a real failure and reaches the screen as itself.
 async function loadDose({ start, end }) {
   const { data, error } = await sbClient.rpc("dose_totals", { p_start: start, p_end: end });
   if (!error) return { summary: data || [], entries: [] };

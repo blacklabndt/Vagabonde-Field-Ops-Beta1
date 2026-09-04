@@ -119,6 +119,11 @@ export function App() {
   const signedInId = useRef(null);
   signedInId.current = currentUser ? currentUser.id : null;
   const [checkingSession, setCheckingSession] = useState(true);
+  // Why the boot put them back on the sign-in screen when a session did in
+  // fact exist. Only one thing sets it so far — a device that would not empty
+  // itself for the account being restored — and it has to be said, because
+  // signing in again is the fix and nothing else on that screen suggests it.
+  const [bootError, setBootError] = useState("");
   // A password-reset link lands here with recovery tokens in the URL hash;
   // the session it starts is only for choosing a new password, so the app
   // gates on that screen instead of quietly opening. Detection lives in
@@ -239,6 +244,10 @@ export function App() {
       // A ticket that never reached the database gets its number now, on the
       // way in — not when it was built in the field hours ago.
       let id = payload.ticketId;
+      // True once the row turns out to be with the client for signature, so
+      // the lines in this payload were not applied. It changes what still
+      // runs below and what the technician is told at the end.
+      let linesRefused = false;
       if (!payload.alreadyCreated) {
         // With the key the editor minted: this is the one replay that can
         // double-file a day — the insert lands, the answer is lost on the
@@ -270,24 +279,43 @@ export function App() {
             lines: payload.lines, status: payload.status, delays: payload.delays
           });
         } catch (e) {
-          // The row was cancelled on another device while this sat in the
-          // outbox. The payload still holds the whole day — the only copy
-          // of it — so raise it as a fresh ticket rather than stranding it
-          // behind a dead id forever.
-          if (!e.ticketGone) throw e;
-          const saved = await Db.createTicket({
-            initials: payload.initials, jobDbId: payload.jobDbId, technicianId: payload.technicianId,
-            workDate: payload.workDate, clientContact: payload.clientContact, contractorContact: payload.contractorContact,
-            lines: payload.lines, status: payload.status, delays: payload.delays,
-            clientKey: payload.clientKey || null
-          });
-          id = saved.id;
-          await checkpoint({ alreadyCreated: true, ticketId: id });
+          // The office sent this ticket to the client while it sat in the
+          // outbox, so its billing is now the client's document and the
+          // update is refused (db.js flags that refusal `sentForApproval`).
+          // The refusal used to end the replay here, which threw away the
+          // half of the payload the database would still have taken: crew
+          // rows stay writable until the client signs, and those hours are
+          // the day's pay and the crew's dose. So the item carries on
+          // without its lines, and says so — a ticket the client is signing
+          // for figures nobody re-entered is worth a sentence.
+          if (e.sentForApproval) {
+            linesRefused = true;
+          } else {
+            // The row was cancelled on another device while this sat in the
+            // outbox. The payload still holds the whole day — the only copy
+            // of it — so raise it as a fresh ticket rather than stranding it
+            // behind a dead id forever.
+            if (!e.ticketGone) throw e;
+            const saved = await Db.createTicket({
+              initials: payload.initials, jobDbId: payload.jobDbId, technicianId: payload.technicianId,
+              workDate: payload.workDate, clientContact: payload.clientContact, contractorContact: payload.contractorContact,
+              lines: payload.lines, status: payload.status, delays: payload.delays,
+              clientKey: payload.clientKey || null
+            });
+            id = saved.id;
+            await checkpoint({ alreadyCreated: true, ticketId: id });
+          }
         }
       }
       // Crew is a delete-then-insert, so replaying it is harmless.
       await Db.saveCrewForTicket(id, payload.crew);
-      if (payload.sendForApproval) await Db.sendTicketApproval({ ticketId: id, to: payload.approvalTo });
+      // Not when the row is already awaiting approval: that send is what
+      // refused the update above, so the client has the link already and a
+      // second one would only reset their token mid-signature.
+      if (payload.sendForApproval && !linesRefused) await Db.sendTicketApproval({ ticketId: id, to: payload.approvalTo });
+      if (linesRefused) {
+        Toasts.show(`Ticket ${id} had already gone to the client for signature — the crew hours from this device were saved, but its welds and charges were not. Check the ticket and, if the figures are wrong, cancel the approval and re-enter them.`, "error", true);
+      }
     }
   }), []);
 
@@ -381,8 +409,12 @@ export function App() {
   // its owner is mid-typing on the set-password screen. The gate's onDone
   // runs this same boot once the recovery is settled.
   const bootSession = async () => {
+    setBootError("");
+    // Set by writeIdentity below when this device would not empty itself for
+    // the account being restored. See there for why it travels as a flag.
+    let claimFailed = null;
     try {
-      const { user, offline, reason, signedOut } = await restoreSession({
+      const { user, offline, reason, signedOut, identityUnreadable } = await restoreSession({
           getSession: () => sbClient.auth.getSession(),
           fetchProfile: id => sbClient.from("profiles").select("*").eq("id", id).single(),
           // Guarded: if a recovery landing is detected while this boot is
@@ -413,13 +445,39 @@ export function App() {
           // usual case (the same person again) it is one read and nothing
           // else, and it is what keeps their own drafts from looking like
           // a stranger's the next time they sign in.
+          // A clear that would not land leaves the last account's work on
+          // this device, and claimFor records no owner in that case. Writing
+          // the identity over that would open the app as this person on top
+          // of somebody else's jobs and half-entered tickets — so record the
+          // failure and write nothing. restoreSession swallows whatever
+          // writeIdentity throws (an identity that could not be remembered
+          // is no reason to fail a sign-in that worked), which is why it is
+          // a flag and not an exception that stops the boot below.
           writeIdentity: async identity => {
             try { await OfflineCache.claimFor(identity.id); }
-            catch (e) { console.error("Couldn't clear the previous account's cached data:", e); }
+            catch (e) {
+              console.error("Couldn't clear the previous account's cached data:", e);
+              claimFailed = e;
+              return;
+            }
             return OfflineCache.put(IDENTITY_KEY, identity);
           },
         isNetworkError: OfflineQueue.isNetworkError
       });
+      // Signed in as far as Supabase is concerned, on a device still holding
+      // the previous account's data. End the session rather than open the app
+      // over it — a session left alive here is one a reload would restore.
+      // The identity goes too, so the next offline start doesn't come back as
+      // this person on a store that was never theirs.
+      if (claimFailed) {
+        try { const { error } = await sbClient.auth.signOut(); if (error) forgetStoredSession(); }
+        catch (e) { forgetStoredSession(); }
+        try { await OfflineCache.remove(IDENTITY_KEY); } catch { /* nothing more to try */ }
+        setCurrentUser(null);
+        setBootError("This device couldn't clear the previous person's data — try again.");
+        setCheckingSession(false);
+        return;
+      }
       // Three different "nobody is signed in", and they do not deserve the
       // same answer. What is on the device is the last crew's jobs, rates and
       // half-entered tickets, so the question each time is whether anybody is
@@ -430,12 +488,21 @@ export function App() {
           OfflineCache.noteServingCached(Date.now());
           restoredOffline.current = true;
         } else {
-          // No signal and no remembered identity either — it has expired
-          // (twelve hours) or was never here. Nobody owns what is stored,
-          // and out of range nobody can sign in to claim it, so it goes:
-          // the recovery copies with it, since they belong to whoever was
-          // last holding this tablet and cannot be handed back to them.
-          try { await OfflineCache.clear(); } catch (e) { console.error("Couldn't clear the offline cache for an unclaimed device:", e); }
+          // No signal and nobody remembered — the identity has expired
+          // (twelve hours) or was never here. Nothing is emptied on that
+          // basis. This used to clear the store, which threw away the
+          // half-entered tickets and assessments (ticket.wip.*, jha.wip.*)
+          // that the branches below deliberately keep, and the person it
+          // took them from is very often the same technician signing in an
+          // hour later. It bought nothing either: cache.owner outlives the
+          // identity, and claimFor empties this store at the door for any
+          // account that is not the owner's.
+          //
+          // And one of the two ways to get here is not an answer at all —
+          // the remembered identity could not be read (see session.js).
+          // Acting on a moment's IndexedDB fault is how a fault becomes a
+          // lost day.
+          if (identityUnreadable) console.error("This device's remembered identity couldn't be read — opening signed out, keeping what is stored.");
         }
       } else if (signedOut) {
         // The server answered, and this account has nothing behind it any
@@ -617,7 +684,7 @@ export function App() {
     // The banner rides along here too: a shared tablet parked on the
     // sign-in screen is exactly the device nobody ever updates.
     return <>
-      <SignInScreen onSignIn={u => { setCurrentUser(u); setScreen(tabList(u.tabs).filter(t => !CONTEXT_TABS.includes(t))[0] || "board"); }} />
+      <SignInScreen notice={bootError} onSignIn={u => { setCurrentUser(u); setScreen(tabList(u.tabs).filter(t => !CONTEXT_TABS.includes(t))[0] || "board"); }} />
       {updateReady && !updateDeferred && <UpdateBanner onLater={() => setUpdateDeferred(true)} />}
     </>;
   }
@@ -698,6 +765,7 @@ export function App() {
     // the next session before, and the draft list in particular rendered
     // the last technician's tickets to the next until a refetch replaced it.
     setMyTickets([]);
+    setBootError("");
     setMyOpenJhas([]);
     setActiveJob(null);
     setJobRecord(EMPTY_JOB_RECORD);

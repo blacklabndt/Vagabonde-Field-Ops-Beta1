@@ -231,9 +231,11 @@ anybody but the account now signing in, so the next person cannot page
 through the last crew's jobs, rates and drafts. Signing back in as the *same*
 person keeps all of it, which is the point: a token that expired while the
 truck was out of range forgets who the device belonged to but leaves the
-morning's work where it is. The two cases with nobody left to keep it for —
-starting up with no signal and no remembered identity, and an account the
-server says has nothing behind it any more — clear it outright. Sign-out also
+morning's work where it is. Starting up with no signal and no remembered
+identity does the same: the identity is gone, the data stays, and whoever
+signs in next settles it. Exactly one case clears the store at boot — an
+account the server says has nothing behind it any more, deactivated or
+stripped of every tab, which nobody is coming back for. Sign-out also
 removes the stored session by hand when the server can't be reached, because
 `signOut` reports the failure without removing it, and a tablet handed over
 "signed out" that signs itself back in on the next reload is the whole
@@ -391,6 +393,9 @@ vite-app/
                             field path, kept usable with no signal
     paging.js               reading past PostgREST's silent 1,000-row cap: by offset
                             for reference lists, by key for anything billed or paid
+    sendPool.js             the paced worker pool behind "Chase all unsigned" — a few
+                            sends at a time, a floor between them, and a wait-and-retry
+                            for a rate-limited refusal (pure, so it tests on a fake clock)
     session.js              sign-in restore: whose session it is, and what to do when
                             the network can't answer (unit-tested, no React)
     recovery.js             catches a password-reset landing at import, before

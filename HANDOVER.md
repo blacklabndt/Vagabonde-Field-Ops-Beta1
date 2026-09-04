@@ -140,14 +140,20 @@ will remove before the deletes.
   claims the device's subscription automatically.
 - **Chat history fades** — by design: unpinned messages expire after 30
   days, swept nightly.
-- **"It reloaded everything the first time I signed in"** — expected, once
-  per device after this release. The offline cache now records which
-  account it belongs to, and no existing device has that on file yet, so
-  the first sign-in empties it and fetches the jobs, rates and contacts
-  again — an unsaved ticket or assessment sitting on that device goes with
-  it, so finish and save anything in progress before the update lands. It
-  needs signal that one time; afterwards it behaves as before, and only a
-  *different* person signing in clears it.
+- **"It reloaded everything the first time I signed in"** — possible once
+  per device after this release, and only on some of them. The offline
+  cache now records which account it belongs to, and no existing device
+  has that on file yet. On that first sign-in the app looks at who the
+  device last had signed in: if it is the same person, the device is
+  simply marked as theirs and everything on it — including a half-entered
+  ticket or assessment — is kept. If it last belonged to somebody else, or
+  it doesn't remember anyone, it is emptied at the door and fetches the
+  jobs, rates and contacts again, so a tablet that gets passed around
+  should have anything in progress finished and saved before the update
+  lands. A device that does reload needs signal that one time; afterwards
+  it behaves as before, and only a *different* person signing in clears
+  it. Going out of range, or the session timing out overnight, never
+  empties a device — sign back in and the morning's work is still there.
 
 ## Support access
 

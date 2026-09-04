@@ -29,9 +29,12 @@ const STATE = "e2e/.auth/state.json";
 const HAS_SECOND = !!(process.env.E2E_EMAIL2 && process.env.E2E_PASSWORD2);
 const STATE2 = "e2e/.auth/state2.json";
 
-test.beforeEach(async ({}, testInfo) => {
+// Only the desktop project runs this file at all — the mobile project's
+// testMatch is fieldOps alone (playwright.config.js), which is why there is no
+// project check here: a skip that can never fire only inflates the skipped
+// count and reads as coverage that was considered and dropped.
+test.beforeEach(async () => {
   test.skip(!EMAIL || !PASSWORD, "Set E2E_EMAIL and E2E_PASSWORD in vite-app/e2e/.env");
-  test.skip(testInfo.project.name !== "desktop", "two-device choreography — one project is enough");
 });
 
 // A second (or third) signed-in device: a banked session, fresh context.

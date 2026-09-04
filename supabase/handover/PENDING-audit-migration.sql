@@ -55,7 +55,13 @@
 --     deletes; delete_job now does the same, and returns them beside the
 --     counts it already returned. Every existing key in that object stays
 --     where it was, so a client that has not been taught to read the new
---     ones keeps working unchanged.
+--     ones keeps working unchanged. The same function carried the one
+--     Admin gate in the schema written as a boolean read out of the rank —
+--     `is_admin := user_role() = 'Admin'`, then three `not is_admin`
+--     branches — which section 1 turns from false into null for a locked
+--     account, and null takes the false branch of every one of them. It
+--     coalesces now, and asks is_staff() at the door before it asks
+--     anything else. Section 4 is the same mistake in a trigger.
 -- 4 · A missing rank read as a Coordinator. private.guard_job_update asks
 --     user_role() into `who` and then tests
 --     `who not in ('Admin','Coordinator')` — which is NULL, not true, when
@@ -182,7 +188,12 @@ create policy profiles_delete on public.profiles
 
 -- ── 3 · delete_job hands back the keys it is about to orphan ────────────
 -- Unchanged from the live body except for the two array_aggs before the
--- deletes and the two members added to the returned object.
+-- deletes, the two members added to the returned object, and the door test
+-- at the top of the body that section 1 made necessary (see the comment
+-- there). archive_clear_jobs and mark_tickets_invoiced ask the same
+-- question as `is distinct from 'Admin'`, which is null-safe already, so
+-- neither of them needs anything: this was the one Admin gate in the
+-- schema written as a boolean read out of the rank.
 
 create or replace function public.delete_job(
   p_job_id uuid,
@@ -202,7 +213,21 @@ declare
   jha_keys text[] := '{}';
   report_keys text[] := '{}';
 begin
-  is_admin := (select private.user_role()) = 'Admin';
+  -- Section 1 gives a locked account a null rank, and null is not false:
+  -- `not is_admin` on a null skips its branch, and all three of the gates
+  -- below are spelled that way — so the account this migration is locking
+  -- out would have walked past the creator test, past the admin-only
+  -- discard, and past the sent-for-approval test, and discarded any job it
+  -- knew the id of. coalesce first, and then ask whether the account is an
+  -- account at all: is_staff() is the profiles row's own answer and never
+  -- null, and nothing but a signed-in member of staff has any business in
+  -- this function. Only the app calls it, always with a user's token.
+  if not (select public.is_staff()) then
+    raise exception 'Your account is no longer active. Ask an admin to restore it.'
+      using errcode = '42501';
+  end if;
+
+  is_admin := coalesce((select private.user_role()) = 'Admin', false);
 
   select (created_by = (select auth.uid())) into is_creator
     from public.jobs where id = p_job_id;
