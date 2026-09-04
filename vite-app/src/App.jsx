@@ -1,5 +1,5 @@
 import React, { useState, useEffect, useMemo, useRef, Suspense, lazy } from "react";
-import { sbClient } from "./config.js";
+import { sbClient, forgetStoredSession } from "./config.js";
 import { TABS, CONTEXT_TABS, EMPTY_JOB_RECORD, Store } from "./data.js";
 import { Db } from "./db.js";
 import { tabList, Blueprint, Btn, ErrorBox, ErrorBoundary, TagX, Toast, Loading, Switch } from "./components/common.jsx";
@@ -355,12 +355,17 @@ export function App() {
       if (inconclusive) return;
       restoredOffline.current = false;
       console.warn("Back online, but the session had lapsed — signing in again is needed.");
-      // The same forgetting sign-out does. Without it the device's remembered
-      // identity outlived the server's "no session": close and reopen the
-      // app out of range and it opened as this person again, for the rest
-      // of the identity's twelve hours — a locked account included.
-      try { await OfflineCache.remove(IDENTITY_KEY); } catch { /* the clear below tries again */ }
-      try { await OfflineCache.clear(); } catch (e) { console.error("Couldn't clear the offline cache after the session lapsed:", e); }
+      // The identity goes. Without that it outlived the server's "no
+      // session": close and reopen the app out of range and it opened as
+      // this person again, for the rest of the identity's twelve hours — a
+      // locked account included.
+      //
+      // What they were working on stays, exactly as the boot's lapsed-session
+      // branch leaves it: a token that expired while the truck was out of
+      // range is not a reason to throw away a half-entered ticket without
+      // asking, and the next sign-in empties the store anyway if it is
+      // somebody else (OfflineCache.claimFor).
+      try { await OfflineCache.remove(IDENTITY_KEY); } catch (e) { console.error("Couldn't forget this device's remembered identity:", e); }
       setCurrentUser(null);
     };
     window.addEventListener("online", recheck);
@@ -383,7 +388,14 @@ export function App() {
           // Guarded: if a recovery landing is detected while this boot is
           // already in flight, the "no usable profile" sign-out must not
           // destroy the recovery session mid-reset.
-          signOut: () => Recovery.pending() ? Promise.resolve() : sbClient.auth.signOut(),
+          // A signOut that answers with an error has not removed the stored
+          // session — see forgetStoredSession. An account with nothing
+          // behind it must not be left one to refresh from.
+          signOut: async () => {
+            if (Recovery.pending()) return;
+            const { error } = await sbClient.auth.signOut();
+            if (error) forgetStoredSession();
+          },
           // The sign-in screen promises "offline sign-in cached for 12 h",
           // and this is where the promise is kept: a remembered identity
           // older than that is not an identity, it is a lost tablet's last
@@ -393,24 +405,54 @@ export function App() {
             if (Date.now() - (hit.at || 0) > IDENTITY_TTL_MS) { OfflineCache.remove(IDENTITY_KEY).catch(() => {}); return null; }
             return hit.value;
           }),
-          writeIdentity: identity => OfflineCache.put(IDENTITY_KEY, identity),
+          // The same claim the sign-in screen makes, for the same reason:
+          // this device's remembered data belongs to one account, and a
+          // session restored for anyone else — a reset link followed on
+          // somebody else's tablet gets one without ever passing the
+          // sign-in screen — empties it before reading a word. For the
+          // usual case (the same person again) it is one read and nothing
+          // else, and it is what keeps their own drafts from looking like
+          // a stranger's the next time they sign in.
+          writeIdentity: async identity => {
+            try { await OfflineCache.claimFor(identity.id); }
+            catch (e) { console.error("Couldn't clear the previous account's cached data:", e); }
+            return OfflineCache.put(IDENTITY_KEY, identity);
+          },
         isNetworkError: OfflineQueue.isNetworkError
       });
+      // Three different "nobody is signed in", and they do not deserve the
+      // same answer. What is on the device is the last crew's jobs, rates and
+      // half-entered tickets, so the question each time is whether anybody is
+      // still entitled to it.
       if (offline) {
         console.warn("Starting without a connection (" + reason + ")" + (user ? " — signed in from this device's last session." : "."));
         if (user) {
           OfflineCache.noteServingCached(Date.now());
           restoredOffline.current = true;
+        } else {
+          // No signal and no remembered identity either — it has expired
+          // (twelve hours) or was never here. Nobody owns what is stored,
+          // and out of range nobody can sign in to claim it, so it goes:
+          // the recovery copies with it, since they belong to whoever was
+          // last holding this tablet and cannot be handed back to them.
+          try { await OfflineCache.clear(); } catch (e) { console.error("Couldn't clear the offline cache for an unclaimed device:", e); }
         }
-      } else if (signedOut || !user) {
-        // The server answered, and the answer was nobody: either the account
-        // has nothing behind it any more (signedOut) or the session was
-        // ended elsewhere. Forget this device the way the online recheck
-        // does — otherwise the remembered identity outlives the server's
-        // "no session" and the next offline open comes back as that person,
-        // a locked account included, for the rest of the twelve hours.
+      } else if (signedOut) {
+        // The server answered, and this account has nothing behind it any
+        // more — deactivated, or stripped of every tab. Nobody is coming
+        // back for this, so everything goes, drafts included.
         try { await OfflineCache.remove(IDENTITY_KEY); } catch { /* the clear below tries again */ }
-        try { await OfflineCache.clear(); } catch (e) { console.error("Couldn't clear the offline cache after the session lapsed:", e); }
+        try { await OfflineCache.clear(); } catch (e) { console.error("Couldn't clear the offline cache after the account was locked:", e); }
+      } else if (!user) {
+        // A session that simply ended — expired, or signed out on another
+        // device. The identity goes, or it outlives the server's "no session"
+        // and the next offline open comes back as that person for the rest of
+        // the twelve hours. The data does NOT: this is very often the same
+        // technician about to sign in again, and wiping a morning's
+        // half-entered ticket for a lapsed token is the thing sign-out asks
+        // permission for. Whoever signs in next settles it — a different
+        // account empties the store at the door (OfflineCache.claimFor).
+        try { await OfflineCache.remove(IDENTITY_KEY); } catch (e) { console.error("Couldn't forget this device's remembered identity:", e); }
       }
       if (user) {
         setCurrentUser(user);
@@ -615,7 +657,18 @@ export function App() {
     Toasts.mute();
     try { await Db.disableChatPush(); } catch { /* no subscription, or no signal */ }
     finally { Toasts.unmute(); }
-    await sbClient.auth.signOut();
+    // Offline, with the access token already expired, auth-js reports the
+    // failed refresh and returns before it has removed the stored session —
+    // so the person is shown the sign-in screen while the session is still
+    // on disk, and the next reload in signal signs them straight back in
+    // without a password. On a shared tablet that is exactly the handover
+    // this whole function exists to make safe, so the session is removed by
+    // hand when the sign-out says it failed.
+    const { error: signOutErr } = await sbClient.auth.signOut();
+    if (signOutErr) {
+      console.warn("Sign-out couldn't reach the server; removing the stored session locally:", signOutErr.message || signOutErr);
+      forgetStoredSession();
+    }
     // The remembered identity goes first, on its own: it is the one record
     // that lets the next person open this tablet as the last one with no
     // signal, so it must not wait on — or be lost behind — the bulk clear.
@@ -715,13 +768,16 @@ export function App() {
       return null;
     }
   };
+  // Answers whether the ticket screen actually opened: Job detail's Create
+  // ticket dialog is holding the work date and the reps somebody just typed,
+  // and it can only keep them if it knows the record never arrived.
   const startTicketForJob = async (job, seed = null) => {
-    if (!job) return;
+    if (!job) return false;
     // Nothing changes until the record is in hand: the job and the seed used
     // to be set before the await, so a failure left Home pointing at a job
     // nobody had opened.
     const record = await recordFor(job, "ticket");
-    if (!record) return;
+    if (!record) return false;
     setJobRecord(record);
     setActiveJob(job);
     // Always a nonce: the editor is keyed on it, and a seedless ticket used
@@ -732,6 +788,7 @@ export function App() {
     setContextScreen("ticket");
     setScreen("ticket");
     setMenuOpen(false);
+    return true;
   };
   // "+ New JHA" on Job detail, with the same guard the ticket has: the
   // builder seeds the site rep from the job record at mount, and Job detail

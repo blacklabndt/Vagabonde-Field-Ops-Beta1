@@ -3,8 +3,19 @@ import { todayLocal, money, seesPrices, withinDays } from "../data.js";
 import { Db } from "../db.js";
 import { Blueprint, Btn, TableScroll, StatusTag, TagX, ErrorBox, downloadCsv, emailIn, RowsPerPage, useRowsPerPage } from "./common.jsx";
 import { Toasts } from "../toastBus.js";
+import { runSendPool } from "../sendPool.js";
 
 const TRACKER_FILTERS = ["All", "Draft", "Awaiting approval", "Approved", "Invoiced", "Over 7 days"];
+
+// How the bulk chase paces itself. Three sends in flight covers the round trip
+// to the Edge Function without the browser holding thousands of open requests;
+// the 500 ms floor between starts keeps the whole pool under Resend's own
+// per-second ceiling, which a straight fan-out walks into immediately. Twenty
+// failing ticket numbers on screen is enough for the office to act on and
+// short enough to read — the rest are counted, not listed.
+const CHASE_WORKERS = 3;
+const CHASE_INTERVAL_MS = 500;
+const CHASE_LIST_LIMIT = 20;
 
 const shortDate = iso => iso ? new Date(iso).toLocaleDateString("en-CA", { day: "2-digit", month: "short" }) : "";
 
@@ -175,49 +186,85 @@ export function BillingTrackerScreen({ onOpenTicket, currentUser }) {
   // signature, in one pass, rather than opening each one individually. A
   // ticket with no client email on file is skipped and counted separately
   // — it can't be chased until a rep is added, but the rest shouldn't wait.
+  //
+  // Thousands of tickets can be awaiting signature at once, so this is a paced
+  // pool rather than a loop (sendPool.js): sending them one after another with
+  // nothing on screen was a job of unknown length that couldn't be called off,
+  // and a transport asked to take four thousand emails as fast as the browser
+  // can ask starts refusing them — refusals the old loop counted as failures
+  // and then couldn't name.
+  //
+  // A ref, not state, for the stop: the pool asks on every start, and a
+  // re-render is not what makes the answer true.
+  const stopChase = useRef(false);
+  const [stopping, setStopping] = useState(false);
   const chaseAllUnsigned = async () => {
     // One tap emails every client with an unsigned ticket, and the only undo
     // is a phone call — so it asks first, like every other outward action.
     const n = stats && stats.unsigned ? stats.unsigned.count : 0;
     if (!confirm(`Email an approval reminder for ${n} unsigned ticket${n === 1 ? "" : "s"} now? Each client rep on file gets a fresh link.`)) return;
     setChasing(true);
+    setStopping(false);
+    stopChase.current = false;
     setChaseResult("");
     setError("");
     try {
       const list = await Db.listUnsignedTicketContacts();
-      let sent = 0, skipped = 0, failed = 0, recent = 0, queried = 0;
-      // Muted around the loop: sendTicketApproval fires an "Approval sent"
+      let skipped = 0, recent = 0, queried = 0;
+      // The buckets are decided before anything is sent, so the progress line
+      // counts what is actually going out rather than a total the office then
+      // watches stall on tickets nobody meant to chase.
+      const due = [];
+      for (const t of list) {
+        // A rep who pressed "Query this ticket" is waiting on the office,
+        // not on a reminder — and a resend clears the query, so chasing
+        // this one would rub out the question before anybody answered it
+        // and ask the same rep to sign the same figures again.
+        if (t.queriedAt) { queried++; continue; }
+        // Chased in the last three days is chased: a client nudged on
+        // Tuesday does not need the same email again on Thursday.
+        if (withinDays(t.chasedAt, 3)) { recent++; continue; }
+        const to = emailIn(t.contactLabel);
+        if (!to) { skipped++; continue; }
+        due.push({ id: t.id, to });
+      }
+      setChaseResult(`Sending… 0 of ${due.length}`);
+      // Muted around the pool: sendTicketApproval fires an "Approval sent"
       // toast per call, so chasing N tickets would stack N toasts over the
       // one summary line this button is meant to show. Same pattern as
       // OfflineQueue.flush and saveArcadeScore.
       Toasts.mute();
+      let out;
       try {
-        for (const t of list) {
-          // A rep who pressed "Query this ticket" is waiting on the office,
-          // not on a reminder — and a resend clears the query, so chasing
-          // this one would rub out the question before anybody answered it
-          // and ask the same rep to sign the same figures again.
-          if (t.queriedAt) { queried++; continue; }
-          // Chased in the last three days is chased: a client nudged on
-          // Tuesday does not need the same email again on Thursday.
-          if (withinDays(t.chasedAt, 3)) { recent++; continue; }
-          const to = emailIn(t.contactLabel);
-          if (!to) { skipped++; continue; }
-          try {
-            await Db.sendTicketApproval({ ticketId: t.id, to });
-            sent++;
-            // Recorded on the ticket, so the flag survives a reload and the
-            // next person to open the tracker sees who was already nudged.
-            await Db.markTicketChased(t.id).catch(() => {});
-          }
-          catch (e) { failed++; }
-        }
+        out = await runSendPool(due, async t => {
+          await Db.sendTicketApproval({ ticketId: t.id, to: t.to });
+          // Recorded on the ticket, so the flag survives a reload and the
+          // next person to open the tracker sees who was already nudged.
+          // Best-effort, and after the send: a flag that didn't save is a
+          // cosmetic loss, and must never turn a delivered email into a
+          // failure the pool then tries to deliver again.
+          await Db.markTicketChased(t.id).catch(() => {});
+        }, {
+          concurrency: CHASE_WORKERS,
+          minInterval: CHASE_INTERVAL_MS,
+          shouldStop: () => stopChase.current,
+          onProgress: (done, total) => setChaseResult(`Sending… ${done} of ${total}`)
+        });
       } finally { Toasts.unmute(); }
-      const parts = [`Sent to ${sent} of ${list.length}`];
+      const parts = [`Sent to ${out.sent.length} of ${due.length}`];
+      if (out.stopped) parts.push(`stopped — ${out.remaining} not attempted`);
       if (queried) parts.push(`${queried} left alone — the client has a question open`);
       if (recent) parts.push(`${recent} left alone — chased in the last 3 days`);
       if (skipped) parts.push(`${skipped} skipped — no client email on file`);
-      if (failed) parts.push(`${failed} failed to send`);
+      // Named, not just counted. "37 failed to send" is a number the office
+      // can do nothing with; the ticket numbers are the ones somebody now has
+      // to chase by phone.
+      if (out.failed.length) {
+        const ids = out.failed.map(f => f.item.id);
+        const shown = ids.slice(0, CHASE_LIST_LIMIT).join(", ");
+        const rest = ids.length - CHASE_LIST_LIMIT;
+        parts.push(`${ids.length} failed to send: ${shown}${rest > 0 ? ` and ${rest} more` : ""}`);
+      }
       setChaseResult(parts.join(" · "));
       // The chase moved tickets Draft/Awaiting → Awaiting approval, so both
       // the table page and the tiles (and this button's own disabled
@@ -228,6 +275,8 @@ export function BillingTrackerScreen({ onOpenTicket, currentUser }) {
       setError(e.message || "Couldn't chase unsigned tickets.");
     }
     setChasing(false);
+    setStopping(false);
+    stopChase.current = false;
   };
 
   return (
@@ -238,7 +287,14 @@ export function BillingTrackerScreen({ onOpenTicket, currentUser }) {
           <h2 style={{ fontSize: 34, margin: "2px 0 0" }}>Billing tracker</h2>
         </div>
         <div style={{ marginLeft: "auto", display: "flex", gap: 8 }}>
-          <Btn variant="secondary" onClick={exportCurrentFilter} disabled={exporting || !total}>{exporting ? "Building…" : "Export to accounting"}</Btn>
+          {/* The CSV's whole reason for existing is the Amount column, and
+              the database hands a role that can't see prices null totals —
+              so this built accounting a spreadsheet reading $0.00 against
+              every ticket, which is worse than no spreadsheet at all. Same
+              gate as the column and the tiles. */}
+          {priced && (
+            <Btn variant="secondary" onClick={exportCurrentFilter} disabled={exporting || !total}>{exporting ? "Building…" : "Export to accounting"}</Btn>
+          )}
           {/* Behind the same price gate as every other money control here.
               The email this sends is a ticket summary with the amount on it,
               and the database hands a role that can't see prices null totals
@@ -248,6 +304,17 @@ export function BillingTrackerScreen({ onOpenTicket, currentUser }) {
             <Btn variant="primary" onClick={chaseAllUnsigned} disabled={chasing || !(stats && stats.unsigned.count)}
               title="Resends the approval-link email to every ticket still awaiting signature.">
               {chasing ? "Sending…" : "Chase all unsigned"}
+            </Btn>
+          )}
+          {/* A run of four thousand emails has to be callable off — the office
+              notices the wrong thing is going out on the second one, not the
+              last. It starts no more sends; the two or three already in flight
+              land, because half-sent is not a state the tracker can record. */}
+          {priced && chasing && (
+            <Btn variant="secondary" disabled={stopping}
+              onClick={() => { stopChase.current = true; setStopping(true); }}
+              title="Stops after the sends already in flight — the rest are left for another day.">
+              {stopping ? "Stopping…" : "Stop"}
             </Btn>
           )}
         </div>

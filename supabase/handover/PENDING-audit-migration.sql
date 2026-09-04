@@ -2,7 +2,8 @@
 -- then file this under supabase/migrations/<version>_the_token_is_not_the_
 -- record.sql with the version the applier gave it.
 --
--- Round six: three seams the fourth review found.
+-- Round six: three seams the fourth review found, and three more that the
+-- hard review of this draft found in the draft itself and beside it.
 --
 -- 1 · The token is a copy of the record, not the record. tab_access() and
 --     user_role() read the access token's app_metadata first and only asked
@@ -24,9 +25,15 @@
 --     that was supposed to be temporary.
 --     Both functions now read profiles, and both answer as
 --     though the account did not exist once deactivated_at is set. The
---     token hook stays exactly as it is: the claim still tells the app
---     which screens to draw, it just no longer tells the database who you
---     are. Every policy already wraps these calls in (select …), so this
+--     token hook stays exactly as it is, but not because anything still
+--     needs it: the app draws its menu from the profiles row it fetches on
+--     sign-in (session.js → tabList(profile.tab_access)), and nothing in
+--     vite-app, the Worker or the Edge Functions reads app_metadata at
+--     all. So after this migration the claim has no reader left on either
+--     side. It is left in place only because removing an auth hook is its
+--     own change with its own blast radius — a follow-up, once this has
+--     been live long enough to be sure nothing was leaning on it.
+--     Every policy already wraps these calls in (select …), so this
 --     is still one InitPlan per statement, not one lookup per row.
 -- 2 · Rank is an Admin's, on every verb. profiles_update has said so since
 --     the beginning, but profiles_insert asked only for the users tab and
@@ -49,6 +56,47 @@
 --     counts it already returned. Every existing key in that object stays
 --     where it was, so a client that has not been taught to read the new
 --     ones keeps working unchanged.
+-- 4 · A missing rank read as a Coordinator. private.guard_job_update asks
+--     user_role() into `who` and then tests
+--     `who not in ('Admin','Coordinator')` — which is NULL, not true, when
+--     who is null, so the branch never fired and the job moved to another
+--     client. That decides the rate card every ticket on the job prices
+--     from. Before section 1 a null rank needed a profiles row that had
+--     somehow lost its role; after section 1 every deactivated account
+--     answers null, so the very accounts section 1 is locking out would
+--     have walked through this one gate. The status test beside it was
+--     always safe — `is distinct from` is null-safe — so only the
+--     client_id line changes.
+-- 5 · The equipment screen disagreed with itself after six in the evening.
+--     equipment_stats() and search_equipment() measure "overdue" and "due
+--     soon" against current_date, which is UTC; the tag on the row itself
+--     is computed in the browser, in Grande Prairie time. From 18:00 local
+--     the two are a day apart, so a rig due tomorrow was tagged "due soon"
+--     in its own row, counted as overdue in the tile above it, and
+--     returned by the "Overdue" filter. Both functions now read
+--     (now() at time zone 'America/Edmonton')::date — the crew's day. The
+--     30-day window is the same 30 days, counted from the right morning.
+-- 6 · The dose ledger added up 44 people's milliroentgens in the browser.
+--     A "Year" view pulled every ticket_crew row of the year — 31,823 of
+--     them this morning, about 17 MB over the wire, paged 1,000 at a time
+--     — to print one line each. public.dose_totals(start, end) does the
+--     summing in the database and returns one row per person, with the
+--     days behind it and the four quarters beside the total. It is
+--     SECURITY INVOKER on purpose: RLS is what keeps crew hours private,
+--     and it must stay what keeps them private.
+
+-- The two policy drops in section 2 take an ACCESS EXCLUSIVE lock on
+-- profiles — the table every single request reads through user_role(). If
+-- something long is holding it at 6 a.m., wait three seconds and fail
+-- rather than queue the whole app behind this migration; nothing here is
+-- urgent enough to be worth a stall.
+--
+-- `set local`, so it belongs to the migration's own transaction and cannot
+-- leak into the session. An applier that runs statements outside a
+-- transaction answers this line with a WARNING and no timeout — that
+-- warning is not a failure, but it does mean the lock wait is unbounded,
+-- so read it before you walk away.
+set local lock_timeout = '3s';
 
 -- ── 1 · The record decides, not the token ───────────────────────────────
 -- Both were plpgsql only to branch on the claim. With the claim gone they
@@ -95,11 +143,17 @@ comment on function private.user_role() is
   'The account''s rank, from profiles — never from the access token. A '
   'deactivated account has no rank, so every role test fails closed.';
 
--- Nothing else in either schema reads auth.jwt(): these two were the only
--- functions that named it and no policy compares against it directly.
--- private.has_tab, private.has_any_tab and public.is_staff are all
--- tab_access() in a coat, and private.stored_role and private.can_write_
--- ticket already read the table, so all five follow along for free.
+-- These two were the only functions in either schema that named auth.jwt(),
+-- and no policy compares against the token directly. private.has_tab,
+-- private.has_any_tab and public.is_staff are all tab_access() in a coat,
+-- and private.stored_role and private.can_write_ticket already read the
+-- table, so all five follow along for free.
+--
+-- One function still reads the claim after this, and section 4 leaves it
+-- reading it: private.guard_job_update, through current_setting rather than
+-- auth.jwt(). It asks the claim only for `role` — whether this is an API
+-- call at all — never for a rank. Probe 9a searches for both spellings and
+-- expects to find it and nothing else.
 
 -- ── 2 · Rank is an Admin's, on insert and on delete too ─────────────────
 -- Both policies were `to public`; they become `to authenticated`, which is
@@ -245,3 +299,197 @@ begin
     'report_keys', to_jsonb(report_keys)
   );
 end $$;
+
+-- ── 4 · A missing rank is not a Coordinator ─────────────────────────────
+-- The live body, verbatim, with one changed line: coalesce on the client_id
+-- test. The claim_role read at the top stays — it is not asking who you
+-- are, it is asking whether this is an API call at all, which is the one
+-- thing the token is still the honest source of.
+
+create or replace function private.guard_job_update()
+returns trigger
+language plpgsql
+security definer
+set search_path to 'public'
+as $$
+declare
+  claim_role text;
+  who text;
+begin
+  claim_role := coalesce(
+    nullif(current_setting('request.jwt.claim.role', true), ''),
+    nullif(current_setting('request.jwt.claims', true), '')::jsonb ->> 'role');
+  -- Not an API call (the SQL editor, a migration) or the service role:
+  -- not this trigger's to police.
+  if claim_role is null or claim_role = 'service_role' then return new; end if;
+  who := (select private.user_role());
+  if new.job_number is distinct from old.job_number
+     or new.created_by is distinct from old.created_by
+     or new.created_at is distinct from old.created_at then
+    raise exception 'A job''s number, who raised it and when are fixed.' using errcode = '42501';
+  end if;
+  if new.status is distinct from old.status and who is distinct from 'Admin' then
+    raise exception 'Only an admin can complete or reopen a job.' using errcode = '42501';
+  end if;
+  -- coalesce, because `null not in (…)` is null and null is not true: an
+  -- account with no rank — deactivated, or with no profiles row behind its
+  -- token — used to fall straight past this branch. An unknown rank is not
+  -- a Coordinator.
+  if new.client_id is distinct from old.client_id
+     and coalesce(who, '') not in ('Admin', 'Coordinator') then
+    raise exception 'Only an Admin or Coordinator can move a job to another client — it decides the rate card every ticket prices from.' using errcode = '42501';
+  end if;
+  return new;
+end $$;
+
+-- ── 5 · The equipment screen keeps the crew's day ───────────────────────
+-- Both bodies are the live ones with current_date replaced. The signatures
+-- are copied from the catalog and must not drift: create or replace
+-- refuses a changed return type, and these two are the return types the
+-- app's columns are read from.
+
+create or replace function public.equipment_stats()
+returns table(overdue_count bigint, due_soon_count bigint)
+language sql
+stable
+set search_path to 'public'
+as $$
+  -- One row, cross joined, so the date is read once and both counts agree
+  -- with each other even across midnight in Grande Prairie.
+  with today as (
+    select (now() at time zone 'America/Edmonton')::date as d
+  )
+  select
+    count(*) filter (where e.calibration_due is not null and e.calibration_due < t.d),
+    count(*) filter (where e.calibration_due is not null and e.calibration_due >= t.d and e.calibration_due <= t.d + 30)
+  from public.equipment e
+  cross join today t;
+$$;
+
+comment on function public.equipment_stats() is
+  'Overdue and due-soon calibration counts, against the date in Grande '
+  'Prairie — not UTC, which has already rolled into tomorrow by evening.';
+
+create or replace function public.search_equipment(
+  filter_key text default 'All'::text,
+  page_num integer default 0,
+  page_size integer default 10,
+  search text default ''::text
+)
+returns table(
+  id uuid, type text, serial_number text, calibration_due date,
+  status text, assigned_to uuid, assigned_name text, total_count bigint
+)
+language sql
+stable
+set search_path to 'public'
+as $$
+  with esc as (
+    select '%' || replace(replace(replace(coalesce(search, ''), '\', '\\'), '%', '\%'), '_', '\_') || '%' as pat,
+           coalesce(search, '') = '' as blank,
+           -- The same day equipment_stats counts by, so the tile and the
+           -- filter can never name different equipment.
+           (now() at time zone 'America/Edmonton')::date as today
+  ),
+  filtered as (
+    select e.id, e.type, e.serial_number, e.calibration_due, e.status, e.assigned_to, p.name as assigned_name,
+      count(*) over () as total_count
+    from public.equipment e
+    cross join esc
+    left join public.profiles p on p.id = e.assigned_to
+    where (filter_key = 'All'
+       or (filter_key = 'Due soon' and e.calibration_due is not null and e.calibration_due >= esc.today and e.calibration_due <= esc.today + 30)
+       or (filter_key = 'Overdue' and e.calibration_due is not null and e.calibration_due < esc.today)
+       or e.type = filter_key)
+      and (esc.blank
+       or e.serial_number ilike esc.pat
+       or e.type ilike esc.pat
+       or p.name ilike esc.pat)
+  )
+  select * from filtered
+  order by type, serial_number
+  offset page_num * page_size
+  limit page_size;
+$$;
+
+-- ── 6 · The dose ledger adds up where the rows are ──────────────────────
+-- One row per person for a period — days with dose, the total, and the
+-- four calendar quarters beside it — the same shape the screen builds
+-- today out of every crew row of the year. The period is inclusive at both
+-- ends, as listTimesheetEntries' gte/lte pair is.
+--
+-- SECURITY INVOKER, deliberately: crew hours and dose are private by RLS
+-- (own rows, Admin/Coordinator, or a crewmate on a shared ticket) and this
+-- function must not be a way around that. The extra own-or-Admin test in
+-- the WHERE is not the security — RLS is — it is the screen's own rule
+-- reproduced, because ticket_crew's read policy also shows a technician a
+-- crewmate's row on a ticket they shared, and the ledger has always shown
+-- a technician nobody but themselves.
+--
+-- It names private.user_role(), and it runs as the caller, so it is parsed
+-- at call time and needs USAGE on schema private — which authenticated has
+-- since 20260903055300, and which probe 12 exercises as a non-owner before
+-- this is called done. That is the three-minute outage from round three;
+-- do not skip the probe.
+--
+-- Quarters are the work date's calendar quarter, which is what
+-- quarterOf(dateStr) in data.js computes from the month. Dose is summed
+-- only where it was recorded (> 0), so a period with no dose leaves a
+-- person off the ledger rather than printing them a zero — again what the
+-- screen does today, filtering r.dose > 0 before it groups.
+--
+-- The client half (timesheets.jsx) is being switched to call this with a
+-- fallback to the old row-by-row read, so it works either side of this
+-- migration; the fallback comes out once this is live.
+
+create or replace function public.dose_totals(p_start date, p_end date)
+returns table(
+  profile_id uuid, name text, days bigint, total_mr numeric,
+  q1 numeric, q2 numeric, q3 numeric, q4 numeric
+)
+language sql
+stable
+security invoker
+set search_path to 'public'
+as $$
+  -- Every column is qualified and the outer list is positional: the
+  -- RETURNS TABLE names are parameters inside a sql body, and a bare
+  -- `name` or `profile_id` here would be ambiguous against the tables.
+  with dosed as (
+    select c.profile_id as pid,
+           -- fullName() in db.js: the parts if they are there, the display
+           -- string if they are not.
+           coalesce(nullif(btrim(concat_ws(' ', p.first_name, p.last_name)), ''), p.name, '') as who,
+           c.dose_mr as mr,
+           extract(quarter from t.work_date)::int as qtr
+      from public.ticket_crew c
+      join public.tickets t on t.id = c.ticket_id
+      left join public.profiles p on p.id = c.profile_id
+     where t.work_date >= p_start
+       and t.work_date <= p_end
+       and c.dose_mr > 0
+       and (c.profile_id = (select auth.uid())
+            or (select private.user_role()) = 'Admin')
+  )
+  select d.pid, d.who,
+         -- days: the crew rows behind the total, which is what the screen
+         -- prints as "days with dose" — one row per person per ticket day.
+         count(*),
+         sum(d.mr),
+         coalesce(sum(d.mr) filter (where d.qtr = 1), 0),
+         coalesce(sum(d.mr) filter (where d.qtr = 2), 0),
+         coalesce(sum(d.mr) filter (where d.qtr = 3), 0),
+         coalesce(sum(d.mr) filter (where d.qtr = 4), 0)
+    from dosed d
+   group by d.pid, d.who
+   order by 4 desc, 2;
+$$;
+
+comment on function public.dose_totals(date, date) is
+  'Dose per person for a period, with calendar quarters — the ledger''s '
+  'sums, done where the rows are. Invoker rights: RLS is the privacy.';
+
+-- The same shape every other reporting function in this schema has: the
+-- default EXECUTE to public and anon comes off, authenticated keeps it.
+revoke execute on function public.dose_totals(date, date) from public, anon;
+grant  execute on function public.dose_totals(date, date) to authenticated;

@@ -119,8 +119,8 @@ async function readFnError(error) {
 }
 
 // Shapes a raw jobs row (with its client/contractor/created-by joins) into
-// what every screen expects — shared by listJobs and the single-row lookups
-// below so a job read the same way wherever it's fetched from.
+// what every screen expects — shared by the job lists and the single-row
+// lookups below so a job reads the same way wherever it's fetched from.
 function shapeJob(j) {
   return {
     dbId: j.id, id: j.job_number, project: j.project,
@@ -136,6 +136,28 @@ function shapeJob(j) {
     // files a job under the month it was raised.
     createdAtIso: j.created_at || null
   };
+}
+
+// The PDFs a job delete has just orphaned. Both delete_job and
+// archive_clear_jobs hand back the keys of the objects whose rows they
+// removed, because after the delete there is nothing left to read them from
+// and the two private buckets would keep the files for ever.
+//
+// Best effort, and counted rather than thrown: the rows are already gone by
+// the time this runs, so a refused removal is an untidy bucket, not a lost
+// record — and the caller can say how many are left behind.
+async function removeStoredPdfs(result) {
+  let filesLeft = 0;
+  const removeAll = async (bucket, keys) => {
+    for (let i = 0; i < keys.length; i += 100) {
+      const batch = keys.slice(i, i + 100);
+      const { error: rmErr } = await sbClient.storage.from(bucket).remove(batch);
+      if (rmErr) { filesLeft += batch.length; console.warn(`Couldn't remove ${batch.length} object(s) from ${bucket}:`, rmErr.message); }
+    }
+  };
+  await removeAll("jhas", (result && result.jha_keys) || []);
+  await removeAll("reports", (result && result.report_keys) || []);
+  return filesLeft;
 }
 
 // A light in-memory cache for the reference-data lists (clients, contractors,
@@ -293,6 +315,43 @@ function shapeJobTicket(t) {
   };
 }
 const JOB_TICKET_COLUMNS = "id, job_id, work_date, status, total, created_at, technician_id, profiles(name)";
+
+// Everything the archive's job text file says about a ticket, in one row.
+const ARCHIVE_TICKET_COLUMNS = "id, work_date, status, total, delays, client_contact, contractor_contact, approved_at, approved_by_email, approval_sent_at, approval_sent_to, invoiced_at, queried_at, query_text, query_by, profiles(name), ticket_lines(kind, label, unit, quantity, unit_rate, line_order)";
+function shapeArchiveTicket(t) {
+  // line_order is the column the invoice prints by; PostgREST hands embedded
+  // rows over in heap order, so the archive has to put them back in it.
+  const lines = [...(t.ticket_lines || [])].sort((a, b) => Number(a.line_order || 0) - Number(b.line_order || 0));
+  return {
+    id: t.id, workDate: t.work_date, status: t.status, total: Number(t.total || 0), delays: t.delays || "",
+    clientContact: t.client_contact ? t.client_contact.name : "",
+    contractorContact: t.contractor_contact ? t.contractor_contact.name : "",
+    approvedAt: t.approved_at, approvedBy: t.approved_by_email || "",
+    sentAt: t.approval_sent_at, sentTo: t.approval_sent_to || "",
+    invoicedAt: t.invoiced_at, queriedAt: t.queried_at, queryText: t.query_text || "", queryBy: t.query_by || "",
+    tech: t.profiles ? t.profiles.name : "",
+    lines
+  };
+}
+
+// One ticket's crew, or a whole job's. ticket_id rides along so the batched
+// read can file each row under the ticket it belongs to.
+const CREW_COLUMNS = "id, ticket_id, profile_id, crew_role, straight_hours, ot_hours, solo_hours, solo_ot_hours, dose_mr, mileage_km, profiles(name, first_name, last_name, is_subcontractor, level, id_code)";
+function shapeCrew(c) {
+  return {
+    id: c.id, profileId: c.profile_id, role: c.crew_role,
+    straight: Number(c.straight_hours), ot: Number(c.ot_hours),
+    solo: Number(c.solo_hours), soloOt: Number(c.solo_ot_hours),
+    dose: Number(c.dose_mr), mileage: Number(c.mileage_km),
+    name: c.profiles ? fullName(c.profiles) : "",
+    // The client's field invoice names each person's level and number
+    // beside their hours. Both are set in Users & access: "Level" is the
+    // cert grade printed in the LEVEL column, "CGSB# / NRCAN#" the number.
+    level: c.profiles ? (c.profiles.level || "") : "",
+    certNo: c.profiles ? (c.profiles.id_code || "") : "",
+    isSub: c.profiles ? c.profiles.is_subcontractor : false
+  };
+}
 
 // The board is re-fetched on every filter tap and every return to Home;
 // re-pulling the detail for ten jobs each time would be a lot of traffic for
@@ -484,24 +543,6 @@ export const Db = {
     return data;
   },
 
-  // Jobs joined with client name, shaped to match what the screens expect.
-  async listJobs() {
-    // "All of them" — so paged past PostgREST's 1,000-row cap like every
-    // other whole-table list. Its one caller is the rate-override job
-    // picker, and an override is exactly the thing raised weeks into a job
-    // that a capped list would have silently dropped.
-    const data = await fetchAllPages(async page => {
-      const { data: rows, error, count } = await sbClient
-        .from("jobs")
-        .select("id, job_number, project, lsd, afe, area, method, procedure, status, created_at, client_id, contractor_id, created_by, clients(name), contractors(name), profiles!jobs_created_by_fkey(name)", page === 0 ? { count: "exact" } : {})
-        .order("created_at", { ascending: false }).order("id")
-        .range(page * RESPONSE_ROW_CAP, (page + 1) * RESPONSE_ROW_CAP - 1);
-      if (error) throw error;
-      return { rows: rows || [], total: count ?? (rows || []).length };
-    });
-    return data.map(shapeJob);
-  },
-
   // Deleting a job, and saying what happens to what is filed against it.
   //
   // One RPC rather than a delete plus three updates from here: moving a JHA,
@@ -535,23 +576,47 @@ export const Db = {
     return data.map(shapeJob);
   },
 
-  // A ticket with everything the archive's text file says about it.
-  async getTicketForArchive(ticketId) {
-    const { data, error } = await sbClient.from("tickets")
-      .select("id, work_date, status, total, delays, client_contact, contractor_contact, approved_at, approved_by_email, approval_sent_at, approval_sent_to, invoiced_at, queried_at, query_text, query_by, profiles(name), ticket_lines(kind, label, unit, quantity, unit_rate, line_order)")
-      .eq("id", ticketId).single();
-    if (error) throw error;
-    const lines = [...(data.ticket_lines || [])].sort((a, b) => Number(a.line_order || 0) - Number(b.line_order || 0));
-    return {
-      id: data.id, workDate: data.work_date, status: data.status, total: Number(data.total || 0), delays: data.delays || "",
-      clientContact: data.client_contact ? data.client_contact.name : "",
-      contractorContact: data.contractor_contact ? data.contractor_contact.name : "",
-      approvedAt: data.approved_at, approvedBy: data.approved_by_email || "",
-      sentAt: data.approval_sent_at, sentTo: data.approval_sent_to || "",
-      invoicedAt: data.invoiced_at, queriedAt: data.queried_at, queryText: data.query_text || "", queryBy: data.query_by || "",
-      tech: data.profiles ? data.profiles.name : "",
-      lines
-    };
+  // A whole job's tickets, with everything the archive's text file says about
+  // them, in one read rather than one read each.
+  //
+  // The archive used to ask per ticket, which for a year is sixteen thousand
+  // sequential round trips — over an hour of waiting before the zip even
+  // starts. Chunked, because `in` puts every id in the URL and PostgREST caps
+  // the response at 1,000 rows: a chunk of 200 tickets is one row each, well
+  // inside both. Keyed by ticket id so the caller can keep its own order.
+  async listTicketsForArchive(ticketIds) {
+    const out = new Map();
+    for (let i = 0; i < ticketIds.length; i += 200) {
+      const { data, error } = await sbClient.from("tickets")
+        .select(ARCHIVE_TICKET_COLUMNS)
+        .in("id", ticketIds.slice(i, i + 200));
+      if (error) throw error;
+      for (const row of data || []) out.set(row.id, shapeArchiveTicket(row));
+    }
+    return out;
+  },
+
+  // The crew rows for a job's tickets, in one read per chunk. Paged by key
+  // inside each chunk: a chunk of tickets carries several crew rows each, so
+  // this is the one of the two that can genuinely run into the 1,000-row cap.
+  async listCrewForTickets(ticketIds) {
+    const out = new Map();
+    for (const id of ticketIds) out.set(id, []);
+    for (let i = 0; i < ticketIds.length; i += 200) {
+      const chunk = ticketIds.slice(i, i + 200);
+      const rows = await fetchAllKeyset(async after => {
+        let query = sbClient.from("ticket_crew").select(CREW_COLUMNS).in("ticket_id", chunk);
+        if (after != null) query = query.gt("id", after);
+        const { data, error } = await query.order("id").limit(RESPONSE_ROW_CAP);
+        if (error) throw error;
+        return data || [];
+      });
+      for (const c of rows) {
+        const list = out.get(c.ticket_id);
+        if (list) list.push(shapeCrew(c));
+      }
+    }
+    return out;
   },
 
   // A stored PDF, as bytes. Both buckets are private; the signed-in Admin's
@@ -571,16 +636,7 @@ export const Db = {
     const { data, error } = await sbClient.rpc("archive_clear_jobs", { p_job_ids: jobIds });
     if (error) throw error;
     const result = data || {};
-    let filesLeft = 0;
-    const removeAll = async (bucket, keys) => {
-      for (let i = 0; i < keys.length; i += 100) {
-        const batch = keys.slice(i, i + 100);
-        const { error: rmErr } = await sbClient.storage.from(bucket).remove(batch);
-        if (rmErr) { filesLeft += batch.length; console.warn(`Couldn't remove ${batch.length} object(s) from ${bucket}:`, rmErr.message); }
-      }
-    };
-    await removeAll("jhas", result.jha_keys || []);
-    await removeAll("reports", result.report_keys || []);
+    const filesLeft = await removeStoredPdfs(result);
     invalidate("job_numbers");
     invalidate("profiles");
     const keys = await OfflineCache.keys("").catch(() => []);
@@ -600,6 +656,12 @@ export const Db = {
       p_discard: discard
     });
     if (error) throw error;
+    // The same tidying the archive's clear does, for the same reason: a job
+    // deleted with its work takes the JHA and report rows with it on the
+    // cascade, and their PDFs would sit in the two buckets with nothing left
+    // pointing at them. delete_job hands the keys back for exactly this (it
+    // returns none on a transfer, where the rows and their files live on).
+    const filesLeft = await removeStoredPdfs(data);
     // The board, the job itself and its history are all now wrong on this
     // device, and the deleted job must not come back from the cache — nor
     // should the chat keep linkifying its number. "job_numbers" is an
@@ -615,7 +677,7 @@ export const Db = {
     await OfflineCache.remove("reports." + jobId);
     await OfflineCache.remove("tickets." + jobId);
     await dropClientJobLists();
-    return data;
+    return { ...(data || {}), filesLeft };
   },
 
   // The open jobs for one client, newest first — what the "New ticket" button
@@ -644,8 +706,9 @@ export const Db = {
     });
   },
 
-  // Same shape as listJobs, for exactly one row — used to seed the initial
-  // active job on sign-in without pulling every job just to pick the newest.
+  // The same shape as the job lists above, for exactly one row — used to seed
+  // the initial active job on sign-in without pulling every job to pick the
+  // newest.
   async getMostRecentJob() {
     const { data, error } = await sbClient
       .from("jobs")
@@ -902,7 +965,13 @@ export const Db = {
     // syncing. Because the id was minted on the device, "did this already
     // land?" is a question we can actually answer.
     if (id) {
-      const { data: already } = await sbClient.from("jobs").select("id").eq("id", id).maybeSingle();
+      const { data: already, error: keyErr } = await sbClient.from("jobs").select("id").eq("id", id).maybeSingle();
+      // A discarded error here is how a queued job pins itself for ever: the
+      // lookup fails on a stalled connection, the insert below then dies on
+      // jobs_job_number_key because an earlier attempt did land, and the
+      // outbox keeps retrying a job that the database already holds. Thrown,
+      // a network failure is one the queue simply tries again later.
+      if (keyErr) throw keyErr;
       if (already) return already;
     }
 
@@ -932,7 +1001,17 @@ export const Db = {
     // constraint jobs_job_number_key", which is not something to hand
     // somebody in a truck.
     if (error) {
-      if (isDuplicateJobNumber(error)) throw new Error(jobNumberTakenMessage(jobNumber));
+      if (isDuplicateJobNumber(error)) {
+        // Taken — but by whom? A replay whose first attempt committed after
+        // the lookup above read collides with itself, and the honest answer
+        // to "create this job" is the row it already made. Only if the id
+        // isn't there is the number really somebody else's.
+        if (id) {
+          const { data: mine } = await sbClient.from("jobs").select("id, job_number").eq("id", id).maybeSingle();
+          if (mine && mine.job_number === jobNumber) return { id: mine.id };
+        }
+        throw new Error(jobNumberTakenMessage(jobNumber));
+      }
       throw error;
     }
     // The chat's linkifier caches the number list; a just-created job
@@ -1553,14 +1632,27 @@ export const Db = {
     // and editing it did nothing. A job that hasn't named anyone still falls
     // back to the primary, which is what it always did.
     let named = {};
-    try {
-      const { data } = await sbClient.from("jobs")
-        .select("client_contact_id, contractor_contact_id").eq("id", job.dbId).maybeSingle();
-      if (data) named = data;
-    } catch (e) {
-      // Offline, the primaries below are a fine stand-in — except for the
-      // archive, which asked for the record as it is or not at all.
-      if (OfflineCache.isLiveOnly()) throw e;
+    // True when the read failed and the reps below are the organisation's
+    // primaries rather than this job's own. The panel can still be shown —
+    // it is what it always showed — but Edit is not offered, because Save
+    // would write the primary back as this job's named rep.
+    let repsUnknown = false;
+    const { data: namedRow, error: namedErr } = await sbClient.from("jobs")
+      .select("client_contact_id, contractor_contact_id").eq("id", job.dbId).maybeSingle();
+    if (namedErr) {
+      // postgrest-js reports a failure in `error`; it does not throw. This
+      // was a try/catch, which meant the branch below never ran and every
+      // failure — a refusal as much as a dead connection — silently became
+      // "this job names nobody".
+      //
+      // Offline, the primaries are a fine stand-in for reading — except for
+      // the archive, which asked for the record as it is or not at all.
+      // Anything that is not the network is a real answer and belongs to the
+      // caller.
+      if (OfflineCache.isLiveOnly() || !isNetworkError(namedErr)) throw namedErr;
+      repsUnknown = true;
+    } else if (namedRow) {
+      named = namedRow;
     }
 
     const byId = id => (id && contacts.find(c => c.id === id)) || null;
@@ -1588,7 +1680,8 @@ export const Db = {
       lsd: job.lsd || "",
       method: job.method || "",
       procedure: job.procedure || "",
-      started: job.createdAt || ""
+      started: job.createdAt || "",
+      repsUnknown
     };
   },
 
@@ -1818,23 +1911,9 @@ export const Db = {
 
   async listCrewForTicket(ticketId) {
     const { data, error } = await sbClient
-      .from("ticket_crew")
-      .select("id, profile_id, crew_role, straight_hours, ot_hours, solo_hours, solo_ot_hours, dose_mr, mileage_km, profiles(name, first_name, last_name, is_subcontractor, level, id_code)")
-      .eq("ticket_id", ticketId);
+      .from("ticket_crew").select(CREW_COLUMNS).eq("ticket_id", ticketId);
     if (error) throw error;
-    return data.map(c => ({
-      id: c.id, profileId: c.profile_id, role: c.crew_role,
-      straight: Number(c.straight_hours), ot: Number(c.ot_hours),
-      solo: Number(c.solo_hours), soloOt: Number(c.solo_ot_hours),
-      dose: Number(c.dose_mr), mileage: Number(c.mileage_km),
-      name: c.profiles ? fullName(c.profiles) : "",
-      // The client's field invoice names each person's level and number
-      // beside their hours. Both are set in Users & access: "Level" is the
-      // cert grade printed in the LEVEL column, "CGSB# / NRCAN#" the number.
-      level: c.profiles ? (c.profiles.level || "") : "",
-      certNo: c.profiles ? (c.profiles.id_code || "") : "",
-      isSub: c.profiles ? c.profiles.is_subcontractor : false
-    }));
+    return data.map(shapeCrew);
   },
 
   async saveCrewForTicket(ticketId, crew) {
@@ -2021,7 +2100,10 @@ export const Db = {
     const rows = (data || []).map(t => ({
       id: t.id, date: dayMonth(localDate(t.work_date)), workDate: t.work_date,
       age: ageInDays(t.created_at),
-      amount: Number(t.total), status: t.status, tech: t.technician_name || "",
+      // Null stays null. search_tickets nulls the money for a role that may
+      // not see prices, and Number(null) is 0 — a figure, indistinguishable
+      // from a ticket that really is worth nothing.
+      amount: t.total == null ? null : Number(t.total), status: t.status, tech: t.technician_name || "",
       job: t.job_number || "", project: t.project || "", client: t.client_name || "",
       chasedAt: t.chased_at || null, invoicedAt: t.invoiced_at || null,
       queriedAt: t.queried_at || null, queryText: t.query_text || "", queryBy: t.query_by || ""
@@ -2074,11 +2156,25 @@ export const Db = {
   // can be from here; closing it properly needs a cursor on the function.
   async listTicketsForExport({ status = "All", q = "", from = null, to = null } = {}) {
     const all = [];
+    // The size the pages are really coming back at. This asks for the cap;
+    // if the API's max-rows setting is ever lowered, what page 0 returns is
+    // the true page size and every later page has to be asked for at that
+    // size, or the offsets step straight over the rows the short page never
+    // sent. Stopping on a short page — which is what this used to do — could
+    // not tell "that was the last of them" from "that was all it would send".
+    let size = RESPONSE_ROW_CAP;
+    let total = 0;
     for (let page = 0; ; page++) {
-      const { rows } = await this.searchTickets({ page, pageSize: RESPONSE_ROW_CAP, status, q, from, to });
-      if (!rows.length) break;
-      for (const r of rows) all.push(r);
-      if (rows.length < RESPONSE_ROW_CAP) break;
+      const res = await this.searchTickets({ page, pageSize: size, status, q, from, to });
+      if (!res.rows.length) break;
+      for (const r of res.rows) all.push(r);
+      if (page === 0) {
+        total = res.total;
+        if (res.rows.length < size) size = res.rows.length;
+      }
+      // search_tickets reports how many tickets match, so the walk ends on
+      // that count rather than on the shape of a page.
+      if (all.length >= total) break;
     }
     return all;
   },
@@ -2404,17 +2500,25 @@ export const Db = {
     // "Draft" is the word every save sends, not a decision anyone made about
     // this ticket — the editor hardcodes it, and a queued replay carries the
     // literal string it was enqueued with hours ago. If the office has sent
-    // the ticket for signature since, honouring that word would drag it back
-    // to Draft with a live approval token on it: out of the tracker's
-    // unsigned list, out of the chase, and still signable from the emailed
-    // link. Pulling a sent ticket back is withdraw_ticket_approval's job and
-    // nobody else's, so the rest of the patch lands and the status stays put.
+    // the ticket for signature since, this save doesn't land at all.
+    //
+    // Keeping the status and writing the rest anyway (what this used to do)
+    // was not enough: the lines are replaced below, the trigger recomputes
+    // the total from them, and the callers replace the crew hours next. The
+    // money moves under a live approval link and the rep signs a different
+    // bill from the one they were sent. Pulling a sent ticket back is
+    // withdraw_ticket_approval's job and nobody else's, so refuse here —
+    // which is also what stops saveCrewForTicket from running. In the outbox
+    // the item stays put with this as its error; in the editor it is the
+    // message on screen.
+    if (row.status === "Awaiting approval" && status === "Draft") {
+      throw plainError(`Ticket ${ticketId} has been sent for the client's signature — cancel the approval before changing it.`);
+    }
     // Written back as itself rather than left out of the patch: a save that
     // carries neither delays nor a rep would otherwise update no columns at
     // all, and an empty patch is not a request PostgREST will take — nor
     // would it still be the permission probe the failure branch below reads.
-    const keepSent = status === "Draft" && row.status === "Awaiting approval";
-    const patch = { status: keepSent ? row.status : status };
+    const patch = { status };
     // undefined means the caller isn't touching delays; "" means cleared.
     if (delays !== undefined) patch.delays = delays || null;
     // Same rule for the reps, and for the same reason: undefined is "not

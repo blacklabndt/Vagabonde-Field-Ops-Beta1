@@ -197,14 +197,14 @@ tables.
 | Billing ticket (mobile) | Prices every weld and charge line against the client's *published* rate schedule, and records the crew's hours, solo hours and dose |
 | Open tickets | A technician's own unbilled tickets — drafts to finish, signatures to chase |
 | Team chat | One crew-wide room: pictures, voice notes, GIFs, replies, pins, unread badge and Web Push. Unpinned messages expire after 30 days; job numbers in a message linkify to the job |
-| Billing tracker | Every ticket across every job, paged server-side, with the four totals as one RPC rather than a full table scan in the browser |
+| Billing tracker | Every ticket across every job, paged server-side, with the four totals as one RPC rather than a full table scan in the browser. **Chase all unsigned** re-sends the approval link to every ticket still waiting: it leaves alone anything chased in the last three days or carrying an open client query, then sends through a paced pool (three at a time, spaced, `sendPool.js`) that waits out a rate-limited or unavailable transport instead of writing it off. It reports "sending *n* of *N*" as it goes, has a **Stop** that lets the sends in flight land and leaves the rest for another day, and names the tickets that failed by number, because a count of 37 is not something anyone can act on. Both that button and **Export to accounting** are behind the price gate: the database hands a role that can't see prices null totals, so a Coordinator would otherwise have mailed every client a $0.00 approval or built accounting a spreadsheet of zeroes |
 | Rate admin | Rate lines write straight to `rate_lines` (debounced); "Fill from default" copies the house card into any rate still at zero; rate history is logged by a trigger |
 | Files | A private `shared` bucket browsed directly; folders are path prefixes, not a table, so the listing can't drift from what's stored |
 | Contacts | The directory of people at each client and contractor, one primary each — what every other screen pre-fills a rep from |
 | Equipment | Exposure devices, survey meters, dosimeters and tools with calibration dates; the JHA pre-fills each worker's kit from what's assigned here |
-| Timesheets | Hours, solo hours, dose and mileage per person per pay period, derived from ticket crew rows; admin approves a period, and "Export to Excel" builds a two-sheet workbook |
+| Timesheets | Hours, solo hours, dose and mileage per person per pay period, derived from ticket crew rows; admin approves a period, and "Export to Excel" builds a two-sheet workbook. The dose ledger beside it — milliroentgens per person per calendar quarter and year, the figures a nuclear energy worker's record needs — is added up by the database (`dose_totals`), not the browser: a "Year" view used to pull every crew row of the year, tens of thousands of them, to print one line each. It runs with the caller's own rights, so row-level security is still what keeps one technician's dose out of another's screen, and it falls back to the old row-by-row read on a database that hasn't had the function yet |
 | Users & access | Accounts, tab permissions, role presets, and a panel of recent background errors from the Edge Functions |
-| Admin | The settings that used to be function secrets — Resend key and sending addresses, the approval-link base URL, the KLIPY key — in one Admin-only row, plus a test email and the year/date-range archive |
+| Admin | The settings that used to be function secrets — Resend key and sending addresses, the approval-link base URL, the KLIPY key — in one Admin-only row, plus a test email and the year/date-range archive. Building the archive reads every PDF and renders every ticket's invoice over the connection — minutes for a quiet month, an hour or more for a busy year, so it is a job to start at a desk. Clearing is gated twice over: the downloaded zip is checked back against the manifest the build kept, and then, immediately before the delete, every job's tickets, assessments and reports are counted again live. A job that has gained or lost anything since the build stops the clear and says so — the zip on disk cannot know about a ticket filed at 16:20 against a job archived at 16:00 |
 
 ### Offline
 
@@ -222,8 +222,22 @@ falls back on a genuine connectivity failure — a permission error or a bad
 request is a real answer and surfaces as one. Anything served from the cache
 puts an **Offline** tag in the top bar and, on the board, a line saying what
 was saved and when, because data that quietly looks live is worse than no
-data. Writes are never cached; they queue (below). Signing out clears it, so
-a shared tablet doesn't hand the next person the last crew's work.
+data. Writes are never cached; they queue (below).
+
+These are shared tablets, so the cache records whose it is. Signing out
+clears it — after warning, if there are half-entered tickets or queued work
+that would go with it — and signing in clears it again if the last owner was
+anybody but the account now signing in, so the next person cannot page
+through the last crew's jobs, rates and drafts. Signing back in as the *same*
+person keeps all of it, which is the point: a token that expired while the
+truck was out of range forgets who the device belonged to but leaves the
+morning's work where it is. The two cases with nobody left to keep it for —
+starting up with no signal and no remembered identity, and an account the
+server says has nothing behind it any more — clear it outright. Sign-out also
+removes the stored session by hand when the server can't be reached, because
+`signOut` reports the failure without removing it, and a tablet handed over
+"signed out" that signs itself back in on the next reload is the whole
+problem this is here to prevent.
 
 Starting up with no signal is its own problem, handled in `session.js`.
 Restoring a session touches the network twice — refreshing the access token

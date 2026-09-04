@@ -1,6 +1,9 @@
 import React, { useState, useEffect, useMemo, useRef } from "react";
 import { localDate, dayMonth, payPeriodLabel, recentPayPeriods, hours, recentQuarters, recentYears, quarterOf } from "../data.js";
 import { Db } from "../db.js";
+// The dose ledger calls one RPC that has no Db wrapper of its own; the sign-in
+// screen reaches for the client the same way.
+import { sbClient } from "../config.js";
 import { Blueprint, Btn, TableScroll, TagX, ErrorBox, RowsPerPage, useRowsPerPage , Loading, PdfLink, StatusTag, downloadCsv } from "./common.jsx";
 import { makeZip, safeFilename, saveBlob } from "../zip.js";
 
@@ -21,48 +24,103 @@ export function TimesheetsScreen({ currentUser }) {
   const [view, setView] = useState("period");      // period | approved | awaiting | dose
 
   // ── The dose ledger ────────────────────────────────────────────────────
-  // Dose is recorded per person per ticket day (the crew block). Summed here
-  // by calendar quarter and calendar year — the figures a nuclear energy
-  // worker's record needs — for everyone (Admin) or for yourself. The
-  // entries come through the same read as the timesheet, so the same
-  // privacy holds: a technician's own rows and nobody else's.
+  // Dose is recorded per person per ticket day (the crew block). Summed by
+  // calendar quarter and calendar year — the figures a nuclear energy
+  // worker's record needs — for everyone (Admin) or for yourself. The same
+  // privacy holds whichever way the figures arrive: row-level security
+  // returns a technician's own rows and nobody else's, and the filter below
+  // says so a second time.
+  //
+  // The per-person figures are summed by the database, through dose_totals.
+  // Adding them up here meant a year of crew rows — tens of thousands of
+  // them, paged a thousand at a time, tens of megabytes — crossing the wire
+  // to produce the forty-odd numbers this screen shows. The entries
+  // themselves are still what the CSV is made of, so that export asks for
+  // them when the button is pressed instead of keeping them all in hand.
   const [doseKind, setDoseKind] = useState("quarter");
   const doseOptions = useMemo(() => doseKind === "quarter" ? recentQuarters(8) : recentYears(5), [doseKind]);
   const [dosePeriod, setDosePeriod] = useState(null);
   const effDose = dosePeriod && dosePeriod.kind === doseKind ? dosePeriod : doseOptions[0];
+  // One of these two carries the ledger: the RPC's per-person rows, or — on a
+  // database that does not have the function yet — the crew entries this
+  // screen has always grouped for itself.
+  const [doseSummary, setDoseSummary] = useState(null);
   const [doseRows, setDoseRows] = useState([]);
   const [doseLoading, setDoseLoading] = useState(false);
+  const [doseExporting, setDoseExporting] = useState(false);
   const doseSeq = useRef(0);
   useEffect(() => {
     if (view !== "dose") return;
     const mine = ++doseSeq.current;
     setDoseLoading(true);
-    Db.listTimesheetEntries({ start: effDose.start, end: effDose.end })
-      .then(rows => { if (mine === doseSeq.current) setDoseRows(rows.filter(r => r.dose > 0)); })
+    loadDose(effDose)
+      .then(({ summary, entries }) => {
+        if (mine !== doseSeq.current) return;
+        setDoseSummary(summary);
+        setDoseRows(entries);
+      })
       .catch(e => { if (mine === doseSeq.current) setError(e.message || "Couldn't load the dose entries."); })
       .finally(() => { if (mine === doseSeq.current) setDoseLoading(false); });
   }, [view, effDose.start, effDose.end]);
   const doseLedger = useMemo(() => {
+    // Whoever carries the most first — the order the record is read in.
+    const byDose = (a, b) => b.total - a.total || a.name.localeCompare(b.name);
+    // Tenths of a mR, as integers: the DRDs read to one decimal, and a ledger
+    // added up in floats drifts in the last place.
+    const tenths = mR => Math.round(Number(mR || 0) * 10);
+    if (doseSummary) {
+      return doseSummary
+        .filter(r => currentUser.role === "Admin" || r.profile_id === currentUser.id)
+        .map(r => ({
+          profileId: r.profile_id,
+          name: r.name || "",
+          days: r.days == null ? null : Number(r.days),
+          total: tenths(r.total_mr),
+          quarters: [r.q1, r.q2, r.q3, r.q4].map(tenths)
+        }))
+        .sort(byDose);
+    }
     const byId = new Map();
     for (const e of doseRows) {
       if (currentUser.role !== "Admin" && e.profileId !== currentUser.id) continue;
       let p = byId.get(e.profileId);
-      if (!p) { p = { profileId: e.profileId, name: e.name, entries: [], total: 0, quarters: [0, 0, 0, 0] }; byId.set(e.profileId, p); }
-      p.entries.push(e);
-      // Tenths of a mR, summed as integers — the DRDs read to one decimal.
-      p.total += Math.round(e.dose * 10);
-      p.quarters[quarterOf(e.date) - 1] += Math.round(e.dose * 10);
+      if (!p) { p = { profileId: e.profileId, name: e.name, days: 0, total: 0, quarters: [0, 0, 0, 0] }; byId.set(e.profileId, p); }
+      p.days += 1;
+      p.total += tenths(e.dose);
+      p.quarters[quarterOf(e.date) - 1] += tenths(e.dose);
     }
-    return [...byId.values()].sort((a, b) => b.total - a.total || a.name.localeCompare(b.name));
-  }, [doseRows, currentUser.role, currentUser.id]);
+    return [...byId.values()].sort(byDose);
+  }, [doseSummary, doseRows, currentUser.role, currentUser.id]);
   const mr = tenths => (tenths / 10).toFixed(1);
-  const exportDose = () => downloadCsv(`Dose ${effDose.label}.csv`, [
-    ["Person", "Date", "Job", "Ticket", "Dose (mR)"],
-    ...doseLedger.flatMap(p => p.entries.map(e => [p.name, e.date, e.job, e.ticketId, (Math.round(e.dose * 10) / 10).toFixed(1)])),
-    [],
-    ["Person", "Days with dose", `Total mR · ${effDose.label}`, ...(doseKind === "year" ? ["Q1", "Q2", "Q3", "Q4"] : [])],
-    ...doseLedger.map(p => [p.name, p.entries.length, mr(p.total), ...(doseKind === "year" ? p.quarters.map(mr) : [])])
-  ]);
+  // The entry-by-entry sheet is the only thing that wants every crew row, so
+  // it is the only thing that asks for them — on the click, not on the way
+  // into the screen. On the fallback path they are already here and there is
+  // no sense fetching them twice.
+  const exportDose = async () => {
+    setDoseExporting(true);
+    setError("");
+    try {
+      const entries = doseRows.length
+        ? doseRows
+        : (await Db.listTimesheetEntries({ start: effDose.start, end: effDose.end })).filter(r => r.dose > 0);
+      const byId = new Map();
+      for (const e of entries) {
+        if (currentUser.role !== "Admin" && e.profileId !== currentUser.id) continue;
+        const held = byId.get(e.profileId);
+        if (held) held.push(e); else byId.set(e.profileId, [e]);
+      }
+      downloadCsv(`Dose ${effDose.label}.csv`, [
+        ["Person", "Date", "Job", "Ticket", "Dose (mR)"],
+        ...doseLedger.flatMap(p => (byId.get(p.profileId) || []).map(e => [p.name, e.date, e.job, e.ticketId, (Math.round(e.dose * 10) / 10).toFixed(1)])),
+        [],
+        ["Person", "Days with dose", `Total mR · ${effDose.label}`, ...(doseKind === "year" ? ["Q1", "Q2", "Q3", "Q4"] : [])],
+        ...doseLedger.map(p => [p.name, p.days == null ? (byId.get(p.profileId) || []).length : p.days, mr(p.total), ...(doseKind === "year" ? p.quarters.map(mr) : [])])
+      ]);
+    } catch (e) {
+      setError(e.message || "Couldn't build the dose report.");
+    }
+    setDoseExporting(false);
+  };
   const [selected, setSelected] = useState(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState("");
@@ -336,8 +394,8 @@ export function TimesheetsScreen({ currentUser }) {
               {doseOptions.map(o => <option key={o.start} value={o.start}>{o.label}</option>)}
             </select>
             {isAdmin && (
-              <Btn variant="secondary" style={{ minHeight: 38, marginLeft: "auto" }} onClick={exportDose} disabled={!doseLedger.length || doseLoading}>
-                Export dose report (.csv)
+              <Btn variant="secondary" style={{ minHeight: 38, marginLeft: "auto" }} onClick={exportDose} disabled={!doseLedger.length || doseLoading || doseExporting}>
+                {doseExporting ? "Building…" : "Export dose report (.csv)"}
               </Btn>
             )}
           </div>
@@ -361,7 +419,7 @@ export function TimesheetsScreen({ currentUser }) {
                 {!doseLoading && doseLedger.map(p => (
                   <tr key={p.profileId}>
                     <td style={{ fontFamily: "var(--font-heading)", fontWeight: 600 }}>{p.name}</td>
-                    <td className="tabular">{p.entries.length}</td>
+                    <td className="tabular">{p.days == null ? "—" : p.days}</td>
                     {doseKind === "year" && p.quarters.map((q, i) => <td key={i} className="tabular">{mr(q)}</td>)}
                     <td className="tabular" style={{ fontWeight: 600 }}>{mr(p.total)}</td>
                   </tr>
@@ -552,6 +610,32 @@ export function TimesheetsScreen({ currentUser }) {
       </>)}
     </div>
   );
+}
+
+// Where the dose ledger's figures come from. dose_totals adds them up in the
+// database — one row per person, the four calendar quarters and a total —
+// rather than sending a year of crew rows over to be added up here.
+//
+// The function is newer than the app, and a database that has not had the
+// migration yet still has to show the ledger. PostgREST answers PGRST202 for
+// a routine it cannot find; that one error, and only that one, falls back to
+// the read this screen has always used. Anything else — a permission
+// refusal, a timeout — is a real failure and reaches the screen as itself.
+async function loadDose({ start, end }) {
+  const { data, error } = await sbClient.rpc("dose_totals", { p_start: start, p_end: end });
+  if (!error) return { summary: data || [], entries: [] };
+  if (!isMissingDoseTotals(error)) throw error;
+  const entries = await Db.listTimesheetEntries({ start, end });
+  return { summary: null, entries: entries.filter(r => r.dose > 0) };
+}
+
+// The code is the reliable half; the message is checked too because older
+// gateways only say it in words — but only a message that names this
+// function, so nothing else gets quietly treated as "not deployed yet".
+function isMissingDoseTotals(error) {
+  if (error.code === "PGRST202") return true;
+  const msg = String(error.message || "");
+  return msg.includes("dose_totals") && /could not find|does not exist|not found/i.test(msg);
 }
 
 // The other tab: every period of yours that has been signed off, newest

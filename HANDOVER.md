@@ -140,6 +140,14 @@ will remove before the deletes.
   claims the device's subscription automatically.
 - **Chat history fades** — by design: unpinned messages expire after 30
   days, swept nightly.
+- **"It reloaded everything the first time I signed in"** — expected, once
+  per device after this release. The offline cache now records which
+  account it belongs to, and no existing device has that on file yet, so
+  the first sign-in empties it and fetches the jobs, rates and contacts
+  again — an unsaved ticket or assessment sitting on that device goes with
+  it, so finish and save anything in progress before the update lands. It
+  needs signal that one time; afterwards it behaves as before, and only a
+  *different* person signing in clears it.
 
 ## Support access
 

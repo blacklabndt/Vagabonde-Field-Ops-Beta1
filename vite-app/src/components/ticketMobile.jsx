@@ -47,10 +47,15 @@ function linesToForm(lines, keepQuantities, catalog) {
 const CREW_FIGURES = ["straight", "ot", "solo", "soloOt", "dose", "mileage"];
 // A typed standby explanation counts too: a ticket that is nothing but a
 // delays note so far was being dropped from the recovery copy as untouched.
-const hasEntries = (weldLines, otherLines, crew, delays = "") =>
+// Off-card charges count as entries too: a reopened draft whose only lines
+// are ones the card no longer offers is a real ticket with real money on it,
+// and reading it as untouched deleted the recovery copy that was keeping
+// track of one being removed.
+const hasEntries = (weldLines, otherLines, crew, delays = "", orphanLines = []) =>
   weldLines.some(l => l.qty > 0) ||
   otherLines.some(l => l.qty > 0) ||
   crew.some(c => CREW_FIGURES.some(k => c[k] > 0)) ||
+  orphanLines.some(l => l.quantity > 0) ||
   (typeof delays === "string" && delays.trim().length > 0);
 
 // `seed` is what Job detail's Create ticket dialog chose for a NEW ticket —
@@ -78,6 +83,9 @@ export function TicketMobileScreen({ job, jobRecord, currentUser, onSaved, ticke
   // wipRestored stops the crew-seeding effect from resetting a recovered crew
   // when the recovered work date re-runs it.
   const wipRestored = useRef(false);
+  // skipWipWrite swallows exactly one run of the writer, for the reload that
+  // "Start empty" does on a reopened draft — see discardRecovered.
+  const skipWipWrite = useRef(false);
   const [ticketId, setTicketId] = useState(ticket || "");
   // A reopened draft has to finish loading before its zeros can be trusted as
   // zeros rather than as "not read yet".
@@ -266,6 +274,11 @@ export function TicketMobileScreen({ job, jobRecord, currentUser, onSaved, ticke
       // ticket is.
       setCrew(savedCrew.length ? savedCrew : seedCrew(peopleRef.current));
     } catch (e) {
+      // Nothing was put on screen, so the run this read was meant to swallow
+      // never happens — and a suppression left armed is spent on the next
+      // real edit instead, which is the one write that matters. Handing it
+      // back here keeps a failed reload from costing a genuine recovery copy.
+      skipWipWrite.current = false;
       setLoadError(e.message || "Couldn't open that ticket.");
     }
   };
@@ -325,10 +338,16 @@ export function TicketMobileScreen({ job, jobRecord, currentUser, onSaved, ticke
       .then(hit => {
         if (!live) return;
         const w = hit && hit.value;
-        if (w && hasEntries(w.weldLines || [], w.otherLines || [], w.crew || [], w.delays || "")) {
+        if (w && hasEntries(w.weldLines || [], w.otherLines || [], w.crew || [], w.delays || "", w.orphanLines || [])) {
           wipRestored.current = true;
           if (w.weldLines) setWeldLines(w.weldLines);
           if (w.otherLines) setOtherLines(w.otherLines);
+          // The off-card charges as the copy left them — a removed one has
+          // to stay removed. An empty list is a real answer here, unlike the
+          // fields below, so it is the key's presence that decides: a copy
+          // written before this was saved has none, and its stored orphans
+          // are left as the loader read them rather than emptied.
+          if (Array.isArray(w.orphanLines)) setOrphanLines(w.orphanLines);
           if (w.crew) setCrew(w.crew);
           // What the Create ticket dialog chose just now — the day, this
           // ticket's reps — outranks what the recovery copy remembers: the
@@ -348,14 +367,20 @@ export function TicketMobileScreen({ job, jobRecord, currentUser, onSaved, ticke
   }, [job ? job.dbId : null, ticket, loadingTicket]);
 
   useEffect(() => {
+    // "Start empty" on a reopened draft reloads the stored ticket, and that
+    // reload lands here as a change like any other — so the copy that was
+    // just thrown away was written straight back, and the banner offering it
+    // returned the next time the ticket was opened, for ever. The one run
+    // this reload causes writes nothing; a real edit after it does.
+    if (skipWipWrite.current) { skipWipWrite.current = false; return; }
     if (!job || loadingTicket || !wipReady.current) return;
     // Only what someone actually entered is worth keeping. An untouched form
     // is cleared instead, so opening the screen and backing out doesn't leave
     // a phantom to recover next time.
-    if (!hasEntries(weldLines, otherLines, crew, delays)) { OfflineCache.remove(wipKey); return; }
+    if (!hasEntries(weldLines, otherLines, crew, delays, orphanLines)) { OfflineCache.remove(wipKey); return; }
     const t = setTimeout(() => {
       OfflineCache.put(wipKey, {
-        weldLines, otherLines, crew, workDate, delays, clientKey,
+        weldLines, otherLines, orphanLines, crew, workDate, delays, clientKey,
         clientContact: ticketClientContact, contractorContact: ticketContractorContact
       });
     }, 700);
@@ -364,7 +389,10 @@ export function TicketMobileScreen({ job, jobRecord, currentUser, onSaved, ticke
     // have to be watched for it too: with only the lines and hours here, a
     // rep changed after the last weld was typed never reached the copy, and
     // the recovery brought the ticket back addressed to the wrong person.
-  }, [weldLines, otherLines, crew, workDate, delays, loadingTicket,
+    // The off-card lines for the same reason: they are money on the ticket
+    // and they can be removed, and with them missing from the copy a charge
+    // taken off came back the next time the draft was recovered.
+  }, [weldLines, otherLines, orphanLines, crew, workDate, delays, loadingTicket,
       ticketClientContact, ticketContractorContact, clientKey]);
 
   const discardRecovered = () => {
@@ -376,7 +404,11 @@ export function TicketMobileScreen({ job, jobRecord, currentUser, onSaved, ticke
     // lines, zeroed the crew and cleared the reps — and the next Save wrote
     // that emptiness over a real ticket, because updateTicket replaces
     // lines and crew wholesale.
-    if (ticket) { loadDraft(); return; }
+    //
+    // The one write the reload would otherwise trigger is suppressed: what
+    // it puts on screen is the stored ticket, which is not unsaved work and
+    // must not become a recovery copy the moment one was discarded.
+    if (ticket) { skipWipWrite.current = true; loadDraft(); return; }
     // Back to what a fresh ticket opens with: nothing — and the day and the
     // reps the Create ticket dialog chose, when it chose them. "Start empty"
     // used to clear the lines and keep the recovered copy's date, delays
@@ -629,17 +661,28 @@ export function TicketMobileScreen({ job, jobRecord, currentUser, onSaved, ticke
       onSaved();
     } catch (e) {
       if (OfflineQueue.isNetworkError(e)) {
-        await OfflineQueue.enqueue("ticket", {
-          // No ticketId on a ticket that was never created: the number is
-          // minted when this replays, so hours offline can't reserve a number
-          // somebody else has since been given.
-          ticketId: inDb ? savedId : null,
-          initials: initialsOf(currentUser.name),
-          jobDbId: job.dbId, technicianId: currentUser.id, workDate,
-          clientContact: { name: ticketClientContact || jobRecord.clientRep }, contractorContact: { name: ticketContractorContact || jobRecord.contractorRep },
-          lines: buildLines(), status: "Draft",
-          crew, delays, alreadyCreated: inDb, sendForApproval, approvalTo: to, clientKey
-        });
+        try {
+          await OfflineQueue.enqueue("ticket", {
+            // No ticketId on a ticket that was never created: the number is
+            // minted when this replays, so hours offline can't reserve a number
+            // somebody else has since been given.
+            ticketId: inDb ? savedId : null,
+            initials: initialsOf(currentUser.name),
+            jobDbId: job.dbId, technicianId: currentUser.id, workDate,
+            clientContact: { name: ticketClientContact || jobRecord.clientRep }, contractorContact: { name: ticketContractorContact || jobRecord.contractorRep },
+            lines: buildLines(), status: "Draft",
+            crew, delays, alreadyCreated: inDb, sendForApproval, approvalTo: to, clientKey
+          });
+        } catch (queueErr) {
+          // The outbox is IndexedDB, and it can refuse — private browsing, a
+          // full disk, a wedged database. Unguarded, that threw straight out
+          // of save: the button stayed on "Saving…" for ever and nobody was
+          // told. The recovery copy stays put, so the day's figures are still
+          // here to try again with.
+          setSaving(false);
+          setSaveError("No signal, and this device couldn't hold the ticket either — stay on this screen and press Save again once you're in range.");
+          return;
+        }
         // Queued counts as safe: the work is on the device in the outbox now,
         // which is a better home for it than the recovery copy.
         await OfflineCache.remove(wipKey);

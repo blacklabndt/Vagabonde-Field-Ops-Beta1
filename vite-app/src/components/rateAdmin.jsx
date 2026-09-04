@@ -772,21 +772,15 @@ function RateHistoryDialog({ scheduleId, onClose }) {
 // job rather than the client, so the schedule stays the standing agreement
 // and the exception is visible next to the job it belongs to.
 function NewOverrideDialog({ onClose, onCreated }) {
-  const [jobs, setJobs] = useState([]);
+  // The job the override is filed against, kept whole so the box can say
+  // which one is chosen; only its dbId goes to the server.
+  const [job, setJob] = useState(null);
   const [form, setForm] = useState({ jobId: "", description: "", basis: "Bid rate", bidRef: "" });
   const [error, setError] = useState("");
   const [saving, setSaving] = useState(false);
   const miss = useMissingFields();
   const set = (k, v) => { miss.fixed(k); setForm(p => ({ ...p, [k]: v })); };
-
-  useEffect(() => {
-    Db.listJobs()
-      .then(list => {
-        setJobs(list);
-        if (list[0]) set("jobId", list[0].dbId);
-      })
-      .catch(e => setError(e.message || "Couldn't load jobs."));
-  }, []);
+  const pickJob = j => { setJob(j); set("jobId", j.dbId); };
 
   const submit = async () => {
     if (!form.jobId) { miss.flag("jobId"); setError("Pick the job this override applies to."); return; }
@@ -810,11 +804,30 @@ function NewOverrideDialog({ onClose, onCreated }) {
     <Dialog title="New job override" maxWidth={460} onClose={onClose}
       actions={<><Btn variant="secondary" onClick={onClose}>Cancel</Btn><Btn variant="primary" onClick={submit} disabled={saving}>{saving ? "Adding…" : "Add override"}</Btn></>}>
       <ErrorBox>{error}</ErrorBox>
+      {/* Searched, not listed: every job ever raised is thousands of rows
+          and megabytes to drop into a menu, and an override is filed
+          against one job whose number is already known. An empty box shows
+          the jobs with the most recent activity, so the one being priced
+          today is usually the first row. */}
       <Field label="Job" missing={miss.is("jobId")}>
-        <select {...miss.props("jobId")} value={form.jobId} onChange={e => set("jobId", e.target.value)}>
-          {jobs.length === 0 && <option value="">No jobs yet</option>}
-          {jobs.map(j => <option key={j.dbId} value={j.dbId}>{j.id} — {j.project || j.client}</option>)}
-        </select>
+        <SearchSelect
+          style={{ maxWidth: "none" }}
+          listId="override-job-list"
+          ariaLabel="Search jobs"
+          placeholder={job ? `${job.id} — search to change…` : "Search by job #, project or site…"}
+          search={text => Db.searchJobs({ page: 0, pageSize: 25, search: text, searchField: "any" })}
+          optionKey={j => j.dbId}
+          onPick={pickJob}
+          onError={setError}
+          renderOption={j => (
+            <>
+              <div style={{ fontSize: 15 }}>{j.id} — {j.project || "No project name"}</div>
+              <div style={{ fontSize: 11, color: "color-mix(in srgb, var(--color-text) 55%, transparent)" }}>
+                {j.client}{j.lsd ? ` · ${j.lsd}` : ""}
+              </div>
+            </>
+          )}
+        />
       </Field>
       <Field label="What it covers" missing={miss.is("description")}>
         <input {...miss.props("description")} autoFocus value={form.description} onChange={e => set("description", e.target.value)}

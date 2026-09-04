@@ -13,20 +13,22 @@ import { fetchAllPages, fetchAllKeyset, RESPONSE_ROW_CAP } from "./paging.js";
 
 // A source of `n` rows with ids 1..n, deletable mid-walk. Offset reads slice
 // the live array (which is what the database does); keyset reads take the
-// first cap rows whose id is greater than the cursor.
-function source(n) {
+// first `cap` rows whose id is greater than the cursor. `cap` is the API's
+// max-rows setting — 1000 unless a test lowers it, which is the thing the
+// walk must not mistake for the end of the rows.
+function source(n, cap = RESPONSE_ROW_CAP) {
   const rows = Array.from({ length: n }, (_, i) => ({ id: i + 1 }));
   return {
     rows,
     remove(id) { const i = rows.findIndex(r => r.id === id); if (i >= 0) rows.splice(i, 1); },
     page(p) {
       const from = p * RESPONSE_ROW_CAP;
-      return { rows: rows.slice(from, from + RESPONSE_ROW_CAP), total: rows.length };
+      return { rows: rows.slice(from, from + cap), total: rows.length };
     },
     after(key) {
       const start = key == null ? 0 : rows.findIndex(r => r.id > key);
       if (start < 0) return [];
-      return rows.slice(start, start + RESPONSE_ROW_CAP);
+      return rows.slice(start, start + cap);
     }
   };
 }
@@ -78,9 +80,22 @@ test("keyset paging stops rather than spinning when the key never advances", asy
   assert.equal(all.length, RESPONSE_ROW_CAP * 2);
 });
 
-test("keyset paging ends on the first short page", async () => {
+test("keyset paging walks every row when the source caps pages below the constant", async () => {
+  // The API's max-rows lowered to 250. Every page then comes back "short",
+  // and a walk that trusted the constant would have stopped at 250 rows and
+  // called that the whole timesheet.
+  const s = source(RESPONSE_ROW_CAP, 250);
+  const all = await fetchAllKeyset(key => s.after(key));
+  assert.equal(all.length, RESPONSE_ROW_CAP);
+  assert.equal(all[all.length - 1].id, RESPONSE_ROW_CAP);
+});
+
+test("keyset paging ends when the rows run out", async () => {
+  // The price of learning the page size from the first page: a source whose
+  // rows run out exactly on a page boundary is asked once more and answers
+  // with nothing. Two requests, not one — and never fewer rows than exist.
   let calls = 0;
-  const all = await fetchAllKeyset(() => { calls++; return [{ id: 1 }, { id: 2 }]; });
-  assert.equal(calls, 1);
+  const all = await fetchAllKeyset(key => { calls++; return key == null ? [{ id: 1 }, { id: 2 }] : []; });
+  assert.equal(calls, 2);
   assert.equal(all.length, 2);
 });

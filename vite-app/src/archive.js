@@ -20,6 +20,9 @@ import { OfflineCache } from "./offlineCache.js";
 const enc = new TextEncoder();
 const text = s => enc.encode(String(s ?? ""));
 
+// How many field invoices are rendered at once. See mapLimit below.
+const INVOICE_CONCURRENCY = 4;
+
 export function archiveZipName(mode, from, to) {
   if (mode === "year") return `Archive ${String(from).slice(0, 4)}.zip`;
   return `Archive ${from} to ${to}.zip`;
@@ -83,6 +86,43 @@ const row = (label, value) => (value ? `${label}: ${value}` : null);
 
 // A CSV cell: quoted, and never a formula (a client name starting with
 // "=" is a spreadsheet's to run otherwise).
+// `n` at a time over a list, answers in the list's order. The invoices are
+// the only part of a build worth doing concurrently — each one is an Edge
+// Function call, and a year of them one after another is over an hour of
+// waiting on the network with nothing else happening. Four at once is enough
+// to stop that and few enough that a truck's connection isn't drowned.
+//
+// `fn` is expected to answer rather than throw (the caller wraps its own
+// failures), and the order is the input's, so the zip is the same file
+// whatever order the answers came back in.
+export async function mapLimit(items, n, fn) {
+  const out = new Array(items.length);
+  let next = 0;
+  const worker = async () => {
+    for (;;) {
+      const i = next++;
+      if (i >= items.length) return;
+      out[i] = await fn(items[i], i);
+    }
+  };
+  await Promise.all(Array.from({ length: Math.max(1, Math.min(n, items.length)) }, worker));
+  return out;
+}
+
+// What has changed under a job between the archive being built and the clear
+// being pressed. `was` is what the build read; `now` is what the server says
+// a moment before the delete. Anything but "the same" stops the clear: work
+// filed in between is not in the zip, and checking the download cannot see
+// that — it only proves the file on disk is the build.
+export function archiveDrift(job, was, now) {
+  if (!was) return `Job ${job.id} wasn't in the archive that was built — build it again.`;
+  for (const [key, one, many] of [["tickets", "a ticket", "tickets"], ["jhas", "an assessment", "assessments"], ["reports", "a report", "reports"]]) {
+    if (now[key] > was[key]) return `Job ${job.id} has gained ${one} since the archive was built — build it again.`;
+    if (now[key] < was[key]) return `Job ${job.id} has lost ${one}: its ${many} are not what the archive holds — build it again.`;
+  }
+  return "";
+}
+
 export function csvCell(v) {
   let s = v == null ? "" : String(v);
   if (/^[=+\-@]/.test(s)) s = "'" + s;
@@ -188,7 +228,10 @@ export async function buildArchive({ jobs, mode, from, to, by = "", onProgress =
     // Assessments and reports with no PDF ever filed: nothing to retrieve;
     // their details are in the job text file.
     notOnFile: [],
-    bytes: 0, beforeGstCents: 0, clients: new Set()
+    bytes: 0, beforeGstCents: 0, clients: new Set(),
+    // Per job, keyed by its database id: what the build read of it. The
+    // clear checks these against a fresh read before deleting anything.
+    jobCounts: {}
   };
   const range = mode === "year" ? `archive of ${String(from).slice(0, 4)}` : `archive of ${from} to ${to}`;
   const meta = { at: fmtWhen(new Date().toISOString()), by, range };
@@ -270,28 +313,75 @@ export async function buildArchive({ jobs, mode, from, to, by = "", onProgress =
       }
     }
 
+    // The job's tickets in two reads rather than two each. Asked per ticket,
+    // a year was some thirty thousand sequential round trips before the zip
+    // even started — and this was the one await in the loop outside a try,
+    // so a single blip threw the whole build away hours in. A failure here
+    // now lands in `missing` like every other unretrieved thing, and the
+    // build carries on to the next job.
+    const ids = ticketRows.map(t => t.id);
+    let details = new Map(), crews = new Map(), detailsFailed = false;
+    if (ids.length) {
+      say(`${ids.length} ticket${ids.length === 1 ? "" : "s"}`);
+      try {
+        details = await db.listTicketsForArchive(ids);
+      } catch (e) {
+        detailsFailed = true;
+        missing.push(`The details of ${ids.length} ticket(s): ${e.message || "read failed"}`);
+      }
+      try {
+        crews = await db.listCrewForTickets(ids);
+      } catch (e) {
+        missing.push(`The crew hours on ${ids.length} ticket(s): ${e.message || "read failed"}`);
+      }
+    }
+    // Rendered a few at a time, filed one at a time below: `add` and
+    // uniqueName are order-dependent, and the manifest has to come out the
+    // same every build. Not at all if the tickets themselves couldn't be
+    // read — each invoice is an Edge Function call, and every one of them
+    // would be thrown away below.
+    let done = 0;
+    const rendered = detailsFailed ? [] : await mapLimit(ticketRows, INVOICE_CONCURRENCY, async t => {
+      let out;
+      try { out = { html: await db.renderTicketInvoice(t.id) }; }
+      catch (e) { out = { error: e.message || "render failed" }; }
+      say(`invoice ${++done} of ${ticketRows.length}`);
+      return out;
+    });
+
     const tickets = [];
     let jobCents = 0;
-    for (const t of ticketRows) {
-      say(`ticket ${t.id}`);
-      const [full, crew] = await Promise.all([db.getTicketForArchive(t.id), db.listCrewForTicket(t.id)]);
+    for (let k = 0; k < ticketRows.length; k++) {
+      const t = ticketRows[k];
+      const full = details.get(t.id);
+      // Nothing read for this ticket. When the whole read failed that is
+      // already said once above; a ticket the server simply didn't return is
+      // its own gap and gets its own line.
+      if (!full) {
+        if (!detailsFailed) missing.push(`Ticket ${t.id}: the server didn't return it`);
+        continue;
+      }
       let invoiceFile = "";
-      try {
-        const html = await db.renderTicketInvoice(t.id);
+      const inv = rendered[k] || { error: "not rendered" };
+      if (inv.error) missing.push(`Invoice ${t.id}: ${inv.error}`);
+      else {
         const name = uniqueName(used, `${t.id}.html`, "invoice.html");
-        add(`${folder}/Invoices/${name}`, text(html));
+        add(`${folder}/Invoices/${name}`, text(inv.html));
         invoiceFile = `Invoices/${name}`;
         summary.invoices++;
-      } catch (e) {
-        missing.push(`Invoice ${t.id}: ${e.message || "render failed"}`);
       }
-      tickets.push({ ...full, crew, invoiceFile });
+      tickets.push({ ...full, crew: crews.get(t.id) || [], invoiceFile });
       summary.tickets++;
       if (full.status === "Awaiting approval") summary.awaiting++;
       if (full.status === "Approved" || full.status === "Invoiced") summary.approved++;
       jobCents += cents(full.total);
     }
     summary.beforeGstCents += jobCents;
+    // What this job held when it was read, so the clear can look again a
+    // moment before it deletes and refuse a job that has gained work since.
+    // The counts are the lists as they came back, not what made it into the
+    // zip: they are being compared with the same three reads later.
+    summary.jobCounts[String(job.dbId)] = { tickets: ticketRows.length, jhas: jhas.length, reports: reports.length };
 
     add(`${folder}/Job details.txt`, text(jobDetailsText({ job, record, tickets, jhas, reports, missing, notOnFile, meta })));
     summary.missing.push(...missing.map(m => `${job.id}: ${m}`));

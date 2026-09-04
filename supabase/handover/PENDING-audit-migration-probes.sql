@@ -5,9 +5,11 @@
 -- HOW TO RUN
 --   Run each numbered block WHOLE — the begin/rollback pair is what makes
 --   `set local role` and `set local request.jwt.claims` local. Run block 0
---   first (it names the fixtures the rest pick up), then run blocks 1-7
---   BEFORE applying the migration and keep the output; apply; run 1-7
+--   first (it names the fixtures the rest pick up), then run blocks 1-12
+--   BEFORE applying the migration and keep the output; apply; run 1-12
 --   again and diff. Each block says what the two runs should say.
+--   Block 12 is the exception: it calls a function that does not exist yet,
+--   so before the migration it raises 42883 and that IS its "before".
 --
 -- WHAT ROLE SIMULATION ACTUALLY SIMULATES
 --   `set local role authenticated` puts us in the API's role, so RLS is
@@ -24,6 +26,10 @@
 -- Read the ids the later blocks look up, so the output can be read back
 -- against real accounts. Live today: 2 Admins, 21 Technicians, 21 Helpers,
 -- 0 Coordinators, 0 deactivated, 0 with an empty tab_access.
+--
+-- deactivated_id null is why block 5b raises rather than runs: with nobody
+-- locked there is nothing for it to prove. That is the block telling you
+-- so, not a failure of the migration.
 
 select 'fixture census' as probe, role, count(*) as n,
        count(*) filter (where deactivated_at is not null) as deactivated,
@@ -280,15 +286,33 @@ select '5a · projection of the new bodies' as probe,
  order by (p.deactivated_at is null), p.role, p.created_at
  limit 20;
 
--- 5b · The live version, if there is a deactivated account to point at.
---      Skip the block if 'chosen fixtures' showed deactivated_id null.
+-- 5b · The live version, against a real locked account.
+--      WITH NO DEACTIVATED ACCOUNT THIS BLOCK MUST NOT QUIETLY PASS. With
+--      0 locked accounts live, 'sub' would be null, auth.uid() would be
+--      null, and every column below would read null/false — which is
+--      exactly what "after" is supposed to look like, so the block would
+--      agree with the fix before the fix existed and prove nothing. It
+--      therefore raises instead: no fixture, no result. Run 5c (or lock a
+--      seed account for real) and come back.
+--
+--      The guard is a cast that cannot succeed, built from a column so the
+--      planner cannot fold it to a constant and raise it even when the
+--      fixture DOES exist — coalesce only reaches its second argument at
+--      run time, and only when the first is null. The error text is the
+--      instruction.
+--
 --      BEFORE: the stale claim wins — user_role 'Technician', is_staff
 --              true, the ban is invisible to the database for an hour.
 --      AFTER:  user_role null, is_staff false, tab_count 0.
 begin;
 select set_config('request.jwt.claims', json_build_object(
-    'sub',  (select id::text from public.profiles
-              where deactivated_at is not null limit 1),
+    'sub',  coalesce(
+              (select id::text from public.profiles
+                where deactivated_at is not null limit 1),
+              (select ('5b NEEDS A DEACTIVATED ACCOUNT: none is locked, so this block would '
+                       || 'prove nothing. Run 5c, or lock a seed account, then rerun. '
+                       || p.id::text)::uuid::text
+                 from public.profiles p limit 1)),
     'role', 'authenticated',
     'app_metadata', json_build_object(
       'app_role',   'Technician',
@@ -304,11 +328,13 @@ select '5b · locked account, unexpired token' as probe,
        (select public.is_staff())     as would_read_contacts;
 rollback;
 
--- 5c · OPTIONAL, and a WRITE — left commented deliberately. It deactivates
---      a seed account inside a transaction that ends in ROLLBACK, so
---      nothing persists, and it is the only way to prove 5b end-to-end
---      while no account is locked. Run it only if Kyle wants it, and read
---      the ROLLBACK before you press anything.
+-- 5c · A WRITE — left commented deliberately. It deactivates a seed
+--      account inside a transaction that ends in ROLLBACK, so nothing
+--      persists, and it is the only way to prove 5b end-to-end while no
+--      account is locked. It is what 5b's error is asking for: uncomment
+--      and run the whole block, or lock a seed account for real from the
+--      Users screen and then run 5b as written. Read the ROLLBACK before
+--      you press anything.
 --
 -- begin;
 --   update public.profiles set deactivated_at = now(), tab_access = '{}'
@@ -478,6 +504,16 @@ select '7c · cascades off jobs' as probe,
 -- every account when private's USAGE was missing. Both functions below are
 -- invoker-rights and both name it, so they get called as `authenticated`
 -- before this is called done. Expect rows, not an error.
+--
+-- The arguments are spelled out on purpose. status_filter must be 'All',
+-- never null: the body tests `status_filter = 'All' or t.status =
+-- status_filter`, and null makes both of those null, so a null filter
+-- returns zero rows — the probe would pass having proved only that nothing
+-- raised. page_num is 0 for the same reason: page 1 of a 5-row page can be
+-- empty on its own. And a row count alone would not notice the money going
+-- missing, so both blocks count the rows that carry a total. An Admin and
+-- a Technician both see prices, so rows_with_money must equal
+-- rows_returned in both, before and after.
 
 begin;
 select set_config('request.jwt.claims', json_build_object(
@@ -494,13 +530,17 @@ set local role authenticated;
 select '8a · ticket_tracker_stats as Admin' as probe, *
   from public.ticket_tracker_stats();
 
-select '8b · search_tickets as Admin' as probe, count(*) as rows_returned
-  from public.search_tickets(null, 1, 5, null, null, null);
+select '8b · search_tickets as Admin' as probe,
+       count(*)                                     as rows_returned,
+       count(*) filter (where s.total is not null)  as rows_with_money,
+       max(s.filtered_total)                        as filtered_total
+  from public.search_tickets('All', 0, 5, '', null, null) s;
 rollback;
 
 -- 8c · The same two, as a Technician: they must answer, and search_tickets
 --      must still hand a Technician its money (Technicians see prices) —
---      what matters here is only that neither raises.
+--      so rows_with_money must equal search_rows here too. If it comes
+--      back 0 against a non-zero search_rows, the role lost its prices.
 begin;
 select set_config('request.jwt.claims', json_build_object(
     'sub',  (select id::text from public.profiles
@@ -514,21 +554,38 @@ select set_config('request.jwt.claims', json_build_object(
 set local role authenticated;
 
 select '8c · tracker + search as Technician' as probe,
-       (select count(*) from public.ticket_tracker_stats())                as stats_rows,
-       (select count(*) from public.search_tickets(null,1,5,null,null,null)) as search_rows;
+       (select count(*) from public.ticket_tracker_stats())                 as stats_rows,
+       (select count(*) from public.search_tickets('All',0,5,'',null,null)) as search_rows,
+       (select count(*) filter (where s.total is not null)
+          from public.search_tickets('All',0,5,'',null,null) s)             as rows_with_money;
 rollback;
 
 
 -- ═══ 9 · Nothing else reads the token ═══════════════════════════════════
--- Must return no rows both before and after the migration EXCEPT for
--- private.tab_access and private.user_role, which must appear before and
--- disappear after.
+-- 9a searches for BOTH spellings. auth.jwt() is one way to read the claim;
+-- current_setting('request.jwt.claims') is the other, and the first draft
+-- of this probe looked only for the first — which would have reported a
+-- clean sweep while private.guard_job_update sat there reading the claim
+-- through current_setting.
+--
+--   BEFORE: private.guard_job_update, private.tab_access, private.user_role.
+--   AFTER:  private.guard_job_update ALONE, and that one stays on purpose.
+--           It reads the claim's `role` — 'authenticated' vs
+--           'service_role' vs absent — to tell an API call from the SQL
+--           editor or a migration. That is a fact about the CONNECTION,
+--           which the token is still the honest source of; it never asks
+--           the claim who you are or what rank you hold. Anything else in
+--           this list after the migration is a function that still
+--           believes the token, and belongs in the next round.
 
-select '9a · functions naming auth.jwt()' as probe,
-       n.nspname as schema, p.proname as name
+select '9a · functions reading the token' as probe,
+       n.nspname as schema, p.proname as name,
+       (p.prosrc ilike '%auth.jwt%')     as via_auth_jwt,
+       (p.prosrc ilike '%request.jwt%')  as via_current_setting
   from pg_proc p join pg_namespace n on n.oid = p.pronamespace
- where n.nspname in ('public','private') and p.prosrc ilike '%auth.jwt%'
- order by 1, 2;
+ where n.nspname in ('public','private')
+   and (p.prosrc ilike '%auth.jwt%' or p.prosrc ilike '%request.jwt%')
+ order by 2, 3;
 
 -- 9b · No policy anywhere compares against the token directly. Empty
 --      before and after.
@@ -540,19 +597,273 @@ select '9b · policies naming jwt' as probe, schemaname, tablename, policyname
 -- 9c · Every policy still wraps these helpers in (select …), so the
 --      table-backed bodies cost one InitPlan per statement and not one
 --      lookup per row. Empty before and after.
+--
+--      Counted, not matched. The first draft asked "does this policy
+--      contain a wrapped call?" — which a policy with three calls passes
+--      on the strength of one, and the jhas and reports storage policies
+--      have three apiece. So: count every call site, count the wrapped
+--      ones, and print any policy where the two numbers disagree. Every
+--      schema, storage's sixteen included.
 select '9c · unwrapped helper calls in policies' as probe,
-       schemaname, tablename, policyname, cmd
-  from pg_policies
- where (coalesce(qual,'')||' '||coalesce(with_check,'')) ~ '(user_role|has_any_tab|has_tab|tab_access|is_staff)\('
-   and (coalesce(qual,'')||' '||coalesce(with_check,''))
-       !~ 'SELECT (private\.)?(user_role|has_any_tab|has_tab|tab_access|is_staff)'
+       c.schemaname, c.tablename, c.policyname, c.cmd,
+       c.calls, c.wrapped, c.calls - c.wrapped as unwrapped
+  from (
+    select p.schemaname, p.tablename, p.policyname, p.cmd,
+           (select count(*) from regexp_matches(
+              coalesce(p.qual,'')||' '||coalesce(p.with_check,''),
+              '(private\.)?(user_role|has_any_tab|has_tab|tab_access|is_staff)\s*\(', 'g')) as calls,
+           (select count(*) from regexp_matches(
+              coalesce(p.qual,'')||' '||coalesce(p.with_check,''),
+              'SELECT\s+(private\.)?(user_role|has_any_tab|has_tab|tab_access|is_staff)\s*\(', 'g')) as wrapped
+      from pg_policies p
+  ) c
+ where c.calls <> c.wrapped
  order by 2, 3;
 
--- 9d · The token hook is untouched: it still stamps app_metadata, because
---      the app still draws its menu from the claim. Only the database has
---      stopped believing it.
+-- 9d · The token hook is untouched: it still stamps app_metadata. Not
+--      because anything reads it — the app draws its menu from the
+--      profiles row it fetches on sign-in (session.js), and a search of
+--      vite-app, the Worker and the Edge Functions turns up no reader of
+--      app_metadata anywhere — but because pulling an auth hook out is its
+--      own change with its own blast radius, and this migration is already
+--      six seams wide. After this, the claim has no reader on either
+--      side; removing the hook is the follow-up, once this has been live
+--      long enough to be sure. Both columns true before and after.
 select '9d · hook still writes the claim' as probe,
        (pg_get_functiondef(p.oid) like '%app_metadata%') as writes_app_metadata,
        (pg_get_functiondef(p.oid) like '%tab_access%')   as writes_tab_access
   from pg_proc p join pg_namespace n on n.oid = p.pronamespace
  where n.nspname = 'public' and p.proname = 'custom_access_token_hook';
+
+
+-- ═══ 10 · Storage answers to the same people it did ═════════════════════
+-- Sixteen policies on storage.objects gate the five buckets, and every one
+-- of them asks private.has_tab() or private.user_role() — the two bodies
+-- section 1 replaces. Nothing above touches storage at all, so this counts
+-- what each simulated account can actually see, bucket by bucket. An
+-- account whose token was never lying must see the identical counts before
+-- and after; a stale claim must lose what its borrowed rank was buying.
+--
+-- Read the numbers as a set: a bucket missing from a run is zero visible
+-- objects there, which is a real answer and not a missing row.
+
+-- 10a · An honest Technician. Identical before and after. chat-media (the
+--       chat tab), jhas and reports (job/jha/upload tabs) show what the
+--       tabs buy; timesheets shows only this account's own folder.
+begin;
+select set_config('request.jwt.claims', json_build_object(
+    'sub',  (select id::text from public.profiles
+              where role = 'Technician' and deactivated_at is null
+              order by created_at limit 1),
+    'role', 'authenticated',
+    'app_metadata', json_build_object(
+      'app_role',   'Technician',
+      'tab_access', public.tabs_for_role('Technician'))
+  )::text, true);
+set local role authenticated;
+
+select '10a · honest Technician, storage' as probe,
+       o.bucket_id, count(*) as visible
+  from storage.objects o
+ group by o.bucket_id
+ order by 2;
+rollback;
+
+-- 10b · A real Admin. Identical before and after, and the only account that
+--       sees every timesheet folder. If this run loses rows, the migration
+--       has taken something from the person who needs it most.
+begin;
+select set_config('request.jwt.claims', json_build_object(
+    'sub',  (select id::text from public.profiles
+              where role = 'Admin' and deactivated_at is null
+              order by created_at limit 1),
+    'role', 'authenticated',
+    'app_metadata', json_build_object(
+      'app_role',   'Admin',
+      'tab_access', public.tabs_for_role('Admin'))
+  )::text, true);
+set local role authenticated;
+
+select '10b · real Admin, storage' as probe,
+       o.bucket_id, count(*) as visible
+  from storage.objects o
+ group by o.bucket_id
+ order by 2;
+rollback;
+
+-- 10c · The stale Admin claim on a Technician's row — the storage half of
+--       block 2c. The timesheets read policy is Admin OR your own folder,
+--       so this is the bucket that moves.
+--       BEFORE: timesheets shows everyone's folders, matching 10b.
+--       AFTER:  timesheets shows this account's own folder only, matching
+--               10a. Every other bucket reads the same in both runs.
+begin;
+select set_config('request.jwt.claims', json_build_object(
+    'sub',  (select id::text from public.profiles
+              where role = 'Technician' and deactivated_at is null
+              order by created_at limit 1),
+    'role', 'authenticated',
+    'app_metadata', json_build_object(
+      'app_role',   'Admin',
+      'tab_access', public.tabs_for_role('Admin'))
+  )::text, true);
+set local role authenticated;
+
+select '10c · stale Admin claim, storage' as probe,
+       o.bucket_id, count(*) as visible
+  from storage.objects o
+ group by o.bucket_id
+ order by 2;
+rollback;
+
+
+-- ═══ 11 · The equipment screen's day ════════════════════════════════════
+-- Finding 5. The functions counted against current_date, which is UTC; the
+-- tag on the row is computed in the browser, in Grande Prairie time.
+--
+-- 11a is the mechanism, and it is honest at any hour: it prints both dates
+-- and the hour it is locally. days_apart is 1 whenever this is run after
+-- 18:00 in Grande Prairie (17:00 in the winter) and 0 the rest of the day
+-- — so a 0 here does not mean there was no bug, it means you are running
+-- the probe in the morning. Read it beside 11b.
+select '11a · the two days' as probe,
+       current_date                                        as utc_today,
+       (now() at time zone 'America/Edmonton')::date        as edmonton_today,
+       current_date - (now() at time zone 'America/Edmonton')::date as days_apart,
+       to_char(now() at time zone 'America/Edmonton', 'HH24:MI') as local_time;
+
+-- 11b · The equipment the two days disagree about: a row due exactly on
+--       the Edmonton date, which the browser tags "due soon" (0 days left)
+--       while UTC has already gone past it and calls it overdue, and the
+--       same story at the far edge of the 30-day window.
+--
+--       READ THIS HONESTLY. A row only trips it if its calibration_due
+--       lands on one of the two boundary days, so a zero here is not proof
+--       of anything on its own — the fleet on file today is four items,
+--       three of them due 2027-08-13, so this reads 0 at every hour of
+--       every day until a due date comes round. The mechanism is 11a and
+--       the diff of the two function bodies; 11b is the standing check
+--       that goes non-zero the moment the fleet does have a date on the
+--       boundary, and it must read 0 after the migration at ANY hour.
+select '11b · rows the two days disagree about' as probe,
+       count(*) filter (
+         where e.calibration_due is not null
+           and (e.calibration_due < current_date)
+             is distinct from
+               (e.calibration_due < (now() at time zone 'America/Edmonton')::date)
+       ) as overdue_disagreements,
+       count(*) filter (
+         where e.calibration_due is not null
+           and (e.calibration_due >= current_date and e.calibration_due <= current_date + 30)
+             is distinct from
+               (e.calibration_due >= (now() at time zone 'America/Edmonton')::date
+                and e.calibration_due <= (now() at time zone 'America/Edmonton')::date + 30)
+       ) as due_soon_disagreements
+  from public.equipment e;
+
+-- 11c · What the functions themselves say, called as a Technician — the
+--       tile beside the filter that fills it. They are the pair that has
+--       to agree; a tile saying 1 over a list saying none is the shape the
+--       crew actually saw. stat_overdue must equal filter_overdue and
+--       stat_due_soon must equal filter_due_soon, before and after.
+--       All four are 0 on today's fleet (four items, calibration due
+--       2027-08-13), so this is a shape check now and a real one later.
+--       It doubles as the invoker-rights check for these two: both are
+--       called as `authenticated` here, and both must answer.
+begin;
+select set_config('request.jwt.claims', json_build_object(
+    'sub',  (select id::text from public.profiles
+              where role = 'Technician' and deactivated_at is null
+              order by created_at limit 1),
+    'role', 'authenticated',
+    'app_metadata', json_build_object(
+      'app_role',   'Technician',
+      'tab_access', public.tabs_for_role('Technician'))
+  )::text, true);
+set local role authenticated;
+
+select '11c · stats beside the filter' as probe,
+       (select s.overdue_count  from public.equipment_stats() s) as stat_overdue,
+       (select s.due_soon_count from public.equipment_stats() s) as stat_due_soon,
+       (select count(*) from public.search_equipment('Overdue',  0, 1000, '')) as filter_overdue,
+       (select count(*) from public.search_equipment('Due soon', 0, 1000, '')) as filter_due_soon;
+rollback;
+
+
+-- ═══ 12 · dose_totals, called by a non-owner ════════════════════════════
+-- Finding 6, and CLAUDE.md's three-minute outage again: dose_totals runs
+-- as the CALLER and names private.user_role(), so it is parsed at call
+-- time and needs USAGE on schema private — which `authenticated` has since
+-- 20260903055300, and which nothing proves until somebody who is not the
+-- owner actually calls it. That somebody is this block.
+--
+-- BEFORE: 12a and 12b raise 42883, function public.dose_totals(date, date)
+--         does not exist. That is the correct "before" — do not try to
+--         make them return rows. 12c is the arithmetic they will replace
+--         and answers in both runs.
+-- AFTER:  rows, or zero rows, but never an error.
+
+-- 12a · A Technician. Sees its own dose and nobody else's: the crew read
+--       policy would also show it a crewmate's row on a ticket they
+--       shared, so the function narrows to own-or-Admin the way the ledger
+--       screen has always narrowed it. distinct_people must be 0 or 1.
+begin;
+select set_config('request.jwt.claims', json_build_object(
+    'sub',  (select id::text from public.profiles
+              where role = 'Technician' and deactivated_at is null
+              order by created_at limit 1),
+    'role', 'authenticated',
+    'app_metadata', json_build_object(
+      'app_role',   'Technician',
+      'tab_access', public.tabs_for_role('Technician'))
+  )::text, true);
+set local role authenticated;
+
+select '12a · dose_totals as Technician' as probe,
+       count(*)                                as distinct_people,
+       coalesce(sum(d.days), 0)                as crew_rows_behind_it,
+       coalesce(sum(d.total_mr), 0)            as mr,
+       coalesce(sum(d.q1 + d.q2 + d.q3 + d.q4), 0) as quarters_sum
+  from public.dose_totals(date_trunc('year', now() at time zone 'America/Edmonton')::date,
+                          (now() at time zone 'America/Edmonton')::date) d;
+rollback;
+
+-- 12b · An Admin, over the same year. distinct_people is everyone who
+--       carried a DRD; quarters_sum must equal mr exactly, because the four
+--       quarters are the same rows partitioned four ways; and all three
+--       numbers must equal 12c, which is the read the screen does today.
+--       On this morning's data that is 44 people, 31,823 crew rows and
+--       230,066.06 mR.
+begin;
+select set_config('request.jwt.claims', json_build_object(
+    'sub',  (select id::text from public.profiles
+              where role = 'Admin' and deactivated_at is null
+              order by created_at limit 1),
+    'role', 'authenticated',
+    'app_metadata', json_build_object(
+      'app_role',   'Admin',
+      'tab_access', public.tabs_for_role('Admin'))
+  )::text, true);
+set local role authenticated;
+
+select '12b · dose_totals as Admin' as probe,
+       count(*)                                    as distinct_people,
+       coalesce(sum(d.days), 0)                    as crew_rows_behind_it,
+       coalesce(sum(d.total_mr), 0)                as mr,
+       coalesce(sum(d.q1 + d.q2 + d.q3 + d.q4), 0) as quarters_sum
+  from public.dose_totals(date_trunc('year', now() at time zone 'America/Edmonton')::date,
+                          (now() at time zone 'America/Edmonton')::date) d;
+rollback;
+
+-- 12c · The arithmetic the screen does today, as the owner, over the same
+--       year — the number 12b has to match. Also the size of what the
+--       browser was being sent to work it out.
+select '12c · what the ledger reads today' as probe,
+       count(distinct c.profile_id) as distinct_people,
+       count(*)                     as crew_rows_behind_it,
+       sum(c.dose_mr)               as mr
+  from public.ticket_crew c
+  join public.tickets t on t.id = c.ticket_id
+ where t.work_date >= date_trunc('year', now() at time zone 'America/Edmonton')::date
+   and t.work_date <= (now() at time zone 'America/Edmonton')::date
+   and c.dose_mr > 0;

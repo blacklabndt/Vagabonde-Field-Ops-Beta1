@@ -20,6 +20,7 @@ const nav = { onLine: true };
 Object.defineProperty(globalThis, "navigator", { value: nav, configurable: true, writable: true });
 
 const { OfflineCache } = await import("./offlineCache.js");
+const { IDENTITY_KEY } = await import("./session.js");
 
 // readThrough deliberately does not await the write it starts — a read must
 // not wait on disk. So poll for the outcome instead of sleeping.
@@ -208,6 +209,57 @@ test("signing out empties the cache — and the guard that skips writes with it"
   await OfflineCache.readThrough("rates.default", async () => rates);
   const hit = await eventually(() => OfflineCache.read("rates.default"), "the rebuilt offline copy");
   assert.deepEqual(hit.value, rates);
+});
+
+test("a different signer empties the device first; the same one keeps their work", async () => {
+  await OfflineCache.claimFor("tech-a");
+  // Halfway through a ticket when the session lapsed. The lapse takes the
+  // remembered identity, not the work.
+  await OfflineCache.put("ticket.wip.J-77", { weldLines: [{ key: "rt_film:2in", qty: 14 }] });
+
+  assert.equal(await OfflineCache.claimFor("tech-a"), false, "signing back in is not a handover");
+  assert.ok(await OfflineCache.read("ticket.wip.J-77"), "their own half-entered ticket is still here");
+
+  assert.equal(await OfflineCache.claimFor("tech-b"), true, "a different account is");
+  assert.equal(await OfflineCache.read("ticket.wip.J-77"), null, "and the last crew's hours went with the clear");
+  assert.equal(await OfflineCache.owner(), "tech-b");
+});
+
+test("an unclaimed device whose remembered identity is this person keeps its cache", async () => {
+  // The state every tablet in the crew is in the first time a build that
+  // records owners starts up: an identity from the last sign-in, and no owner
+  // beside it. Treating that as a stranger's device would empty the store of
+  // the person doing the signing in, half-entered ticket and all.
+  await OfflineCache.put(IDENTITY_KEY, { id: "tech-a", name: "Kyle Keith" });
+  await OfflineCache.put("ticket.wip.J-77", { weldLines: [{ key: "rt_film:2in", qty: 14 }] });
+  assert.equal(await OfflineCache.owner(), null);
+
+  assert.equal(await OfflineCache.claimFor("tech-a"), false, "adopting what is already theirs is not a handover");
+  assert.ok(await OfflineCache.read("ticket.wip.J-77"), "so this morning's welds are still here");
+  assert.equal(await OfflineCache.owner(), "tech-a", "and the device is claimed from now on");
+
+  // Somebody else arriving at the same unclaimed device is still a handover.
+  await OfflineCache.clear();
+  await OfflineCache.put(IDENTITY_KEY, { id: "tech-a", name: "Kyle Keith" });
+  await OfflineCache.put("ticket.wip.J-77", { weldLines: [] });
+  assert.equal(await OfflineCache.claimFor("tech-b"), true);
+  assert.equal(await OfflineCache.read("ticket.wip.J-77"), null, "the last crew's hours are not the new signer's to see");
+});
+
+test("a device nobody has claimed is emptied on the next sign-in", async () => {
+  // Either a store written before owners were recorded, or one whose owner
+  // was cleared with it. Unknown provenance is not "mine".
+  await OfflineCache.put("job.J-9", { id: "J-9" });
+  assert.equal(await OfflineCache.owner(), null);
+
+  assert.equal(await OfflineCache.claimFor("tech-a"), true);
+  assert.equal(await OfflineCache.read("job.J-9"), null);
+  assert.equal(await OfflineCache.owner(), "tech-a");
+
+  // And a clear takes the ownership with it — an empty store belongs to
+  // nobody, so the next signer isn't handed a claim over data that is gone.
+  await OfflineCache.clear();
+  assert.equal(await OfflineCache.owner(), null);
 });
 
 test("subscribers are told the state at once and on every change", async () => {

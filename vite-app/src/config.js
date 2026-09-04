@@ -63,6 +63,29 @@ function fetchWithCeiling(input, init = {}) {
     .finally(() => clearTimeout(timer));
 }
 
+// Where supabase-js keeps the signed-in session. It derives this key from the
+// project ref on its own; naming it here and handing it back is the only way
+// the two cannot drift, and forgetStoredSession below has to be able to reach
+// the exact key the client wrote.
+export const AUTH_STORAGE_KEY = `sb-${new URL(SUPABASE_URL).hostname.split(".")[0]}-auth-token`;
+
 export const sbClient = createClient(SUPABASE_URL, SUPABASE_ANON_KEY, {
+  auth: { storageKey: AUTH_STORAGE_KEY },
   global: { fetch: fetchWithCeiling }
 });
+
+// Signing out is not always a sign-out.
+//
+// auth-js loads the session before it revokes anything, and loading it with
+// an expired access token means refreshing it over the network. On a tablet
+// out of range that refresh fails, and the failure is returned as the
+// sign-out's error — before the stored session has been removed. So the
+// person is shown the sign-in screen, the session is still on disk, and the
+// next reload in signal refreshes it and signs them straight back in with no
+// password. On a shared tablet that is the whole problem this app's sign-out
+// exists to solve, so wherever signOut answers with an error, the stored
+// session is removed here instead.
+export function forgetStoredSession() {
+  try { window.localStorage.removeItem(AUTH_STORAGE_KEY); }
+  catch (e) { console.error("Couldn't remove the stored session:", e); }
+}

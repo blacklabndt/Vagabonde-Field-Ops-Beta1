@@ -1,5 +1,5 @@
 import React, { useState, useEffect } from "react";
-import { sbClient } from "../config.js";
+import { sbClient, forgetStoredSession } from "../config.js";
 import { tabList, Blueprint, Btn, Field, ErrorBox } from "./common.jsx";
 import { OfflineCache } from "../offlineCache.js";
 import { IDENTITY_KEY } from "../session.js";
@@ -81,17 +81,32 @@ export function SignInScreen({ onSignIn }) {
     if (!profile) {
       setError("Signed in, but no profile is set up for this account yet — ask an admin to add you in Users & access.");
       // Same as the no-tabs branch below: an account the app has judged
-      // unusable must not leave a live session on a shared tablet.
-      await sbClient.auth.signOut();
+      // unusable must not leave a live session on a shared tablet — and a
+      // signOut that answered with an error left one, so the stored session
+      // is removed by hand. See forgetStoredSession.
+      { const { error: outErr } = await sbClient.auth.signOut(); if (outErr) forgetStoredSession(); }
       return;
     }
     const tabs = tabList(profile.tab_access);
     if (!tabs.length) {
       setError("This account has no screens enabled yet — ask an admin to grant access in Users & access.");
-      await sbClient.auth.signOut();
+      { const { error: outErr } = await sbClient.auth.signOut(); if (outErr) forgetStoredSession(); }
       return;
     }
     const identity = { id: profile.id, name: profile.name, email: data.user.email, role: profile.role, cert: profile.cert, tabs };
+    // The door this device's remembered data is protected at. Signing in as
+    // anyone but its last owner empties it first — the previous crew's jobs,
+    // rates and half-entered tickets are not this signer's to read offline.
+    // Signing back in as the same person keeps all of it, which is the point:
+    // a lapsed session removes the remembered identity but leaves the work.
+    try { await OfflineCache.claimFor(profile.id); }
+    catch (e) {
+      // A store that would not empty leaves no owner recorded, so the next
+      // sign-in tries again rather than treating it as claimed. Signing in
+      // still goes ahead: nobody is trapped on the sign-in screen because
+      // IndexedDB is wedged.
+      console.error("Couldn't clear the previous account's cached data:", e);
+    }
     // Remembered so the next start with no signal knows who this is, rather
     // than showing a sign-in form that cannot reach the server anyway.
     OfflineCache.put(IDENTITY_KEY, identity);

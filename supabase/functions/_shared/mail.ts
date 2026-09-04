@@ -119,9 +119,34 @@ export async function sendMail(opts: {
     if (/not verified/i.test(msg)) {
       throw new Error(`Resend refused the sending address ${from}: ${msg} On the Admin screen, clear the sending addresses to go back to testing mode, or use an address on the domain verified at resend.com/domains.`);
     }
+    // "Slow down" and "try again" are not the same answer as "that address is
+    // wrong", and the bulk chase is the caller that has to tell them apart: it
+    // has thousands of approval emails to get out, and a refusal it can wait
+    // for should be waited for, not counted as a ticket the office must now
+    // chase by hand. Only the message survives the trip back through the
+    // function to the browser, so the message is what names the condition —
+    // and carries Resend's own Retry-After when it sends one.
+    const retryAfter = Number(res.headers.get("Retry-After"));
+    const wait = Number.isFinite(retryAfter) && retryAfter > 0 ? retryAfter : null;
+    const held = wait == null ? "" : ` (retry after ${wait}s)`;
+    if (res.status === 429) {
+      throw transient(`Resend is rate-limiting: ${msg}${held}`, wait);
+    }
+    if (res.status >= 500) {
+      throw transient(`Resend is unavailable (${res.status}): ${msg}${held}`, wait);
+    }
     throw new Error(`Resend ${body.statusCode ?? res.status}: ${msg}`);
   }
   return body;
+}
+
+// The seconds go on the error as well as into the message: a caller inside
+// this runtime (a future batch sender in a function) shouldn't have to parse
+// English to find out how long to hold off.
+function transient(message: string, retryAfter: number | null) {
+  const e = new Error(message) as Error & { retryAfter?: number };
+  if (retryAfter != null) e.retryAfter = retryAfter;
+  return e;
 }
 
 export function base64(bytes: Uint8Array) {

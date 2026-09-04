@@ -3,7 +3,8 @@ import { Db } from "../db.js";
 import { money } from "../data.js";
 import { Btn, Dialog, ErrorBox, Field } from "./common.jsx";
 import { saveBlob } from "../zip.js";
-import { buildArchive, archiveZipName, verifyZip } from "../archive.js";
+import { OfflineCache } from "../offlineCache.js";
+import { buildArchive, archiveZipName, verifyZip, archiveDrift, mapLimit } from "../archive.js";
 
 // Archive — the Admin screen's dropdown. A year, or a date range; every job
 // raised in it is read in full and handed back as one zip, filed client →
@@ -19,6 +20,11 @@ import { buildArchive, archiveZipName, verifyZip } from "../archive.js";
 const isoDay = d => `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}-${String(d.getDate()).padStart(2, "0")}`;
 const mb = bytes => `${(bytes / 1048576).toFixed(bytes < 10 * 1048576 ? 1 : 0)} MB`;
 const plural = (n, one, many = one + "s") => `${n} ${n === 1 ? one : many}`;
+// How many jobs are re-read at once by the check that runs after CLEAR is
+// typed. The same figure the build renders invoices at, for the same reason:
+// enough to stop a busy year being a long silence, few enough not to drown a
+// truck's connection.
+const RECHECK_CONCURRENCY = 4;
 
 export function ArchiveDialog({ mode, currentUser, onClose, onCleared }) {
   const thisYear = new Date().getFullYear();
@@ -103,11 +109,49 @@ export function ArchiveDialog({ mode, currentUser, onClose, onCleared }) {
     setChecking(false);
   };
 
+  // The build and this button can be minutes or hours apart, and nothing has
+  // stopped the crew filing work against these jobs in between: a ticket
+  // raised at 16:20 against a job archived at 16:00 is not in the zip, and
+  // checking the download cannot see that — it only proves the file on disk
+  // is the build. So the three lists are read again, live, immediately before
+  // the delete, and a job that has changed stops it. Read live or not at all:
+  // this device's remembered copy would answer with the counts the build
+  // already agreed with, which is the one answer that proves nothing. A read
+  // that fails refuses too — "couldn't check" is not "nothing has changed".
+  //
+  // A few jobs at a time rather than one after another: this is three reads
+  // per job, and a busy year walked serially is thousands of round trips with
+  // the dialog saying nothing after the owner typed CLEAR. Every job is still
+  // read, and the answers are scanned in the jobs' own order, so whichever
+  // job stops the clear is named the same way every time.
+  const [checkedJobs, setCheckedJobs] = useState(0);
+  const recheckJobs = () => OfflineCache.liveOnly(async () => {
+    const counts = (summary && summary.jobCounts) || {};
+    setCheckedJobs(0);
+    let done = 0;
+    const problems = await mapLimit(jobs, RECHECK_CONCURRENCY, async j => {
+      try {
+        const [tickets, jhas, reports] = await Promise.all([
+          Db.listTicketsForJob(j.dbId), Db.listJhasForJob(j.dbId), Db.listReportsForJob(j.dbId)
+        ]);
+        const drift = archiveDrift(j, counts[String(j.dbId)], { tickets: tickets.length, jhas: jhas.length, reports: reports.length });
+        return drift ? `${drift} Nothing has been removed.` : "";
+      } catch (e) {
+        return `Job ${j.id} couldn't be checked against the app before clearing: ${e.message || "the read failed"}. Nothing has been removed — try again when the connection is better.`;
+      } finally {
+        setCheckedJobs(++done);
+      }
+    });
+    return problems.find(Boolean) || "";
+  });
+
   const clear = async () => {
     if (!jobs || !canClear || confirmWord.trim().toUpperCase() !== "CLEAR") return;
     setStage("clearing");
     setError("");
     try {
+      const drift = await recheckJobs();
+      if (drift) { setError(drift); setStage("built"); return; }
       const result = await Db.archiveClearJobs(jobs.map(j => j.dbId));
       setCleared(result);
       setStage("cleared");
@@ -149,6 +193,17 @@ export function ArchiveDialog({ mode, currentUser, onClose, onCleared }) {
     <Dialog title={title} maxWidth={580} onClose={busy ? () => {} : onClose} actions={actions}>
       <ErrorBox>{error}</ErrorBox>
 
+      {/* The check before the delete is minutes of reading on a big year, and
+          a dialog that only says "Clearing…" through it looks stuck at the
+          exact moment nobody should be tempted to close it. */}
+      {stage === "clearing" && (
+        <div style={{ fontSize: 13 }}>
+          {checkedJobs < count
+            ? `Checking the app against the archive — job ${Math.min(checkedJobs + 1, count)} of ${count}…`
+            : `Checked all ${plural(count, "job")}. Removing them…`}
+        </div>
+      )}
+
       {stage === "pick" && (<>
         <div style={{ fontSize: 13, color: "color-mix(in srgb, var(--color-text) 65%, transparent)" }}>
           Every job raised in the period, filed client → month → job: the job's details as a text file, its hazard
@@ -174,8 +229,9 @@ export function ArchiveDialog({ mode, currentUser, onClose, onCleared }) {
             : ""}
         </div>
         <div style={{ fontSize: 12, color: "color-mix(in srgb, var(--color-text) 60%, transparent)" }}>
-          Building reads every PDF over the connection, so a whole year can take a few minutes on a desk and is not
-          something to start on a phone. Keep this dialog open until the download appears — the next step checks it.
+          Building reads every PDF and renders every ticket's invoice over the connection: minutes for a quiet month,
+          but a busy year is thousands of files and can run to an hour or more. Start it on a desk, not on a phone,
+          and leave this dialog open until the download appears — the next step checks it.
         </div>
       </>)}
 

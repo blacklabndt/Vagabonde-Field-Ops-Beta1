@@ -68,15 +68,30 @@ export async function fetchAllPages(fetchPage) {
 // silently missing row is somebody's hours or somebody's invoice.
 //
 // `fetchAfter(lastKey)` gets null on the first call and the last row's key
-// after that, and returns the rows. A short page ends the walk.
+// after that, and returns the rows. A short page ends the walk — short
+// against what the source is actually sending, not against the constant:
+// RESPONSE_ROW_CAP is what each page asks for, and the API's max-rows
+// setting is what it gets. Lower that setting and every page comes back at
+// the new ceiling, which "fewer than 1000 means that was the last of them"
+// reads as the end of the walk — a timesheet or an export cut off at the cap
+// with nothing on screen to say so.
+//
+// So the first page teaches the walk what a full page holds — which means the
+// first page is never short against itself, and any walk that fits in one
+// page pays a second, empty round trip to learn it has ended. That is most
+// walks, not only the ones that land exactly on a boundary: one extra request
+// for a timesheet or an export, and the cheaper of the two mistakes by a long
+// way.
 export async function fetchAllKeyset(fetchAfter, keyOf = row => row.id) {
   const all = [];
   let after = null;
+  let pageSize = null;
   for (;;) {
     const rows = await fetchAfter(after);
     if (!rows || !rows.length) return all;
     for (const r of rows) all.push(r);
-    if (rows.length < RESPONSE_ROW_CAP) return all;
+    if (pageSize == null) pageSize = rows.length;
+    if (rows.length < pageSize) return all;
     const next = keyOf(rows[rows.length - 1]);
     // A full page whose last key is the one we already asked past would ask
     // for the same thousand rows for ever. Stopping with what we have is the

@@ -24,7 +24,13 @@ Cloudflare Worker `solitary-snowflake-ee22` (assets + `/approve` proxy in
   baseline to the live project; it is for fresh environments. A DB fix that
   is written but not yet applied waits in
   `supabase/handover/PENDING-audit-migration.sql` (probes beside it) — it is
-  a draft, not history, until it is applied and filed under migrations.
+  a draft, not history, until it is applied and filed under migrations. It
+  currently carries: tab_access()/user_role() reading profiles instead of
+  the token claim, Admin-only profiles insert/delete, delete_job returning
+  its PDF keys, guard_job_update's null-safe client gate (a null rank read
+  as Coordinator), the equipment functions counting Edmonton days rather
+  than UTC, public.dose_totals, and a `set local lock_timeout` because
+  section 2 takes ACCESS EXCLUSIVE on profiles.
 - RLS changes get probed live with `set_config('request.jwt.claims', …)`
   role simulation before they ship. Permissive policies OR together — a
   new `FOR ALL` policy can silently void an older condition.
@@ -46,6 +52,11 @@ Cloudflare Worker `solitary-snowflake-ee22` (assets + `/approve` proxy in
 - Crew hours are private: the ticket_crew read policy is own rows, Admin/
   Coordinator, or crewmates on a shared ticket (private.shares_ticket).
   Never widen it back to a tab check.
+- The Timesheets dose ledger sums in the database: `dose_totals(start, end)`
+  — SECURITY INVOKER on purpose, narrowed again to own rows or Admin — so a
+  year is forty-odd numbers, not 30k crew rows over the wire. It lives in
+  the PENDING migration, so the screen falls back to the old row walk on
+  PGRST202 (that one error only) until it is applied.
 - PostgREST silently caps responses at 1,000 rows. Anything that means
   "all of them" pages, and `paging.js` has two shapes: fetchAllPages
   (concurrent, by OFFSET) for the reference lists, where a row deleted
@@ -54,8 +65,26 @@ Cloudflare Worker `solitary-snowflake-ee22` (assets + `/approve` proxy in
   paid or billed from, where an OFFSET walk can skip a row silently.
   listTicketsForExport is the exception: search_tickets is an RPC with no
   cursor, so it pages by page_num and keeps that caveat.
+- `Db.listJobs` is gone. A job picker is `SearchSelect` over `Db.searchJobs`
+  (server-side, paged) — the delete-job transfer target and Rate admin's job
+  override are the two. Never read every job to fill a dropdown; the
+  archive's `listJobsCreatedBetween` is bounded by its date range.
 - The offline queue is for work only — scores, telemetry and other
   nice-to-haves call the API directly and fail soft.
+- The device cache has an owner (`cache.owner`, `OfflineCache.claimFor`):
+  signing in — and a session restored at boot — empties the store first
+  unless this same account already owns it, so a shared tablet never hands
+  over the last crew's jobs, rates and half-entered tickets. Boot clears
+  outright on offline-with-no-identity and on the server's `signedOut`; a
+  merely lapsed session forgets only the identity, so the same person's
+  recovery copies survive signing back in. Sign-out clears everything, and
+  still asks first when drafts or queued work would go with it.
+- auth-js does not remove the stored session when `signOut` fails — offline
+  it refreshes an expired token first and returns the failure, leaving the
+  session on disk for the next reload to sign straight back in. Every
+  sign-out path therefore checks the error and calls `forgetStoredSession()`
+  (config.js; `AUTH_STORAGE_KEY` names the key supabase-js derives, so the
+  two cannot drift). Keep new ones doing it.
 - Tabs are PERMISSION; drawer visibility is code. The contextual screens
   (`CONTEXT_TABS`: job, jha, upload, ticket) never appear in anyone's
   menu — they open from a job's own page, per Kyle. Never "hide" a screen
@@ -90,6 +119,13 @@ Cloudflare Worker `solitary-snowflake-ee22` (assets + `/approve` proxy in
   onboarding sender, which delivers only to the inbox the Resend account
   was created with — a send to anyone else is refused by Resend and
   mail.ts translates that refusal into a plain message naming the fix.
+- Bulk sends go through `sendPool.js`, never a loop — "Chase all unsigned"
+  is the caller, with thousands of emails to get out: 3 workers, a floor
+  between starts, and a wait-and-retry for the two refusals mail.ts marks as
+  transient (429 → "Resend is rate-limiting…", 5xx → "is unavailable…",
+  carrying Resend's Retry-After, since only the message crosses the function
+  boundary). It has a Stop button, and failures are named by ticket number
+  rather than counted.
 - Approval tokens are stored hashed (`sha256:` + hex, see
   `_shared/approvalToken.ts` and migration 20260902211209); the raw token
   exists only in the emailed link. The token is NOT single-use — signing
@@ -191,6 +227,12 @@ session has set `app.confirm_total_wipe = 'yes'`.
   doesn't name, and an unpinned token column let a technician plant a hash
   and sign their own ticket from the link. Withdrawing an approval is the
   `withdraw_ticket_approval(id)` definer RPC. `total` is the trigger's.
+- `updateTicket` refuses a Draft write over an Awaiting-approval ticket
+  (plainError). "Draft" is the word every save sends — the editor hardcodes
+  it and a queued replay carries it hours later — so letting it through
+  replaces the lines and moves the money under a live approval link. The
+  outbox keeps the item with that message; `withdraw_ticket_approval` is the
+  only way back.
 - Invoicing is `mark_tickets_invoiced(ids, invoiced)` (Admin, definer) —
   Approved ↔ Invoiced with `invoiced_at`; the approved-ticket immutability
   policies are untouched and this RPC is the only door.
@@ -205,10 +247,14 @@ session has set `app.confirm_total_wipe = 'yes'`.
   `is_staff()` too, so a locked account's unexpired token reads nothing.
 - A client rep's "Query this ticket" (approval page) writes tickets.
   queried_at/query_text/query_by with the service role; the tracker shows
-  it; send-ticket-approval clears it on resend. jobs.last_activity_at is
-  kept by definer triggers on tickets/jhas/reports (private.
-  touch_job_activity) and orders the board (search_jobs). search_tickets
-  also returns filtered_total (null for non-price roles).
+  it; send-ticket-approval clears it on resend. It is throttled to one
+  query — and one email — per ticket per 15 minutes, on the update's own
+  filter (`queried_at.lt`) rather than a prior read, so two simultaneous
+  posts cannot both pass; the page gives the same receipt either way,
+  because the link is the whole credential and it gets forwarded.
+  jobs.last_activity_at is kept by definer triggers on tickets/jhas/reports
+  (private.touch_job_activity) and orders the board (search_jobs).
+  search_tickets also returns filtered_total (null for non-price roles).
 - Accounts: create-user with `invite: true` mints a password nobody knows
   and mails Auth's recovery link through Resend (_shared/setPassword.ts);
   password-reset (Admin-gated) mails the same link to an existing account.
@@ -228,6 +274,16 @@ session has set `app.confirm_total_wipe = 'yes'`.
   them), and the client removes the PDFs from the two buckets. Jobs are
   chosen by created_at on local days. It is the one bulk delete in the app;
   keep every one of those gates.
+- The clear re-checks before it deletes: immediately before
+  `archive_clear_jobs`, inside `liveOnly`, every job's ticket/JHA/report
+  counts are read again and compared with the build's (`archiveDrift`). Any
+  drift — or a read that failed — refuses, because the build and the button
+  can be hours apart and checking the zip cannot see work filed since.
+- The build batches its per-ticket reads (`listTicketsForArchive`,
+  `listCrewForTickets`, one call each per job) and renders the field
+  invoices at concurrency 4 through `mapLimit` — each is an Edge Function
+  call. A busy year is still thousands of files and can run to an hour;
+  keep that expectation in the dialog's wording.
 - The archive build reads inside `OfflineCache.liveOnly(fn)`: a remembered
   copy must never stand in for the server's answer when the clear behind it
   is a real delete. Inside it readThrough rethrows instead of falling back,

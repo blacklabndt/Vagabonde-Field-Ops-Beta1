@@ -16,9 +16,21 @@
 // bump on the cache would be an absurd way to lose a day of billing.
 
 import { isNetworkError } from "./offlineQueue.js";
+// Only the key name — session.js is plain logic over data.js, no env, no
+// browser, so the tests still load this module.
+import { IDENTITY_KEY } from "./session.js";
 
 const OC_DB_NAME = "nde-offline-cache";
 const OC_STORE = "reads";
+
+// Whose remembered data this device is holding. Written beside the data
+// itself rather than derived from the session, because the session is the
+// thing that goes away: a lapsed session takes the remembered identity with
+// it (see App.jsx's boot) and the half-entered tickets it leaves behind still
+// have to be recognisable as the same person's when they sign back in.
+//
+// It is never an answer to "who is allowed in" — only to "whose is this".
+export const CACHE_OWNER_KEY = "cache.owner";
 
 let ocDbPromise = null;
 function ocOpenDb() {
@@ -128,6 +140,53 @@ export const OfflineCache = {
   remove(key) {
     rtLastWritten.delete(key);
     return ocDelete(key).catch(() => {});
+  },
+
+  // The account this device's cache belongs to, or null if nobody has
+  // claimed it (a fresh install, or a store that has just been emptied).
+  async owner() {
+    const hit = await ocGet(CACHE_OWNER_KEY).catch(() => null);
+    return hit ? hit.value : null;
+  },
+
+  // Called wherever an account takes this device over — signing in, and the
+  // quiet restore of a session on start — before anything of theirs is
+  // written.
+  //
+  // Cache keys are not scoped to an account — "contacts", "job.<id>",
+  // "ticket.wip.<job>" — so the protection has to be at the door. The same
+  // person keeps what this device remembers, including the ticket they were
+  // halfway through when the session lapsed. Anyone else and the store is
+  // emptied first: on a shared tablet the previous crew's hours are not the
+  // new signer's to see. A device with no owner recorded falls back to the
+  // remembered identity — see below.
+  //
+  // The new owner is recorded only once the clear has actually landed — a
+  // clear that failed must not leave this device claiming to belong to
+  // someone whose data is not on it. clear() throws in that case; the caller
+  // decides what to say.
+  async claimFor(userId) {
+    if (!userId) return false;
+    const owner = await this.owner();
+    if (owner === userId) return false;
+    // "Nobody has claimed this" is not the same as "this is a stranger's".
+    // Owners started being recorded after the store did, so the first online
+    // start once that shipped finds every tablet in the crew unclaimed — and
+    // clearing on that basis would empty the store of the very person signing
+    // in, half-entered tickets and all. The remembered identity settles it:
+    // if this device's last identity is already this account, it is theirs,
+    // so record the claim and keep the work. A remembered stranger, or no
+    // identity at all, is still emptied at the door.
+    if (owner === null) {
+      const hit = await ocGet(IDENTITY_KEY).catch(() => null);
+      if (hit && hit.value && hit.value.id === userId) {
+        await ocPut(CACHE_OWNER_KEY, userId);
+        return false;
+      }
+    }
+    await this.clear();
+    await ocPut(CACHE_OWNER_KEY, userId);
+    return true;
   },
 
   // Run something with the fallback switched off: while it runs, a failed

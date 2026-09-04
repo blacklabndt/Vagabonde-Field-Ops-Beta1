@@ -396,7 +396,21 @@ export function JobDetailScreen({ job, currentUser, onStartJha, onOpenTicket, on
             <div style={{ display: "flex", alignItems: "center", gap: 10, marginBottom: 12 }}>
               <h4 style={{ margin: 0, fontSize: 19 }}>Daily billing</h4>
               {awaitingApproval && <TagX variant="outline">Awaiting client approval</TagX>}
-              {canRaiseTickets && <Btn variant="primary" style={{ marginLeft: "auto" }} disabled={complete} onClick={() => setShowTicket(true)}>+ Create ticket</Btn>}
+              {/* Held back by the job's record for the same reason Edit is:
+                  the Create ticket dialog pre-fills both reps from it, so a
+                  record that hasn't landed seeds the last job's reps, and one
+                  whose reps couldn't be read seeds the client's usual
+                  contacts — either way a ticket goes out naming someone
+                  nobody chose for this job. */}
+              {canRaiseTickets && (
+                <Btn variant="primary" style={{ marginLeft: "auto" }}
+                  disabled={complete || !recordLoaded || !!jobRecord.repsUnknown}
+                  title={complete ? undefined
+                    : !recordLoaded ? "Waiting for this job's details"
+                    : jobRecord.repsUnknown ? "This job's reps couldn't be read — the panel is showing the client's usual contacts. Reopen the job when you're back in signal."
+                    : undefined}
+                  onClick={() => setShowTicket(true)}>+ Create ticket</Btn>
+              )}
             </div>
             <div style={{ fontSize: 12, color: "color-mix(in srgb, var(--color-text) 60%, transparent)", marginBottom: 10 }}>
               {!canRaiseTickets
@@ -488,9 +502,15 @@ export function JobDetailScreen({ job, currentUser, onStartJha, onOpenTicket, on
               ? <Btn variant="secondary" style={{ marginLeft: "auto" }}
                   // Not until this job's own record is in hand. Editing what
                   // is still on screen from the last job, then saving, files
-                  // that job's reps against this one.
-                  disabled={complete || !recordLoaded}
-                  title={!complete && !recordLoaded ? "Waiting for this job's details" : undefined}
+                  // that job's reps against this one. Same rule for a record
+                  // whose reps couldn't be read: the panel is showing the
+                  // organisation's primary contacts as a stand-in, and Save
+                  // would write those onto this job as its named reps.
+                  disabled={complete || !recordLoaded || !!jobRecord.repsUnknown}
+                  title={complete ? undefined
+                    : !recordLoaded ? "Waiting for this job's details"
+                    : jobRecord.repsUnknown ? "This job's reps couldn't be read — the panel is showing the client's usual contacts. Reopen the job when you're back in signal."
+                    : undefined}
                   onClick={() => { setDraft(jobRecord); setSavedNote(false); setEditingRecord(true); }}>Edit</Btn>
               : <span style={{ marginLeft: "auto", fontSize: 12, color: "color-mix(in srgb, var(--color-text) 55%, transparent)" }}>Editing — changes aren't kept until you save</span>}
           </div>
@@ -603,7 +623,13 @@ export function JobDetailScreen({ job, currentUser, onStartJha, onOpenTicket, on
       )}
       {showTicket && (
         <CreateTicketDialog job={job} jobRecord={jobRecord} currentUser={currentUser} onClose={() => setShowTicket(false)}
-          onSubmit={seed => { setShowTicket(false); onStartTicket(seed); }} />
+          onSubmit={async seed => {
+            // Closed only once the ticket screen is actually open. The
+            // dialog used to close first, so a job record that wouldn't
+            // load took the chosen work date and both reps down with it and
+            // left the person on Job detail with a toast and nothing typed.
+            if (await onStartTicket(seed) !== false) setShowTicket(false);
+          }} />
       )}
       {deleting && (
         <DeleteJobDialog job={job} jhas={jhas} reports={reports} tickets={tickets} isAdmin={isAdmin}
@@ -1421,6 +1447,9 @@ function CreateTicketDialog({ job, jobRecord, currentUser, onClose, onSubmit }) 
   const [preview, setPreview] = useState("");
   const [provisional, setProvisional] = useState(false);
   const [error, setError] = useState("");
+  // Opening the editor waits on the job's record, so the button has to say so
+  // — and two taps must not raise two tickets' worth of seeds.
+  const [busy, setBusy] = useState(false);
   useEffect(() => OfflineCache.subscribe(s => setProvisional(s.servingCached)), []);
   // The directory, so both rep fields can offer everyone on file for this
   // job's client and contractor rather than only the job's primary.
@@ -1446,7 +1475,8 @@ function CreateTicketDialog({ job, jobRecord, currentUser, onClose, onSubmit }) 
     return () => { live = false; };
   }, [initials, workDate]);
 
-  const submit = () => {
+  const submit = async () => {
+    if (busy) return;
     if (isNaN(d)) { miss.flag("workDate"); setError("Pick a valid work date."); return; }
     miss.clear();
     setError("");
@@ -1456,16 +1486,23 @@ function CreateTicketDialog({ job, jobRecord, currentUser, onClose, onSubmit }) 
     // signal at all. Now it only chooses — the day and this ticket's own
     // reps — and the billing screen does the saving, with its outbox and
     // recovery copy behind it. The number is minted when it saves.
-    onSubmit({
+    // Awaited: opening the editor needs the job's record, which is a fetch,
+    // and this dialog is what is holding the work date and the reps until it
+    // lands. It closes itself on success; on a failure it stays open with
+    // everything typed still in it, and the toast the loader raised says why.
+    setBusy(true);
+    try { await onSubmit({
       workDate,
       clientContact: contactLabel(clientRep) || "",
       contractorContact: contactLabel(contractorRep) || ""
-    });
+    }); }
+    catch (e) { setError(e.message || "Couldn't open the ticket screen — try again."); }
+    setBusy(false);
   };
 
   return (
     <Dialog title="Create ticket" maxWidth={520} onClose={onClose}
-      actions={<><Btn variant="secondary" onClick={onClose}>Cancel</Btn><Btn variant="primary" onClick={submit}>Create ticket</Btn></>}>
+      actions={<><Btn variant="secondary" onClick={onClose} disabled={busy}>Cancel</Btn><Btn variant="primary" onClick={submit} disabled={busy}>{busy ? "Opening…" : "Create ticket"}</Btn></>}>
       <ErrorBox>{error}</ErrorBox>
       {jhaMissing && (
         <div style={{ border: "1px solid var(--color-accent)", padding: "10px 12px", fontSize: 13 }}>

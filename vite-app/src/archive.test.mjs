@@ -8,7 +8,7 @@
 import "fake-indexeddb/auto";
 import test from "node:test";
 import assert from "node:assert/strict";
-import { jobFolderPaths, monthFolderOf, uniqueName, csvCell, jobDetailsText, archiveZipName, verifyZip, buildArchive } from "./archive.js";
+import { jobFolderPaths, monthFolderOf, uniqueName, csvCell, jobDetailsText, archiveZipName, verifyZip, buildArchive, mapLimit, archiveDrift } from "./archive.js";
 import { makeZip, crc32 } from "./zip.js";
 import { OfflineCache } from "./offlineCache.js";
 
@@ -142,8 +142,8 @@ const fakeDb = (over = {}) => ({
   listJhasForJob: async () => [],
   listReportsForJob: async () => [],
   listTicketsForJob: async () => [{ id: "KK-0818-26-01" }],
-  getTicketForArchive: async id => ({ id, workDate: "2026-08-18", status: "Approved", total: 1234.5, lines: [] }),
-  listCrewForTicket: async () => [],
+  listTicketsForArchive: async ids => new Map(ids.map(id => [id, { id, workDate: "2026-08-18", status: "Approved", total: 1234.5, lines: [] }])),
+  listCrewForTickets: async ids => new Map(ids.map(id => [id, []])),
   renderTicketInvoice: async () => "<html>invoice</html>",
   downloadObject: async () => new Uint8Array([0x25, 0x50, 0x44, 0x46]),
   ...over
@@ -191,6 +191,67 @@ test("anything served from this device's memory during a build is flagged too", 
   } finally {
     OfflineCache.markLive();
   }
+});
+
+test("a ticket read that fails is a gap, not the end of the build", async () => {
+  // This was the one await in the loop with nothing around it: a blip on
+  // ticket 400 of a year threw away everything read so far. It has to be
+  // recorded and stepped over, like a PDF that wouldn't download.
+  const jobs = [
+    { id: "S-1004", dbId: 1, project: "Tie-in", client: "Athabasca Oil", createdAtIso: "2026-08-18T18:00:00Z" },
+    { id: "S-1005", dbId: 2, project: "Lateral", client: "Athabasca Oil", createdAtIso: "2026-08-19T18:00:00Z" }
+  ];
+  const db = fakeDb({
+    listTicketsForArchive: async ids => {
+      if (ids[0] === "S-1004-T") throw new Error("Failed to fetch");
+      return new Map(ids.map(id => [id, { id, status: "Approved", total: 10, lines: [] }]));
+    },
+    listTicketsForJob: async dbId => [{ id: `S-100${dbId === 1 ? 4 : 5}-T` }]
+  });
+  const { summary } = await buildArchive({ jobs, mode: "year", from: "2026-01-01", to: "2026-12-31", db });
+  // The second job was still read, and the first job's failure is on record.
+  assert.equal(summary.tickets, 1);
+  assert.equal(summary.missing.length, 1);
+  assert.match(summary.missing[0], /^S-1004: The details of 1 ticket\(s\): Failed to fetch/);
+});
+
+test("the build records what each job held, for the clear to check against", async () => {
+  const db = fakeDb({
+    listJhasForJob: async () => [{ workDate: "2026-08-18", pdfKey: "" }],
+    listReportsForJob: async () => []
+  });
+  const { summary } = await build(db);
+  assert.deepEqual(summary.jobCounts["1"], { tickets: 1, jhas: 1, reports: 0 });
+});
+
+test("a job that has gained work since the build stops the clear", () => {
+  const job = { id: "S-1200" };
+  const was = { tickets: 3, jhas: 1, reports: 2 };
+  assert.equal(archiveDrift(job, was, { ...was }), "");
+  assert.equal(archiveDrift(job, was, { ...was, tickets: 4 }),
+    "Job S-1200 has gained a ticket since the archive was built — build it again.");
+  assert.match(archiveDrift(job, was, { ...was, jhas: 2 }), /gained an assessment/);
+  assert.match(archiveDrift(job, was, { ...was, reports: 3 }), /gained a report/);
+  // A ticket cancelled in between is not work that would be lost, but the
+  // zip and the app no longer agree, and this is the one bulk delete.
+  assert.match(archiveDrift(job, was, { ...was, tickets: 2 }), /has lost a ticket/);
+  // A job the build never recorded is not one to delete on its word.
+  assert.match(archiveDrift(job, undefined, was), /wasn't in the archive that was built/);
+});
+
+test("mapLimit runs a few at a time and answers in order", async () => {
+  let running = 0, peak = 0;
+  const items = Array.from({ length: 20 }, (_, i) => i);
+  const out = await mapLimit(items, 4, async i => {
+    running++;
+    peak = Math.max(peak, running);
+    await new Promise(r => setTimeout(r, i % 3));
+    running--;
+    return i * 2;
+  });
+  assert.deepEqual(out, items.map(i => i * 2), "the answers keep the input's order");
+  assert.equal(peak, 4, "never more than four at once");
+  assert.deepEqual(await mapLimit([], 4, async () => 1), [], "nothing to do finishes");
 });
 
 test("something that isn't a zip is said to be so", () => {
