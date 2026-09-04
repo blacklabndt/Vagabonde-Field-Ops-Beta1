@@ -1,6 +1,6 @@
--- DRAFT — not applied. Apply live first (the applier stamps the version),
--- then file this under supabase/migrations/<version>_the_token_is_not_the_
--- record.sql with the version the applier gave it.
+-- 20260904135107 · the token is not the record
+-- Applied live 2026-09-04 (Kyle, via the audit loop); probes that were run
+-- before and after are in supabase/handover/probes-20260904135107-the-token-is-not-the-record.sql.
 --
 -- Round six: three seams the fourth review found, three more that the hard
 -- review of this draft found in the draft itself and beside it, and one the

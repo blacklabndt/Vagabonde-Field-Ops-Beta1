@@ -276,13 +276,13 @@ test("ROLE_PRESETS matches tabs_for_role() in the migrations", () => {
 });
 
 test("no unapplied handover SQL quietly redefines tabs_for_role", () => {
-  // supabase/handover holds SQL that has not been applied and is not part of
-  // the migration history — the PENDING-* files waiting on Kyle's word, and
-  // the wipes. The check above reads the migrations, so a redefinition
-  // parked in here would be invisible to it: the test would go on comparing
-  // ROLE_PRESETS against the old migration and pass, right up to the day the
-  // pending file was applied and every new account came out with the wrong
-  // tabs.
+  // supabase/handover holds SQL that is not part of the migration history —
+  // the wipes, the probe files a migration was checked with, and any draft
+  // fix still waiting on Kyle's word. The check above reads the migrations,
+  // so a redefinition parked in here would be invisible to it: the test
+  // would go on comparing ROLE_PRESETS against the old migration and pass,
+  // right up to the day the draft was applied and every new account came out
+  // with the wrong tabs.
   //
   // Asserting there is none, rather than folding these into "last definition
   // wins": an unapplied file is not what the database is running, so treating

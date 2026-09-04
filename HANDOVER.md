@@ -65,10 +65,14 @@ deploy the Worker. Path A avoids all of this.
 > the new project's, or grep the built bundle in `vite-app/dist/` for the
 > old project ref (`eielmvxzdwwprmmfamlq`) and expect no hits.
 >
-> Before `supabase db push`, look in `supabase/handover/` for a
-> `PENDING-*.sql` — that is where a schema fix lives once it is written
-> and before it has been applied anywhere. Anything still sitting there is
-> not in `migrations/` and will not be in the fresh project.
+> Before `supabase db push`, look in `supabase/handover/` for a draft
+> schema fix — that is where one lives once it is written and before it
+> has been applied anywhere. Anything still sitting there is not in
+> `migrations/` and will not be in the fresh project. Nothing is waiting
+> there today: the last one went live as
+> `20260904135107_the_token_is_not_the_record.sql`, and the probes it was
+> checked with stayed behind as
+> `probes-20260904135107-the-token-is-not-the-record.sql`.
 
 ## The custom domain
 

@@ -21,16 +21,20 @@ Cloudflare Worker `solitary-snowflake-ee22` (assets + `/approve` proxy in
   at `20260817040000_beta1_baseline.sql` — the whole schema squashed into
   one file, generated from the live catalogs; the 77 evolutionary
   migrations it replaced live in the prototype archive. Never apply the
-  baseline to the live project; it is for fresh environments. A DB fix that
-  is written but not yet applied waits in
-  `supabase/handover/PENDING-audit-migration.sql` (probes beside it) — it is
-  a draft, not history, until it is applied and filed under migrations. It
-  currently carries: tab_access()/user_role() reading profiles instead of
-  the token claim, Admin-only profiles insert/delete, delete_job returning
-  its PDF keys, guard_job_update's null-safe client gate (a null rank read
-  as Coordinator), the equipment functions counting Edmonton days rather
-  than UTC, public.dose_totals, and a `set local lock_timeout` because
-  section 2 takes ACCESS EXCLUSIVE on profiles.
+  baseline to the live project; it is for fresh environments. An unshipped
+  DB fix waits as a draft under `supabase/handover/` (probes beside it) —
+  a draft, not history, until it is applied and filed under migrations.
+  Nothing is waiting there now. The latest is
+  `20260904135107_the_token_is_not_the_record.sql` (probes in
+  `supabase/handover/probes-20260904135107-the-token-is-not-the-record.sql`,
+  run before and after): tab_access()/user_role() read profiles instead of
+  the token claim and answer empty/null for a `deactivated_at` account,
+  profiles insert is Admin-only above Technician/Helper and delete is an
+  Admin's alone, delete_job returns its PDF keys behind an is_staff() door
+  with a coalesced admin test, guard_job_update's client gate is null-safe
+  (a null rank read as Coordinator), the equipment functions count Edmonton
+  days rather than UTC, public.dose_totals sums the ledger in the database,
+  and filing a report needs the upload tab alone.
 - RLS changes get probed live with `set_config('request.jwt.claims', …)`
   role simulation before they ship. Permissive policies OR together — a
   new `FOR ALL` policy can silently void an older condition.
@@ -54,9 +58,10 @@ Cloudflare Worker `solitary-snowflake-ee22` (assets + `/approve` proxy in
   Never widen it back to a tab check.
 - The Timesheets dose ledger sums in the database: `dose_totals(start, end)`
   — SECURITY INVOKER on purpose, narrowed again to own rows or Admin — so a
-  year is forty-odd numbers, not 30k crew rows over the wire. It lives in
-  the PENDING migration, so until it is applied the screen falls back to
-  the old row walk on PGRST202, or on an error whose message names dose_totals and says it
+  year is forty-odd numbers, not 30k crew rows over the wire. It is live
+  (20260904135107); the screen keeps a fallback to the old row walk for a
+  database that has not had that migration — a fresh environment — on
+  PGRST202, or on an error whose message names dose_totals and says it
   could not be found, because older gateways only say it in words. Both
   halves of that test matter: no other code falls back, and no message
   falls back unless it names the function, so a permission refusal or a
@@ -202,8 +207,8 @@ session has set `app.confirm_total_wipe = 'yes'`.
   account out of the API, not only the menu. delete-user locks (Auth ban +
   `profiles.deactivated_at` + no tabs) an account with work on file instead
   of deleting it, because the foreign keys keep history's names.
-- Filing a report needs the `upload` tab, never the `job` tab (pending
-  migration, section 7): reports_insert and the storage `reports write`
+- Filing a report needs the `upload` tab, never the `job` tab
+  (20260904135107 §7): reports_insert and the storage `reports write`
   policy name upload alone, so a Helper — who holds job — cannot file a
   radiographic report; both READ policies keep their job arm. Job detail's
   "+ Upload report" asks tabList the same question; the button is the

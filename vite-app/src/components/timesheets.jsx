@@ -616,12 +616,15 @@ export function TimesheetsScreen({ currentUser }) {
 // database — one row per person, the four calendar quarters and a total —
 // rather than sending a year of crew rows over to be added up here.
 //
-// The function is newer than the app, and a database that has not had the
-// migration yet still has to show the ledger. PostgREST answers PGRST202 for
-// a routine it cannot find, and older gateways say the same in words; that
-// answer — and only that one, see isMissingDoseTotals — falls back to the
-// read this screen has always used. Anything else — a permission refusal, a
-// timeout — is a real failure and reaches the screen as itself.
+// It is live on this project (20260904135107), so the fallback below is
+// belt and braces for a database that has not had that migration — a fresh
+// environment brought up from an older schema — which still has to show the
+// ledger. It costs nothing where the function exists, so it stays.
+// PostgREST answers PGRST202 for a routine it cannot find, and older
+// gateways say the same in words; that answer — and only that one, see
+// isMissingDoseTotals — falls back to the read this screen has always used.
+// Anything else — a permission refusal, a timeout — is a real failure and
+// reaches the screen as itself.
 async function loadDose({ start, end }) {
   const { data, error } = await sbClient.rpc("dose_totals", { p_start: start, p_end: end });
   if (!error) return { summary: data || [], entries: [] };
