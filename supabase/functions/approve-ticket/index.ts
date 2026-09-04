@@ -240,7 +240,10 @@ async function handle(req: Request): Promise<Response> {
   // invoice itself is loaded through loadInvoice below.
   const { data: row, error: readErr } = await admin
     .from("tickets")
-    .select(TICKET_INVOICE_SELECT + ", approval_expires_at, approval_sent_by, queried_at")
+    // queried_at is deliberately NOT read here any more: the mail gate below
+    // is a conditional update, and a copy of that timestamp taken at the top
+    // of the request is the stale read the gate was once decided from.
+    .select(TICKET_INVOICE_SELECT + ", approval_expires_at, approval_sent_by")
     .eq("approval_token", await hashToken(token)).maybeSingle();
   // deno-lint-ignore no-explicit-any
   const ticket = row as any;
@@ -325,17 +328,38 @@ async function handle(req: Request): Promise<Response> {
       // was ever for: this link is the whole credential and it travels —
       // forwarded round a client's office, or double-tapped on a slow phone —
       // and a mail per request is an inbox flood and the Resend quota that
-      // every other mail in this app draws on spent by one rep. The gate
-      // reads the queried_at that came back with the ticket for THIS request,
-      // so two posts racing inside the window may each still send one. That
-      // is two mails carrying two real queries, which is the harmless side of
-      // the trade — a lost query was not.
-      const previouslyQueriedAt = ticket.queried_at as string | null;
+      // every other mail in this app draws on spent by one rep.
+      //
+      // The gate is therefore a conditional UPDATE of its own, and it runs
+      // FIRST. Deciding it from the queried_at that came back with the ticket
+      // was no gate at all: that read happens at the top of handle(), before
+      // any of the racing requests has written anything, so every one of them
+      // sees the same stale null and every one of them mails — the flood the
+      // limit exists to stop, arriving by the one door it was watching. The
+      // database decides instead. The row's timestamp moves past the window
+      // exactly once, and .select() is what makes a zero-row update — the
+      // requests that lost — tell itself apart from the one that won.
+      const cooledSince = new Date(Date.now() - QUERY_COOLDOWN_MS).toISOString();
+      const { data: won, error: gateErr } = await admin.from("tickets")
+        .update({ queried_at: new Date().toISOString() })
+        .eq("id", ticket.id).is("approved_at", null)
+        .or(`queried_at.is.null,queried_at.lt."${cooledSince}"`)
+        .select("id");
+      if (gateErr) throw gateErr;
+      const mayMail = (won?.length ?? 0) > 0;
+      // Then the words, unconditionally bar approved_at. Whoever lost the
+      // gate still came back with something to say, and the tracker is where
+      // it has to appear.
       const { error: qErr } = await admin.from("tickets")
         .update({ queried_at: new Date().toISOString(), query_text: text, query_by: who })
         .eq("id", ticket.id).is("approved_at", null);
       if (qErr) throw qErr;
-      if (!previouslyQueriedAt || Date.now() - new Date(previouslyQueriedAt).getTime() > QUERY_COOLDOWN_MS) {
+      if (mayMail) {
+        // A send that throws still spends the window, deliberately. Putting
+        // queried_at back would date the query earlier than the words that
+        // are now on the ticket — a timestamp that lies about when the rep
+        // spoke, to buy a retry nobody has asked for. The office is told by
+        // the logError below and the query is on the tracker either way.
         try { await notifyQuery(admin, row, who, text); }
         catch (e) { await logError("approve-ticket", "Queried, but the office wasn't told: " + (e as Error).message, { ticket: ticket.id }); }
       }

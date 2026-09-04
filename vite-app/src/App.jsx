@@ -247,7 +247,9 @@ export function App() {
       // True once the row turns out to be with the client for signature, so
       // the lines in this payload were not applied. It changes what still
       // runs below and what the technician is told at the end.
-      let linesRefused = false;
+      // Holds the refusal itself, not a flag: the tail below re-raises it so
+      // the item stays in the outbox with the reason on it.
+      let linesRefused = null;
       if (!payload.alreadyCreated) {
         // With the key the editor minted: this is the one replay that can
         // double-file a day — the insert lands, the answer is lost on the
@@ -266,10 +268,23 @@ export function App() {
         await checkpoint({ alreadyCreated: true, ticketId: id });
         // A row found by its key was the first attempt's, whose lines may
         // never have landed: write today's over it, as the editor does.
-        if (saved.existing) await Db.updateTicket({
-          ticketId: id, clientContact: payload.clientContact, contractorContact: payload.contractorContact,
-          lines: payload.lines, status: payload.status, delays: payload.delays
-        });
+        if (saved.existing) {
+          try {
+            await Db.updateTicket({
+              ticketId: id, clientContact: payload.clientContact, contractorContact: payload.contractorContact,
+              lines: payload.lines, status: payload.status, delays: payload.delays
+            });
+          } catch (e) {
+            // The same refusal the branch below handles, reached the other
+            // way round: the first attempt's row went to the client for
+            // signature while this item sat in the outbox. Thrown from here
+            // it parked the item with the crew unfiled and nobody told, so
+            // it takes the same line — carry on to the tail, which saves the
+            // hours and says which half of the ticket was not applied.
+            if (e.sentForApproval) linesRefused = e;
+            else throw e;
+          }
+        }
       } else {
         try {
           // The reps ride along: the payload is the whole ticket as the field
@@ -289,7 +304,7 @@ export function App() {
           // without its lines, and says so — a ticket the client is signing
           // for figures nobody re-entered is worth a sentence.
           if (e.sentForApproval) {
-            linesRefused = true;
+            linesRefused = e;
           } else {
             // The row was cancelled on another device while this sat in the
             // outbox. The payload still holds the whole day — the only copy
@@ -312,9 +327,46 @@ export function App() {
       // Not when the row is already awaiting approval: that send is what
       // refused the update above, so the client has the link already and a
       // second one would only reset their token mid-signature.
-      if (payload.sendForApproval && !linesRefused) await Db.sendTicketApproval({ ticketId: id, to: payload.approvalTo });
+      if (payload.sendForApproval && !linesRefused) {
+        // Marked when the send's answer is lost. The send is what moves the
+        // row to Awaiting approval, so a reply lost on the radio leaves an
+        // item whose own send landed looking exactly like one the office
+        // sent out from under it — and the next flush met the refusal,
+        // sounded the alarm and parked a ticket that was in fact complete,
+        // its lines written by this same item moments earlier.
+        // Only a send the radio lost is ambiguous. One the server refused
+        // (a 403, a bad address) never moved the row, so marking it would
+        // make a later send by the office look like this item's own.
+        try {
+          await Db.sendTicketApproval({ ticketId: id, to: payload.approvalTo });
+        } catch (e) {
+          if (OfflineQueue.isNetworkError(e)) await checkpoint({ sendAttempted: true });
+          throw e;
+        }
+      }
+      // This item's own send having landed is not the office's send: the
+      // lines on that row are this device's, already applied, and there is
+      // nothing to tell anybody. Finish quietly.
+      if (linesRefused && payload.sendAttempted) return;
       if (linesRefused) {
-        Toasts.show(`Ticket ${id} had already gone to the client for signature — the crew hours from this device were saved, but its welds and charges were not. Check the ticket and, if the figures are wrong, cancel the approval and re-enter them.`, "error", true);
+        // Once, not on every reconnect. A truck between towers fires `online`
+        // all afternoon, and each one re-runs this item — the refusal is the
+        // same every time, and a forced toast repeating it all day teaches
+        // people to swipe it away. The queue badge and its panel are what
+        // carry it from here.
+        if (!payload.refusalTold) {
+          Toasts.show(`Ticket ${id} had already gone to the client for signature — the crew hours from this device were saved, but its welds and charges were not. Check the ticket and, if the figures are wrong, cancel the approval and re-enter them.`, "error", true);
+          await checkpoint({ refusalTold: true });
+        }
+        // A toast is 2.6 seconds on whatever screen happens to be open, and
+        // this item used to be deleted right after it: a tablet in a pocket
+        // meant nobody ever learned the billing hadn't landed. Raising the
+        // refusal keeps the item in the outbox with the reason attached, so
+        // the badge stays lit and the queue panel says what is owed until
+        // somebody decides. Retrying costs one refused update and one crew
+        // re-write (delete-then-insert), and lands here again unchanged —
+        // discarding is how it ends, once the ticket has been looked at.
+        throw linesRefused;
       }
     }
   }), []);
@@ -1012,7 +1064,19 @@ export function App() {
       body = <UsersAccessScreen currentUser={currentUser} />;
       break;
     case "mail":
-      body = <AdminSetupScreen currentUser={currentUser} />;
+      // The archive's clear is the one bulk delete in the app, and the job
+      // it takes out may be the one still held open behind this screen — its
+      // record, its ticket, and its drafts in the badge. Let go of all of it
+      // the way a single deleted job does, rather than leaving the drawer
+      // pointing at a job number that no longer exists.
+      body = <AdminSetupScreen currentUser={currentUser}
+        onArchiveCleared={() => {
+          setActiveJob(null);
+          setJobRecord(EMPTY_JOB_RECORD);
+          setActiveTicket(null);
+          setContextScreen("");
+          loadMyTickets();
+        }} />;
       break;
     case "chat":
       body = <TeamChatScreen currentUser={currentUser} onOpenJob={openJob} onRead={() => setChatUnread(0)} />;

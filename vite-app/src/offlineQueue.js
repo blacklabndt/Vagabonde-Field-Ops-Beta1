@@ -131,7 +131,11 @@ async function oqFlushOnce(handlers) {
       synced++;
       oqNotify();
     } catch (e) {
-      if (isNetworkError(e)) { stillOffline = true; break; }
+      // A refusal the server actually gave is a reason, whatever the radio
+      // is doing now: isNetworkError says "offline" for any error while
+      // navigator.onLine is false, and a refused replay rethrown into a
+      // dead spot would otherwise stop with no reason written for it.
+      if (!e.plain && isNetworkError(e)) { stillOffline = true; break; }
       // A real error on replay (e.g. the job was completed meanwhile) —
       // leave it queued with the reason attached rather than dropping the
       // work silently. Whoever reviews the queue can see why it stalled.

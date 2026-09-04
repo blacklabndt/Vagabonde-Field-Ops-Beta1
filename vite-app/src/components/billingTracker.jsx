@@ -91,6 +91,14 @@ export function BillingTrackerScreen({ onOpenTicket, currentUser }) {
     try {
       const { rows: r, total: t, filteredTotal: ft } = await Db.searchTickets({ page: p, pageSize, status: f, q: search, from: dFrom, to: dTo });
       if (mine !== loadSeq.current) return;
+      // The page under us can empty out — a bulk "Mark invoiced" of the last
+      // page's approved tickets moves every row on it out of the filter, and
+      // this index has no rows left. The count rides on the first row, so an
+      // empty page also reports a total of zero: the tracker would say "No
+      // tickets are approved" about the ones just invoiced, with no pager
+      // left to get back. Start again at page 1 instead. The same guard the
+      // board and the equipment list carry.
+      if (p > 0 && !r.length) { setPage(0); fetchPage(0, f, search, dFrom, dTo); return; }
       setRows(r);
       setTotal(t);
       setFilteredTotal(ft == null ? null : ft);

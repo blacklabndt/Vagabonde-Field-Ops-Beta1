@@ -119,6 +119,25 @@ export default defineConfig({
               expiration: { maxEntries: 80, maxAgeSeconds: 60 * 60 * 24 * 14 },
               cacheableResponse: { statuses: [0, 200] }
             }
+          },
+          {
+            // The four libraries the app fetches on demand — SheetJS,
+            // jsPDF, its autotable plugin, and pdf.js with its worker —
+            // are pinned to an exact version, so the URL names bytes that
+            // never change. Without this every timesheet approval and
+            // every dropped report needed a live connection, on the two
+            // screens most likely to be opened in a truck: the precache
+            // holds the app itself but a script tag added at runtime is
+            // an ordinary network fetch. CacheFirst means each library
+            // crosses a field connection once per device, and after that
+            // those buttons work with no signal at all.
+            urlPattern: /^https:\/\/cdn\.jsdelivr\.net\//,
+            handler: "CacheFirst",
+            options: {
+              cacheName: "cdn-libraries",
+              expiration: { maxEntries: 20, maxAgeSeconds: 60 * 60 * 24 * 365 },
+              cacheableResponse: { statuses: [0, 200] }
+            }
           }
         ]
       }

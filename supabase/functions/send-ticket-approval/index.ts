@@ -2,8 +2,15 @@
 //
 // Attaches a PDF-style summary of the ticket as well as linking to the live
 // approval page, so the rep has something to file even before they click.
-// The link carries a single-use token (see the migration) — no account, no
-// password, which is the whole point: a client rep signs from their phone.
+// The link carries a token — no account, no password, which is the whole
+// point: a client rep signs from their phone. It is not single-use: the
+// token survives the signing so the rep keeps a way back to the copy they
+// put their name to, and re-signing is refused by approve-ticket's
+// already-approved branch rather than by burning the token. What ends a
+// link is a resend (which mints a new hash over the old one), a withdrawal,
+// or the 30-day expiry, which only stops it SIGNING. Only the sha256 hash
+// is stored (_shared/approvalToken.ts); the raw token exists in this email
+// and nowhere else.
 
 import { createClient } from "https://esm.sh/@supabase/supabase-js@2";
 import { sendMail, appSettings, corsHeaders, wrapEmail, esc, recipients, optionalRecipients } from "../_shared/mail.ts";

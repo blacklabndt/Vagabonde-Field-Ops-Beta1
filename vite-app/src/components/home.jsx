@@ -1,8 +1,8 @@
 import React, { useState, useEffect, useRef } from "react";
-import { primaryContact } from "../data.js";
+import { primaryContact, seesPrices as pricesFor } from "../data.js";
 import { Db } from "../db.js";
 import { OfflineQueue } from "../offlineQueue.js";
-import { Blueprint, Btn, TableScroll, TagX, Field, Dialog, ErrorBox, StatusTag, useMissingFields, RowsPerPage, useRowsPerPage, SearchSelect, RequiredLeft } from "./common.jsx";
+import { tabList, Blueprint, Btn, TableScroll, TagX, Field, Dialog, ErrorBox, StatusTag, useMissingFields, RowsPerPage, useRowsPerPage, SearchSelect, RequiredLeft } from "./common.jsx";
 
 // What the error box calls each field, kept in step with its label above the
 // box it points at — "Site · LSD is required" is no help if the label reads
@@ -36,6 +36,12 @@ function lastUsedChip(contact) {
 }
 
 export function HomeScreen({ onCreateJob, onOpenJob, onStartTicket, currentUser, clients, contractors, contacts }) {
+  // The same question Job detail's Create ticket button asks, for the same
+  // reason: a Helper has no ticket tab and a Coordinator cannot read prices,
+  // so either one following this button lands on an editor that turns them
+  // away — or files the day as a numbered $0 draft. Asked of tabList and
+  // seesPrices so the two screens can never disagree about who may bill.
+  const canRaiseTickets = tabList(currentUser && currentUser.tabs).includes("ticket") && pricesFor(currentUser);
   const [filter, setFilter] = useState("All");
   const [query, setQuery] = useState("");
   const [searchField, setSearchField] = useState("any");
@@ -177,7 +183,9 @@ export function HomeScreen({ onCreateJob, onOpenJob, onStartTicket, currentUser,
               opening it first. From here it is two choices — whose job, and
               which one — which is how a technician thinks about it at the end
               of a day. */}
-          <Btn variant="secondary" style={{ whiteSpace: "nowrap" }} onClick={() => setShowNewTicket(true)}>+ Ticket</Btn>
+          {canRaiseTickets && (
+            <Btn variant="secondary" style={{ whiteSpace: "nowrap" }} onClick={() => setShowNewTicket(true)}>+ Ticket</Btn>
+          )}
           <Btn variant="primary" style={{ whiteSpace: "nowrap" }} onClick={() => setShowNew(true)}>+ Job</Btn>
         </div>
       </div>
@@ -258,7 +266,12 @@ export function HomeScreen({ onCreateJob, onOpenJob, onStartTicket, currentUser,
       {showNewTicket && (
         <NewTicketDialog
           onClose={() => setShowNewTicket(false)}
-          onChosen={job => { setShowNewTicket(false); onStartTicket(job); }} />
+          // Closed only once the ticket screen is actually open, the same
+          // rule Job detail's Create ticket dialog keeps: opening it needs
+          // the job's record, and a read that fails leaves the person on the
+          // board with a toast and the client and job they picked thrown
+          // away. Staying open is how they try again with one tap.
+          onChosen={async job => { if (await onStartTicket(job) !== false) setShowNewTicket(false); }} />
       )}
 
       {showNew && (
@@ -288,6 +301,9 @@ function NewTicketDialog({ onClose, onChosen }) {
   const [jobId, setJobId] = useState("");
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState("");
+  // Continue is a fetch now that it waits for the ticket screen to open, so
+  // it says so and can't be tapped twice on a slow link.
+  const [opening, setOpening] = useState(false);
 
   useEffect(() => {
     if (!client) { setJobs([]); setJobId(""); return; }
@@ -308,11 +324,20 @@ function NewTicketDialog({ onClose, onChosen }) {
 
   const job = jobs.find(j => j.dbId === jobId);
 
+  const choose = async () => {
+    if (!job || opening) return;
+    setError("");
+    setOpening(true);
+    try { await onChosen(job); }
+    catch (e) { setError(e.message || "Couldn't open the ticket screen — try again."); }
+    setOpening(false);
+  };
+
   return (
     <Dialog title="New ticket" maxWidth={520} onClose={onClose}
       actions={<>
-        <Btn variant="secondary" onClick={onClose}>Cancel</Btn>
-        <Btn variant="primary" disabled={!job} onClick={() => onChosen(job)}>Continue</Btn>
+        <Btn variant="secondary" onClick={onClose} disabled={opening}>Cancel</Btn>
+        <Btn variant="primary" disabled={!job || opening} onClick={choose}>{opening ? "Opening…" : "Continue"}</Btn>
       </>}>
       <ErrorBox>{error}</ErrorBox>
 

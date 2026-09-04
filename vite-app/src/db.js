@@ -372,12 +372,12 @@ export const Db = {
   // seeded data proves duplicate names happen, and a page boundary landing
   // inside a run of one name would otherwise drop or double people.
   async _allRows(table) {
-    return fetchAllPages(async page => {
+    return fetchAllPages(async (page, size) => {
       const { data, error, count } = await sbClient
         .from(table)
         .select("*", page === 0 ? { count: "exact" } : {})
         .order("name").order("id")
-        .range(page * RESPONSE_ROW_CAP, (page + 1) * RESPONSE_ROW_CAP - 1);
+        .range(page * size, page * size + size - 1);
       if (error) throw error;
       return { rows: data || [], total: count ?? (data || []).length };
     });
@@ -562,14 +562,14 @@ export const Db = {
     const start = new Date(`${fromDay}T00:00:00`);
     const end = new Date(`${toDay}T00:00:00`);
     end.setDate(end.getDate() + 1);
-    const data = await fetchAllPages(async page => {
+    const data = await fetchAllPages(async (page, size) => {
       const { data: rows, error, count } = await sbClient
         .from("jobs")
         .select("id, job_number, project, lsd, afe, area, method, procedure, status, created_at, client_id, contractor_id, created_by, clients(name), contractors(name), profiles!jobs_created_by_fkey(name)", page === 0 ? { count: "exact" } : {})
         .gte("created_at", start.toISOString())
         .lt("created_at", end.toISOString())
         .order("created_at").order("id")
-        .range(page * RESPONSE_ROW_CAP, (page + 1) * RESPONSE_ROW_CAP - 1);
+        .range(page * size, page * size + size - 1);
       if (error) throw error;
       return { rows: rows || [], total: count ?? (rows || []).length };
     });
@@ -639,9 +639,20 @@ export const Db = {
     const filesLeft = await removeStoredPdfs(result);
     invalidate("job_numbers");
     invalidate("profiles");
+    // The half-entered ticket and assessment copies are keyed by the job they
+    // are being built against (ticketMobile and jhaMobile both key on the
+    // job's dbId; a ticket already saved is keyed by its own id instead, and
+    // there is nothing here to match that against). They matched none of the
+    // patterns below, so a recovery copy for a job that has just been
+    // archived and removed outlived it — counted for ever after in the "you
+    // have half-entered work on this device" warning at sign-out, for a job
+    // whose screen can no longer be opened to finish or discard it.
+    const cleared = new Set((jobIds || []).map(String));
+    const wipJob = k => { const m = /^(?:ticket|jha)\.wip\.(.+)$/.exec(k); return m ? m[1] : null; };
     const keys = await OfflineCache.keys("").catch(() => []);
     await Promise.all(keys
-      .filter(k => k === "jobs.recent" || /^(job|jhas|reports|tickets|jha\.last|jobs\.client)\./.test(k))
+      .filter(k => k === "jobs.recent" || /^(job|jhas|reports|tickets|jha\.last|jobs\.client)\./.test(k)
+        || cleared.has(wipJob(k)))
       .map(k => OfflineCache.remove(k)));
     return {
       jobs: Number(result.jobs || 0), tickets: Number(result.tickets || 0),
@@ -827,12 +838,12 @@ export const Db = {
       // empty list — which the cache below then wrote over a complete one,
       // so Job detail read "None on file yet." offline for a job with a
       // dozen tickets. A page that fails throws, and nothing is written.
-      const all = (table, cols, newestFirst) => fetchAllPages(async page => {
+      const all = (table, cols, newestFirst) => fetchAllPages(async (page, size) => {
         const { data: rows, error, count } = await sbClient
           .from(table).select(cols, page === 0 ? { count: "exact" } : {})
           .in("job_id", ids)
           .order(newestFirst, { ascending: false }).order("id")
-          .range(page * RESPONSE_ROW_CAP, (page + 1) * RESPONSE_ROW_CAP - 1);
+          .range(page * size, page * size + size - 1);
         if (error) throw error;
         return { rows: rows || [], total: count ?? (rows || []).length };
       });
@@ -911,7 +922,12 @@ export const Db = {
     // maybeSingle rather than single, so a job that hasn't synced yet says so.
     // It reads as PostgREST's "Cannot coerce the result to a single JSON
     // object" otherwise, which tells the person holding the phone nothing.
+    // But a session that died mid-shift reads as anon, and anon sees no jobs
+    // at all — every job on the truck would then be "still waiting to sync",
+    // which sends the technician looking at their signal instead of at the
+    // sign-in they actually need.
     if (!data) {
+      await assertSessionAlive();
       throw new Error("This job hasn't reached the database yet — it's still waiting to sync. It'll go through once the job ahead of it does.");
     }
     if (data.status === "Complete") {
@@ -1102,6 +1118,14 @@ export const Db = {
     OfflineCache.put("jhas." + id, []);
     OfflineCache.put("reports." + id, []);
     OfflineCache.put("tickets." + id, []);
+    // The two rep columns as well, which the record reads from a key of their
+    // own. Not a stand-in: createJob never sets client_contact_id or
+    // contractor_contact_id, so the organisations' primaries genuinely are
+    // this job's reps until somebody edits them, and null for both is exactly
+    // what the row will say when it syncs. Without it, getJobRecord's read
+    // fails out of range and the job comes back repsUnknown — Create ticket
+    // and Edit greyed out on a job the crew raised in the field minutes ago.
+    OfflineCache.put("job.reps." + id, { client_contact_id: null, contractor_contact_id: null });
     const board = await OfflineCache.read("jobs.recent").catch(() => null);
     const rows = board && board.value && board.value.rows ? board.value.rows : [];
     OfflineCache.put("jobs.recent", {
@@ -2257,7 +2281,7 @@ export const Db = {
   // across every job — an open JHA is a dose record with no end reading,
   // and until now nothing listed them anywhere but the job's own page.
   async listMyOpenJhas(profileId) {
-    const data = await fetchAllPages(async page => {
+    const data = await fetchAllPages(async (page, size) => {
       const { data: rows, error, count } = await sbClient
         .from("jhas")
         .select("id, work_date, signed_at, status, job_id, jobs(job_number, project, clients(name))",
@@ -2265,7 +2289,7 @@ export const Db = {
         .eq("signed_by", profileId)
         .eq("status", "Open")
         .order("signed_at", { ascending: false }).order("id")
-        .range(page * RESPONSE_ROW_CAP, (page + 1) * RESPONSE_ROW_CAP - 1);
+        .range(page * size, page * size + size - 1);
       if (error) throw error;
       return { rows: rows || [], total: count ?? (rows || []).length };
     });
@@ -2284,7 +2308,7 @@ export const Db = {
     // paged anyway, so a forgotten draft past row 1,000 can never be the one
     // that silently drops off — that draft is exactly what the screen exists
     // to surface.
-    const data = await fetchAllPages(async page => {
+    const data = await fetchAllPages(async (page, size) => {
       const { data: rows, error, count } = await sbClient
         .from("tickets")
         .select("id, work_date, status, total, created_at, jobs(job_number, project, clients(name))",
@@ -2292,7 +2316,7 @@ export const Db = {
         .eq("technician_id", technicianId)
         .eq("status", "Draft")
         .order("created_at", { ascending: false }).order("id")
-        .range(page * RESPONSE_ROW_CAP, (page + 1) * RESPONSE_ROW_CAP - 1);
+        .range(page * size, page * size + size - 1);
       if (error) throw error;
       return { rows: rows || [], total: count ?? (rows || []).length };
     });
@@ -2649,14 +2673,14 @@ export const Db = {
     // long-lived house card can accumulate more than the 1000-row cap,
     // which would silently drop the oldest changes from the audit dialog.
     // Ordered by changed_at then id so the pages can't overlap or skip.
-    const data = await fetchAllPages(async page => {
+    const data = await fetchAllPages(async (page, size) => {
       const { data: rows, error, count } = await sbClient
         .from("rate_line_history")
         .select("id, label, kind, unit, old_rate, new_rate, changed_at, profiles(name)",
           page === 0 ? { count: "exact" } : {})
         .eq("schedule_id", scheduleId)
         .order("changed_at", { ascending: false }).order("id")
-        .range(page * RESPONSE_ROW_CAP, (page + 1) * RESPONSE_ROW_CAP - 1);
+        .range(page * size, page * size + size - 1);
       if (error) throw error;
       return { rows: rows || [], total: count ?? (rows || []).length };
     });
@@ -2710,7 +2734,16 @@ export const Db = {
       if (pErr) throw pErr;
       schedule = pub;
     }
-    if (!schedule) return null;
+    // No schedule found — but "none published" and "signed out" look the
+    // same from here: with the session gone the reads above run as anon,
+    // which sees no rate_schedules rows at all. Told apart, because the
+    // billing screen turns the first into "this client has no published rate
+    // schedule" — a message that sends someone to the Rate admin screen to
+    // fix a card that was never broken.
+    if (!schedule) {
+      await assertSessionAlive();
+      return null;
+    }
 
     const { data: lines, error: lErr } = await sbClient
       .from("rate_lines").select("*").eq("schedule_id", schedule.id)
@@ -2987,12 +3020,12 @@ export const Db = {
       // every profile this returns — a capped read would silently drop
       // whoever sorted past the cap. Ordered by id in the query for stable
       // pages; the display sort stays client-side, by name.
-      const data = await fetchAllPages(async page => {
+      const data = await fetchAllPages(async (page, size) => {
         const { data: rows, error, count } = await sbClient
           .from("profiles")
           .select("*", page === 0 ? { count: "exact" } : {})
           .order("id")
-          .range(page * RESPONSE_ROW_CAP, (page + 1) * RESPONSE_ROW_CAP - 1);
+          .range(page * size, page * size + size - 1);
         if (error) throw error;
         return { rows: rows || [], total: count ?? (rows || []).length };
       });
@@ -3220,13 +3253,13 @@ export const Db = {
   // them" always is, cached because the set barely moves.
   async listJobNumbers() {
     return cached("job_numbers", () =>
-      fetchAllPages(async page => {
+      fetchAllPages(async (page, size) => {
         const { data, error, count } = await sbClient
           .from("jobs")
           .select("job_number", { count: "exact" })
           .order("job_number", { ascending: true })
           .order("id", { ascending: true })
-          .range(page * 1000, page * 1000 + 999);
+          .range(page * size, page * size + size - 1);
         if (error) throw error;
         return { rows: (data || []).map(j => j.job_number), total: count || 0 };
       })

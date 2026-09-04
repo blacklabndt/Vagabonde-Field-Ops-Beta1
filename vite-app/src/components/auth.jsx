@@ -115,6 +115,11 @@ export function SignInScreen({ onSignIn, notice = "" }) {
       console.error("Couldn't clear the previous account's cached data:", e);
       setError("This device couldn't clear the previous person's data — try again.");
       { const { error: outErr } = await sbClient.auth.signOut(); if (outErr) forgetStoredSession(); }
+      // The remembered identity is the last owner's, and the store still
+      // holds their work: leaving it here means the next start without
+      // signal opens the app as them for whoever is now holding the tablet.
+      // The boot's own claim-failed branch removes it for the same reason.
+      try { await OfflineCache.remove(IDENTITY_KEY); } catch (e2) { console.error("Couldn't forget this device's remembered identity:", e2); }
       return;
     }
     // Remembered so the next start with no signal knows who this is, rather

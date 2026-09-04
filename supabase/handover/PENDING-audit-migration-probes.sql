@@ -10,6 +10,9 @@
 --   again and diff. Each block says what the two runs should say.
 --   Block 12 is the exception: it calls a function that does not exist yet,
 --   so before the migration it raises 42883 and that IS its "before".
+--   Block 5d is a second kind of exception: it runs in both, but only its
+--   AFTER line is an assertion — its "before" refuses for a reason that has
+--   nothing to do with the finding. Its own comment says why.
 --
 -- WHAT ROLE SIMULATION ACTUALLY SIMULATES
 --   `set local role authenticated` puts us in the API's role, so RLS is
@@ -355,23 +358,42 @@ rollback;
 -- rollback;
 
 -- 5d · The other half of what section 1 sets loose: delete_job. Its admin
---      test was `is_admin := user_role() = 'Admin'`, and the three gates
---      under it all read `not is_admin` — null on a locked account, and
---      null takes the false branch, so the ban that section 1 exists to
---      enforce would have handed that account the discard. This is the
---      block that calls the function for real rather than reading it, and
---      it is read-only twice over: the inner block is a subtransaction, so
+--      test is `is_admin := user_role() = 'Admin'`, and the three gates
+--      under it all read `not is_admin` — which is null, not false, once
+--      user_role() answers null for a locked account, and a null IF takes
+--      the false branch. The creator test would stop refusing, the discard
+--      test would stop refusing, and the ban section 1 exists to enforce
+--      would hand that account the discard instead. This is the block that
+--      calls the function for real rather than reading it, and it is
+--      read-only twice over: the inner block is a subtransaction, so
 --      anything raised inside it unwinds the deletes — including the
 --      sentinel this probe raises ITSELF when delete_job returns instead
 --      of refusing — and the outer transaction ends in ROLLBACK regardless.
+--
+--      READ THIS AS AN ASSERTION ABOUT THE "AFTER" RUN ONLY. The null-rank
+--      hole above is reachable in exactly one state: section 1 applied and
+--      section 3 not. Before the migration user_role() still reads the
+--      claim, and the claim this block forges says 'Technician' — so
+--      is_admin is FALSE, not null, the gates refuse the way they refuse
+--      any non-creator, and 'WENT THROUGH' is unreachable. After the
+--      migration section 3's is_staff() door has already turned the
+--      account away before is_admin is computed at all. The one migration
+--      carries both sections in the one transaction, so the state that
+--      would print 'WENT THROUGH' never exists outside it. If this block
+--      ever DOES print it, something has applied section 1 without
+--      section 3 and delete_job is open to every locked account: stop and
+--      finish the migration.
 --
 --      Like 5b it refuses to run without a locked account, because with
 --      none the 'sub' is null, auth.uid() is null, and it would refuse for
 --      the wrong reason. Uncomment 5c's update at the top of THIS
 --      transaction, or lock a seed account, then rerun.
 --
---      BEFORE: '5d · WENT THROUGH …' — the discard ran and was undone.
---      AFTER:  '5d · refused 42501 …' — the door test turned it away.
+--      BEFORE: '5d · refused P0001 — You can only delete a job you raised
+--              yourself …' — the creator test, on a claim the database
+--              still believes.
+--      AFTER:  '5d · refused 42501 …' — the is_staff() door turned it away
+--              before the rank was ever asked for. This is the assertion.
 begin;
 do $$
 declare
@@ -419,7 +441,7 @@ begin
   exception
     when sqlstate 'PRB01' then
       perform set_config('probe.r5d', format(
-        '5d · WENT THROUGH — a locked account discarded job %s and got back %s (rolled back)',
+        '5d · WENT THROUGH — section 1 without section 3: a locked account discarded job %s and got back %s (rolled back)',
         v_job, v_out), true);
     when others then
       perform set_config('probe.r5d', format(

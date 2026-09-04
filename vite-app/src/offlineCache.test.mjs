@@ -19,8 +19,21 @@ import assert from "node:assert/strict";
 const nav = { onLine: true };
 Object.defineProperty(globalThis, "navigator", { value: nav, configurable: true, writable: true });
 
-const { OfflineCache } = await import("./offlineCache.js");
+const { OfflineCache, CACHE_OWNER_KEY } = await import("./offlineCache.js");
 const { IDENTITY_KEY } = await import("./session.js");
+
+// Makes one key unreadable — a store that faults rather than a key that is
+// absent, which is the distinction the handover turns on. The get is where
+// IndexedDB reports it, so that is where this bites.
+async function withUnreadable(key, fn) {
+  const real = IDBObjectStore.prototype.get;
+  IDBObjectStore.prototype.get = function (k) {
+    if (k === key) throw new Error("the store would not read");
+    return real.call(this, k);
+  };
+  try { return await fn(); }
+  finally { IDBObjectStore.prototype.get = real; }
+}
 
 // readThrough deliberately does not await the write it starts — a read must
 // not wait on disk. So poll for the outcome instead of sleeping.
@@ -147,6 +160,33 @@ test("an unchanged result skips the disk; a changed one does not", async () => {
   assert.equal(hit.value.film, 1350);
 });
 
+test("nothing is remembered about nothing, and the last real answer survives it", async () => {
+  // A null from the fetcher is an absence, not a copy — and the reads that
+  // return one do it from an empty result, which is also exactly what a
+  // lapsed session sees. Cached, that absence comes back offline as a fact:
+  // "this client has no published rate schedule", about a client whose card
+  // is fine.
+  const got = await OfflineCache.readThrough("catalog.11", async () => null);
+  assert.equal(got, null, "the caller still gets the answer it read");
+  await OfflineCache.put("_probe", 1);   // an awaited write, so any skipped one has had its turn
+  assert.equal(await OfflineCache.read("catalog.11"), null, "nothing was stored");
+
+  // And a null after a real answer leaves the real one where it was, rather
+  // than overwriting the only offline copy of the client's card with an
+  // emptiness.
+  await OfflineCache.readThrough("catalog.12", async () => ({ film: 1200 }));
+  await eventually(() => OfflineCache.read("catalog.12"), "the real catalog to reach disk");
+  await OfflineCache.readThrough("catalog.12", async () => undefined);
+  await OfflineCache.put("_probe", 2);
+  assert.deepEqual((await OfflineCache.read("catalog.12")).value, { film: 1200 });
+
+  // The skip-unchanged guard was not told about the null either, so the next
+  // real answer still writes.
+  await OfflineCache.readThrough("catalog.11", async () => ({ film: 1350 }));
+  const hit = await eventually(() => OfflineCache.read("catalog.11"), "the real catalog the null must not have silenced");
+  assert.deepEqual(hit.value, { film: 1350 });
+});
+
 test("a write that failed leaves the key writable, not silenced", async () => {
   // IndexedDB refuses to store a function and JSON drops it, so this value
   // fails to write while comparing equal to the plain object after it — the
@@ -266,6 +306,35 @@ test("a clear that fails leaves the device the last owner's, and says so out lou
 
   assert.equal(await OfflineCache.owner(), "tech-a", "still A's device, so the next try clears again");
   assert.ok(await OfflineCache.read("ticket.wip.J-77"), "and A's half-entered ticket is still on it");
+});
+
+test("an unreadable owner record refuses the claim and clears nothing", async () => {
+  // "We don't know whose this is" is not "nobody's". Read through a catch
+  // that returned null, a store that faulted for a moment looked unclaimed —
+  // so the claim below emptied the device of the very person signing in and
+  // then recorded them as the owner of what it had just deleted, with no
+  // second attempt ever, because from then on the owner really was them.
+  await OfflineCache.claimFor("tech-a");
+  await OfflineCache.put("ticket.wip.J-77", { weldLines: [{ key: "rt_film:2in", qty: 14 }] });
+
+  await withUnreadable(CACHE_OWNER_KEY, async () => {
+    await assert.rejects(() => OfflineCache.claimFor("tech-a"), /would not read/);
+  });
+  assert.ok(await OfflineCache.read("ticket.wip.J-77"), "their morning's welds are still on the device");
+  assert.equal(await OfflineCache.owner(), "tech-a", "and it is still theirs, so the next try can decide properly");
+
+  // The remembered-identity probe is the other half of the same answer: it is
+  // the whole of the "unclaimed, but already theirs" case, so an unreadable
+  // one must not fall through to the clear either.
+  await OfflineCache.clear();
+  await OfflineCache.put(IDENTITY_KEY, { id: "tech-a", name: "Kyle Keith" });
+  await OfflineCache.put("ticket.wip.J-77", { weldLines: [] });
+
+  await withUnreadable(IDENTITY_KEY, async () => {
+    await assert.rejects(() => OfflineCache.claimFor("tech-a"), /would not read/);
+  });
+  assert.ok(await OfflineCache.read("ticket.wip.J-77"), "nothing was emptied on a read nobody could make");
+  assert.equal(await OfflineCache.owner(), null, "and the device is still unclaimed");
 });
 
 test("a device nobody has claimed is emptied on the next sign-in", async () => {

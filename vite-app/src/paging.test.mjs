@@ -21,9 +21,12 @@ function source(n, cap = RESPONSE_ROW_CAP) {
   return {
     rows,
     remove(id) { const i = rows.findIndex(r => r.id === id); if (i >= 0) rows.splice(i, 1); },
-    page(p) {
-      const from = p * RESPONSE_ROW_CAP;
-      return { rows: rows.slice(from, from + cap), total: rows.length };
+    // The offset read, shaped exactly like db.js's: the walk says which block
+    // and how big a block is, the query asks for that span, and the API hands
+    // back no more than `cap` of it however much was asked for.
+    page(p, size) {
+      const from = p * size;
+      return { rows: rows.slice(from, from + Math.min(size, cap)), total: rows.length };
     },
     after(key) {
       const start = key == null ? 0 : rows.findIndex(r => r.id > key);
@@ -64,9 +67,21 @@ test("offset paging reads every page of a still source, in order", async () => {
   // order" is the other half, and it is the half concurrency could break.
   const s = source(RESPONSE_ROW_CAP * 2 + 3);
   let asked = 0;
-  const all = await fetchAllPages(async p => { asked++; return s.page(p); });
+  const all = await fetchAllPages(async (p, size) => { asked++; return s.page(p, size); });
   assert.equal(asked, 3);
   assert.equal(all.length, RESPONSE_ROW_CAP * 2 + 3);
+  assert.deepEqual(all.map(r => r.id), s.rows.map(r => r.id));
+});
+
+test("offset paging reads every row when the source caps pages below the constant", async () => {
+  // The API's max-rows lowered to 250, the same setting the keyset walk has
+  // to survive. Page 0 asks for the cap and gets 250, and a walk that took
+  // the constant for the page size would then have asked for rows 1000-1249
+  // next — reading 387 of 1137 rows and calling it the whole reference list,
+  // with nothing on screen to say so.
+  const s = source(RESPONSE_ROW_CAP + 137, 250);
+  const all = await fetchAllPages(async (p, size) => s.page(p, size));
+  assert.equal(all.length, RESPONSE_ROW_CAP + 137);
   assert.deepEqual(all.map(r => r.id), s.rows.map(r => r.id));
 });
 
@@ -89,10 +104,10 @@ test("offset paging skips a row when one is deleted mid-walk", async () => {
   // The reason the paid-from reads moved off it: this is not a hypothetical.
   const s = source(RESPONSE_ROW_CAP * 2 + 5);
   let seen = 0;
-  const all = await fetchAllPages(async p => {
+  const all = await fetchAllPages(async (p, size) => {
     if (seen === 1) s.remove(1);
     seen++;
-    return s.page(p);
+    return s.page(p, size);
   });
   const ids = new Set(all.map(r => r.id));
   const missed = s.rows.filter(r => !ids.has(r.id));

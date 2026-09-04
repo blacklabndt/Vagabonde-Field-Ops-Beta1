@@ -18,7 +18,7 @@ import { ArchiveDialog } from "./archiveDialog.jsx";
 const SECTION_TITLE = { fontFamily: "var(--font-heading)", fontWeight: 600, fontSize: 16, marginBottom: 4 };
 const SECTION_HELP = { fontSize: 13, color: "color-mix(in srgb, var(--color-text) 65%, transparent)", marginBottom: 12, lineHeight: 1.5 };
 
-export function AdminSetupScreen({ currentUser }) {
+export function AdminSetupScreen({ currentUser, onArchiveCleared }) {
   // The Archive dropdown: "year" or "range" opens the dialog.
   const [archiveMode, setArchiveMode] = useState(null);
   const [form, setForm] = useState({
@@ -250,8 +250,12 @@ export function AdminSetupScreen({ currentUser }) {
         <RecentErrorsPanel />
       </div>
 
+      {/* onCleared is passed straight through: the jobs the clear removes may
+          be open elsewhere in the app — a job screen, a ticket, the drafts
+          badge — and only App holds any of that. */}
       {archiveMode && (
-        <ArchiveDialog mode={archiveMode} currentUser={currentUser} onClose={() => setArchiveMode(null)} />
+        <ArchiveDialog mode={archiveMode} currentUser={currentUser} onClose={() => setArchiveMode(null)}
+          onCleared={onArchiveCleared} />
       )}
     </div>
   );

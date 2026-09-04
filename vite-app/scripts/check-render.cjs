@@ -24,7 +24,7 @@ const HOOKS = [
   "useState", "useEffect", "useRef", "useCallback",
   "useMemo", "useReducer", "useContext", "useLayoutEffect",
   "useId", "useSyncExternalStore", "useTransition", "useDeferredValue",
-  "useImperativeHandle", "useInsertionEffect",
+  "useImperativeHandle", "useInsertionEffect", "useDebugValue",
 ];
 
 // Tags that are components to JSX but never imports.
@@ -125,7 +125,11 @@ for (const file of walk(root).filter(f => /\.(jsx?|mjs)$/.test(f))) {
   }
 
   const used = new Set();
-  for (const m of src.matchAll(/<([A-Z]\w*)[\s/>]/g)) used.add(m[1]);
+  // The dots are part of the name, or the check below them is dead: `\w` stops
+  // at the dot, so `<Motion.div>` was read as `<Motion` — which never matched
+  // the `[\s/>]` that has to follow, so the tag was not collected at all and
+  // the namespaced branch under this loop had never once run.
+  for (const m of src.matchAll(/<([A-Z][\w$]*(?:\.[\w$]+)*)[\s/>]/g)) used.add(m[1]);
 
   for (const tag of used) {
     // <Foo.Bar> resolves through Foo.

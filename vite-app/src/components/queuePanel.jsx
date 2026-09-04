@@ -74,7 +74,17 @@ const discardPrompt = item => {
   const what = (LABELS[item.type] || item.type).toLowerCase();
   const p = item.payload || {};
   if (item.type === "ticket" && p.alreadyCreated) {
-    return `Discard this ${what}? The ticket itself is already saved${p.ticketId ? ` as ${p.ticketId}` : ""}${SENT_FOR_SIGNATURE.test(item.lastError || "") ? " and has gone to the client for signature" : ""} — it stays exactly as it is. Only the changes made on this device are thrown away, and they can't be got back.`;
+    const asNumber = p.ticketId ? ` as ${p.ticketId}` : "";
+    // The signature refusal only stops the billing half: crew rows stay
+    // writable until the client signs, so the replay files those hours
+    // before it parks the item. Saying "only the changes made on this
+    // device are thrown away" of that item would be twice wrong — the
+    // hours are already on the ticket, and the welds and charges are the
+    // one thing a discard really does end.
+    if (SENT_FOR_SIGNATURE.test(item.lastError || "")) {
+      return `Discard this ${what}? The ticket itself is already saved${asNumber} and has gone to the client for signature — it stays exactly as it is, and the crew hours entered on this device are already on it. Only its welds and charges from this device were never applied; discarding gives up on them, and they can't be got back.`;
+    }
+    return `Discard this ${what}? The ticket itself is already saved${asNumber} — it stays exactly as it is. Only the changes made on this device are thrown away, and they can't be got back.`;
   }
   if (item.type === "report" && p.reportId) {
     return `Discard this ${what}? The PDF is already uploaded and on the job — it stays there. Only what is still owed here${p.recipient ? `, the email to ${p.recipient},` : ""} is thrown away. This can't be undone.`;
@@ -135,6 +145,15 @@ export function QueueDialog({ items, onRetry, onClose }) {
                 <Btn variant="ghost" style={{ marginLeft: "auto" }} onClick={() => discard(item)}>Discard</Btn>
               </div>
               <div style={{ fontSize: 13, color: "var(--color-accent-700)" }}>{item.lastError}</div>
+              {/* The refusal is only half the story, and the half it leaves
+                  out is the one that decides what to do: the hours are on
+                  the ticket, the billing is not, and nothing here will
+                  change that until the approval is cancelled. */}
+              {item.type === "ticket" && SENT_FOR_SIGNATURE.test(item.lastError || "") && (
+                <div style={{ fontSize: 13, color: "color-mix(in srgb, var(--color-text) 65%, transparent)" }}>
+                  The crew hours entered on this device were saved on it. Only its welds and charges were not applied — cancel the approval and re-enter them, then discard this item.
+                </div>
+              )}
             </Blueprint>
           ))}
         </>

@@ -75,6 +75,14 @@ export function ArchiveDialog({ mode, currentUser, onClose, onCleared }) {
     setError("");
     setVerified(null);
     setConfirmWord("");
+    // The previous build's figures, name and manifest go too. Building again
+    // is what the dialog tells the owner to do when the archive came back
+    // incomplete or the zip didn't check out, so nothing from the build being
+    // replaced may outlive it — least of all the manifest, which is what the
+    // next downloaded zip is checked against.
+    setSummary(null);
+    setManifest(null);
+    setZipName("");
     setProgress({ index: 0, count: jobs.length, job: jobs[0].id, step: "starting", bytes: 0 });
     try {
       const { blob, summary: s, manifest: m } = await buildArchive({
@@ -178,6 +186,11 @@ export function ArchiveDialog({ mode, currentUser, onClose, onCleared }) {
   ) : stage === "built" ? (
     <>
       <Btn variant="secondary" onClick={onClose}>Keep the jobs</Btn>
+      {/* Both ways out of a bad build — an incomplete archive, and a zip that
+          didn't check out — end with the words "build it again", and until now
+          there was nothing here to do it with: the owner had to close the
+          dialog and start over from the year picker. */}
+      <Btn variant="secondary" onClick={build} disabled={checking}>Build it again</Btn>
       <Btn variant="primary" onClick={clear} disabled={!canClear || confirmWord.trim().toUpperCase() !== "CLEAR"}
         title={!complete ? "The archive is not complete — see above" : !verified ? "Check the downloaded zip first" : !verified.ok ? "The downloaded zip did not check out" : undefined}>
         Clear {plural(count, "job")} from the app

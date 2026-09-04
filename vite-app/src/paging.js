@@ -35,9 +35,19 @@ export const RESPONSE_ROW_CAP = 1000;
 // acceptable trade for the reference lists (a dropped contractor reappears on
 // the next load); it is not acceptable for anything people are paid or billed
 // from, and those use fetchAllKeyset below.
+//
+// `fetchPage(page, pageSize)` gets the block to read and how many rows a block
+// holds, and asks for rows `page * pageSize` onwards. The size is handed over
+// rather than taken from the constant for the same reason the keyset walk
+// learns it: RESPONSE_ROW_CAP is what a page asks for, and the API's max-rows
+// setting is what it gets. Lower that setting and page 0 comes back short —
+// pages built on the constant would then read rows 0-249, 1000-1249,
+// 2000-2249, with the rows in between never asked for at all. So page 0 asks
+// for the cap and teaches the walk what a block really is; every later page
+// is offset by that.
 const PAGE_CONCURRENCY = 6;
 export async function fetchAllPages(fetchPage) {
-  const first = await fetchPage(0);
+  const first = await fetchPage(0, RESPONSE_ROW_CAP);
   const rows = first.rows.slice();
   // A page 0 that came back without a usable total has said nothing about
   // what follows it, and the arithmetic below turns that into `new Array(NaN)`
@@ -48,14 +58,18 @@ export async function fetchAllPages(fetchPage) {
   const total = Number(first.total);
   if (!first.rows.length || !Number.isFinite(total) || rows.length >= total) return rows;
 
-  const pageCount = Math.ceil(total / RESPONSE_ROW_CAP);
+  // What page 0 actually returned is the block size, whatever was asked for.
+  // It is never zero here (the empty case returned above) and never more than
+  // the cap, so the arithmetic below is safe either way.
+  const pageSize = Math.min(first.rows.length, RESPONSE_ROW_CAP);
+  const pageCount = Math.ceil(total / pageSize);
   const pages = new Array(pageCount);
   pages[0] = first.rows;
 
   for (let start = 1; start < pageCount; start += PAGE_CONCURRENCY) {
     const batch = [];
     for (let p = start; p < Math.min(start + PAGE_CONCURRENCY, pageCount); p++) {
-      batch.push(fetchPage(p).then(r => { pages[p] = r.rows; }));
+      batch.push(fetchPage(p, pageSize).then(r => { pages[p] = r.rows; }));
     }
     await Promise.all(batch);
   }

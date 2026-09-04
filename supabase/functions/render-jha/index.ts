@@ -81,8 +81,16 @@ Deno.serve(async (req) => {
       .upload(key, bytes, { contentType: "application/pdf", upsert: true });
     if (upErr) throw new Error(`Couldn't file the PDF: ${upErr.message}`);
 
+    // Record where it was filed. A failure here is said, not swallowed (see
+    // send-jha): the PDF is in the bucket, but a row with no pdf_key is a
+    // JHA the app cannot open, cannot attach and will re-render to a fresh
+    // key next time — and answering ok:true would hide all of that behind a
+    // green tick.
     if (key !== (jha as any).pdf_key) {
-      await admin.from("jhas").update({ pdf_key: key }).eq("id", jhaId);
+      const { error: markErr } = await admin.from("jhas").update({ pdf_key: key }).eq("id", jhaId);
+      if (markErr) {
+        throw new Error(`The PDF was filed, but the assessment couldn't be pointed at it — it will still show as having no PDF. Try again. (${markErr.message})`);
+      }
     }
 
     return new Response(JSON.stringify({ ok: true, pdfKey: key }), {

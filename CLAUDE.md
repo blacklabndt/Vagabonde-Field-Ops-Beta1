@@ -234,11 +234,24 @@ session has set `app.confirm_total_wipe = 'yes'`.
   and sign their own ticket from the link. Withdrawing an approval is the
   `withdraw_ticket_approval(id)` definer RPC. `total` is the trigger's.
 - `updateTicket` refuses a Draft write over an Awaiting-approval ticket
-  (plainError). "Draft" is the word every save sends — the editor hardcodes
-  it and a queued replay carries it hours later — so letting it through
-  replaces the lines and moves the money under a live approval link. The
-  outbox keeps the item with that message; `withdraw_ticket_approval` is the
-  only way back.
+  (plainError, flagged `sentForApproval`). "Draft" is the word every save
+  sends — the editor hardcodes it and a queued replay carries it hours
+  later — so letting it through replaces the lines and moves the money under
+  a live approval link. A live save shows the refusal and stops. A queued
+  replay saves what it still can and then parks: App.jsx catches the flag,
+  writes the crew hours (they stay writable until the client signs, and they
+  are the day's pay), skips the approval resend so the rep's token is not
+  reset mid-signature, raises the forced toast once (checkpoint
+  `refusalTold`), and re-throws the refusal so the item stays in the outbox
+  with it as `lastError` — badge lit, the queue panel saying the hours are on
+  the ticket and only the welds and charges were not. Retrying is safe (a
+  refused update and a crew delete-then-insert, the same refusal again);
+  discarding is how it ends. The one exception is this item's own send:
+  `checkpoint({ sendAttempted: true })` is written before sendTicketApproval,
+  so a refusal met with `sendAttempted` set is the row this same item moved
+  to Awaiting approval — its lines are already there, and the replay
+  completes quietly. `withdraw_ticket_approval` is the only way to re-price
+  the ticket.
 - Invoicing is `mark_tickets_invoiced(ids, invoiced)` (Admin, definer) —
   Approved ↔ Invoiced with `invoiced_at`; the approved-ticket immutability
   policies are untouched and this RPC is the only door.
@@ -253,11 +266,15 @@ session has set `app.confirm_total_wipe = 'yes'`.
   `is_staff()` too, so a locked account's unexpired token reads nothing.
 - A client rep's "Query this ticket" (approval page) writes tickets.
   queried_at/query_text/query_by with the service role; the tracker shows
-  it; send-ticket-approval clears it on resend. It is throttled to one
-  query — and one email — per ticket per 15 minutes, on the update's own
-  filter (`queried_at.lt`) rather than a prior read, so two simultaneous
-  posts cannot both pass; the page gives the same receipt either way,
-  because the link is the whole credential and it gets forwarded.
+  it; send-ticket-approval clears it on resend. The rep's words always land:
+  the write is unconditional bar `approved_at`, because a filter on
+  `queried_at` once dropped a second — different — query inside the window
+  while the page still told the rep it had been sent. Only the EMAIL is
+  throttled, one per ticket per 15 minutes, off the `queried_at` that came
+  back with THIS request's read, so two racing posts may each mail once:
+  two mails carrying two real queries is the harmless side of that trade, a
+  lost query was not. The page gives the same receipt either way, because
+  the link is the whole credential and it gets forwarded.
   jobs.last_activity_at is kept by definer triggers on tickets/jhas/reports
   (private.touch_job_activity) and orders the board (search_jobs).
   search_tickets also returns filtered_total (null for non-price roles).
@@ -279,7 +296,10 @@ session has set `app.confirm_total_wipe = 'yes'`.
   everything under them, approved tickets included (delete_job refuses
   them), and the client removes the PDFs from the two buckets. Jobs are
   chosen by created_at on local days. It is the one bulk delete in the app;
-  keep every one of those gates.
+  keep every one of those gates. The screen threads `onArchiveCleared`
+  through to the dialog, so a clear also makes App let go of the job and
+  ticket it was holding open and reload the drafts badge — the cleared job
+  may be the one the drawer was pointing at.
 - The clear re-checks before it deletes: immediately before
   `archive_clear_jobs`, inside `liveOnly`, every job's ticket/JHA/report
   counts are read again and compared with the build's (`archiveDrift`). Any
@@ -306,6 +326,11 @@ session has set `app.confirm_total_wipe = 'yes'`.
 - Job detail's Create ticket dialog inserts nothing: it hands a seed (work
   date, this ticket's reps) to the editor, which saves — and queues — like
   a ticket started from Home.
+- The new-work buttons carry the same gates as the screens behind them:
+  Home's "+ Ticket" wants the ticket tab and `seesPrices`, exactly as Job
+  detail's does, and "+ New JHA" waits on the job record the way Create
+  ticket and Edit do — a JHA raised before the reps have been read is a form
+  filled in with the client's usual contacts rather than this job's.
 
 ## People
 

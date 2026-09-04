@@ -274,7 +274,19 @@ export function JobDetailScreen({ job, currentUser, onStartJha, onOpenTicket, on
               {latestJha && latestJha.template && (
                 <span style={{ fontSize: 12, color: "color-mix(in srgb, var(--color-text) 55%, transparent)" }}>{latestJha.template}</span>
               )}
-              <Btn variant="primary" style={{ marginLeft: "auto" }} disabled={complete} onClick={onStartJha}>+ New JHA</Btn>
+              {/* Held back by the job's record for the reason Create ticket
+                  and Edit are: the builder seeds the site rep from this
+                  job's contractor rep, so a record that hasn't landed seeds
+                  the last job's, and one whose reps couldn't be read seeds
+                  the client's usual contact — and that name goes on a signed
+                  assessment. */}
+              <Btn variant="primary" style={{ marginLeft: "auto" }}
+                disabled={complete || !recordLoaded || !!jobRecord.repsUnknown}
+                title={complete ? undefined
+                  : !recordLoaded ? "Waiting for this job's details"
+                  : jobRecord.repsUnknown ? "This job's reps couldn't be read — the panel is showing the client's usual contacts. Reopen the job when you're back in signal."
+                  : undefined}
+                onClick={onStartJha}>+ New JHA</Btn>
             </div>
             {/* The hazards from the last JHA used to be listed here as a grid
                 of chips. They are on the assessment itself, which is one tap

@@ -34,8 +34,13 @@ npm run dev
 
 Opens at `http://localhost:5173`. `npm run build` produces `dist/`, a folder
 of hashed, minified static files to host anywhere (Netlify, Vercel,
-Cloudflare Pages) — React, ReactDOM and Supabase-js are bundled in, so there
-is no CDN dependency at runtime.
+Cloudflare Pages) — React, ReactDOM and Supabase-js are bundled in. Four
+libraries are not: SheetJS (the Excel export), jsPDF and its autotable
+plugin (the timesheet approval PDF) and pdf.js with its worker (the report
+preview) lazy-load from `cdn.jsdelivr.net` the first time a button needs
+them, pinned to an exact version and checked against an SRI hash. The
+service worker caches them from there (`cdn-libraries`, CacheFirst), so each
+device needs a connection for them once and they work offline after that.
 
 ## Deploying
 
@@ -377,6 +382,7 @@ what authorises the rank.
 vite-app/
   index.html                shell; the design system's CSS is linked from public/
   vite.config.js            React plugin, the PWA/service worker config, vendor chunk
+  playwright.config.js      the end-to-end run: projects, the stored sign-ins, retries
   .env.example              VITE_SUPABASE_URL / VITE_SUPABASE_ANON_KEY
   public/_ds/industry-.../  the Industry design system (unmodified)
   public/icons/             app icons (192, 512, 512-maskable, 180 apple-touch)
@@ -434,6 +440,12 @@ vite-app/
       archiveDialog.jsx     Build the archive zip, check it, then unlock the clear
       queuePanel.jsx        The offline-queue badge and its what's-waiting panel
       flappy880.jsx         One of the two easter eggs
+  e2e/                      Playwright against the live project — auth.setup.js signs
+                            the accounts in once, then fieldOps, networkSync and
+                            multiUser drive real screens; helpers.js sweeps the drafts
+                            a run leaves behind
+  scripts/check-render.cjs  the render-name scan `npm test` runs first: every capitalised
+                            tag in a JSX file must resolve to something that file imports
 supabase/
   migrations/               schema, applied in filename order
   functions/                thirteen Edge Functions — the three that send mail
@@ -448,8 +460,10 @@ supabase/
                             written but not yet applied (PENDING-audit-migration.sql)
   *.sql                     one-off operator scripts (seed jobs, restore an admin),
                             each idempotent — paste into the SQL editor
-_ds/industry-.../styles.css the design system as handed off; the copy under
-                            vite-app/public is what the app actually serves
+worker/index.js             the Cloudflare Worker: serves the built assets and proxies
+                            /approve to the approve-ticket function, because Supabase
+                            hands that domain's HTML back as text/plain
+wrangler.jsonc              the Worker's name, its assets binding and its routes
 ```
 
 The office-facing screens (Files, Contacts, Equipment, Timesheets, Rate
@@ -477,10 +491,13 @@ doesn't download it.
   created and is not. The PDF prints them as **Date** and **Filed**. Back-
   dating the document is a real need; back-dating the claim about when it was
   written up would not be.
-- The Excel export lazy-loads SheetJS from a CDN on first use — a 900 KB
-  library behind one button, left as a runtime script tag rather than bundled
-  into every page load. It is the app's only runtime CDN dependency, and the
-  one thing in the app that does not work offline.
+- Four libraries lazy-load from `cdn.jsdelivr.net` on first use rather than
+  riding in every page load: SheetJS for the Excel export (~900 KB behind one
+  button), jsPDF and its autotable plugin for the timesheet approval PDF, and
+  pdf.js with its worker for the report preview. Each is pinned to an exact
+  version and checked against an SRI hash, and the service worker caches them
+  (`cdn-libraries`, CacheFirst) — so a device needs a connection the first
+  time it opens one of those, and never again.
 - Every signed-in account can read every row of `profiles`, including the
   `id_code` certification number. That is deliberate — the JHA prefills both
   workers from it and the printed form has a column for each — and only admins

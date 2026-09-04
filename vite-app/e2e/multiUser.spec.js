@@ -29,12 +29,45 @@ const STATE = "e2e/.auth/state.json";
 const HAS_SECOND = !!(process.env.E2E_EMAIL2 && process.env.E2E_PASSWORD2);
 const STATE2 = "e2e/.auth/state2.json";
 
+// The jobs a test minted drafts on, so afterEach can walk back and cancel
+// them: a test that dies between "Save draft" and the cancel at its end used
+// to leave its draft on the live job, and the retry left a second beside it.
+// Each entry carries the account's banked session as well as the shape of its
+// numbers, because a technician may cancel only their own ticket — so a
+// two-account test parks one entry per person and the sweep visits each.
+let sweepAfter = null;
+
 // Only the desktop project runs this file at all — the mobile project's
 // testMatch is fieldOps alone (playwright.config.js), which is why there is no
 // project check here: a skip that can never fire only inflates the skipped
 // count and reads as coverage that was considered and dropped.
 test.beforeEach(async () => {
   test.skip(!EMAIL || !PASSWORD, "Set E2E_EMAIL and E2E_PASSWORD in vite-app/e2e/.env");
+  sweepAfter = null;
+});
+
+test.afterEach(async ({ browser }) => {
+  const left = sweepAfter;
+  sweepAfter = null;
+  if (!left) return;
+  // The other two specs sweep with the test's own `page` fixture. These tests
+  // have none: their pages live in contexts they open themselves and close in
+  // a finally, so by the time this runs there is nothing left open. The sweep
+  // therefore opens its own device on the same banked session, exactly as the
+  // tests do.
+  for (const { jobNumber, rx, state } of left) {
+    let device = null;
+    try {
+      device = await newDevice(browser, state);
+      await cancelAllDrafts(device.page, jobNumber, rx);
+    } catch (e) {
+      // Best effort: a sweep that cannot run must not turn a passing test red,
+      // and must not hide the real failure of one that already went wrong.
+      console.warn("Draft sweep on " + jobNumber + " did not finish:", e.message);
+    } finally {
+      if (device) await device.ctx.close();
+    }
+  }
 });
 
 // A second (or third) signed-in device: a banked session, fresh context.
@@ -106,6 +139,9 @@ test("two saves racing for one ticket number both land, distinct", async ({ brow
     const jobNumber = await scoutJob(a.page, 1);
     const rx = await ticketRx(a.page);
     await cancelAllDrafts(a.page, jobNumber, rx);
+    // Registered before a single row is written: the cancel at the end of the
+    // test is the happy path, not the only cleanup.
+    sweepAfter = [{ jobNumber, rx, state: STATE }];
     await toTicketScreen(a.page, 1);
     await toTicketScreen(b.page, 1);
 
@@ -141,6 +177,7 @@ test("concurrent edits to one draft resolve last-write-wins, as one document", a
     const jobNumber = await scoutJob(a.page, 2);
     const rx = await ticketRx(a.page);
     await cancelAllDrafts(a.page, jobNumber, rx);
+    sweepAfter = [{ jobNumber, rx, state: STATE }];
     await toTicketScreen(a.page, 2);
     await a.page.getByRole("button", { name: "Save draft" }).click();
     await settledJobDetail(a.page);
@@ -188,6 +225,12 @@ test("two technicians racing on one job never collide — each keeps their own n
     const eitherRx = ticketRxFor(await signedInInitials(a.page), await signedInInitials(b.page));
     await cancelAllDrafts(a.page, jobNumber, rx);
     await cancelAllDrafts(b.page, jobNumber, rx2);
+    // One entry per technician: each sweeps from their own session, because
+    // the delete policy refuses a swap.
+    sweepAfter = [
+      { jobNumber, rx, state: STATE },
+      { jobNumber, rx: rx2, state: STATE2 }
+    ];
     await toTicketScreen(a.page, 4);
     await toTicketScreen(b.page, 4);
 
@@ -223,7 +266,17 @@ test("another technician's draft refuses an outsider's save, in plain words", as
     // Aaron parks a draft; Ben can see it (tickets are staff-readable)…
     const jobNumber = await scoutJob(a.page, 5);
     const rx = await ticketRx(a.page);
+    await goHome(b.page);
+    const rx2 = await ticketRx(b.page);
     await cancelAllDrafts(a.page, jobNumber, rx);
+    // Ben's numbers are swept too. His save here is meant to be refused, so
+    // nothing of his should ever land — which is the point: if that refusal
+    // ever regresses, the run cleans up after itself while the test fails.
+    await cancelAllDrafts(b.page, jobNumber, rx2);
+    sweepAfter = [
+      { jobNumber, rx, state: STATE },
+      { jobNumber, rx: rx2, state: STATE2 }
+    ];
     await toTicketScreen(a.page, 5);
     await a.page.getByRole("button", { name: "Save draft" }).click();
     await settledJobDetail(a.page);
@@ -257,6 +310,8 @@ test("a draft cancelled under an open editor refuses the late save honestly", as
     const jobNumber = await scoutJob(a.page, 3);
     const rx = await ticketRx(a.page);
     await cancelAllDrafts(a.page, jobNumber, rx);
+    // Both devices are the same account here, so one entry covers the pair.
+    sweepAfter = [{ jobNumber, rx, state: STATE }];
     await toTicketScreen(a.page, 3);
     await a.page.getByRole("button", { name: "Save draft" }).click();
     await settledJobDetail(a.page);

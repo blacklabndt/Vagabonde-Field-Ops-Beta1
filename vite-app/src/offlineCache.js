@@ -144,8 +144,15 @@ export const OfflineCache = {
 
   // The account this device's cache belongs to, or null if nobody has
   // claimed it (a fresh install, or a store that has just been emptied).
+  //
+  // A read that faults is not "nobody" — it is "we don't know", and claimFor
+  // answers "nobody" by emptying the store. Swallowed into null, one
+  // unreadable read cost the device's own owner every half-entered ticket on
+  // it, and recorded them as the new owner of what it had just deleted. It
+  // throws instead; the callers already refuse the sign-in and say so, the
+  // same as for a clear that would not land.
   async owner() {
-    const hit = await ocGet(CACHE_OWNER_KEY).catch(() => null);
+    const hit = await ocGet(CACHE_OWNER_KEY);
     return hit ? hit.value : null;
   },
 
@@ -178,7 +185,10 @@ export const OfflineCache = {
     // so record the claim and keep the work. A remembered stranger, or no
     // identity at all, is still emptied at the door.
     if (owner === null) {
-      const hit = await ocGet(IDENTITY_KEY).catch(() => null);
+      // Faults out for the same reason owner() does: this read is the whole
+      // of the "it is already theirs" case, so an unreadable one must not
+      // quietly become "a stranger's" and take the clear below with it.
+      const hit = await ocGet(IDENTITY_KEY);
       if (hit && hit.value && hit.value.id === userId) {
         await ocPut(CACHE_OWNER_KEY, userId);
         return false;
@@ -225,6 +235,15 @@ export const OfflineCache = {
     try {
       const value = await fetcher();
       this.markLive();
+      // A null is never worth remembering. It is not a copy of anything — it
+      // is "there was nothing there", and served back offline it becomes an
+      // emptiness the screen states as fact: no published rate card, no job.
+      // Worse, the reads that answer null do it from an empty result, and an
+      // empty result is also what a lapsed session sees, so the one thing
+      // most likely to be cached here is the absence caused by being signed
+      // out. Left unwritten, the key keeps the last real answer it had, or
+      // stays absent and lets the failure surface as a failure.
+      if (value == null) return value;
       const serialized = JSON.stringify(value);
       if (rtLastWritten.get(key) !== serialized) {
         // Recorded when the write actually lands, and forgotten if it does
