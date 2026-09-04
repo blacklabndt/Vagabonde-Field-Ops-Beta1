@@ -113,6 +113,11 @@ function UpdateBanner({ onLater }) {
 
 export function App() {
   const [currentUser, setCurrentUser] = useState(null);
+  // Who is signed in *now*, for reads that resolve later. A closure holds the
+  // person of the render that made it, which is exactly the one that can no
+  // longer be trusted once the next technician has taken the tablet.
+  const signedInId = useRef(null);
+  signedInId.current = currentUser ? currentUser.id : null;
   const [checkingSession, setCheckingSession] = useState(true);
   // A password-reset link lands here with recovery tokens in the URL hash;
   // the session it starts is only for choosing a new password, so the app
@@ -486,14 +491,26 @@ export function App() {
     return () => document.removeEventListener("visibilitychange", onVisible);
   }, [chatUnread]);
 
+  // A request token, and the person the read was for — the same guard the
+  // board and the tracker use, because this list races two ways. Sign-in,
+  // arriving at the screen and the outbox draining can each start a load, so
+  // an older one could land last and win; and on a shared tablet a slow read
+  // for the technician who just signed out used to arrive after the next one
+  // had signed in, putting their drafts on someone else's Open tickets and
+  // behind their badge. Nothing is kept unless this is still the newest read
+  // AND still the same person.
+  const myTicketsSeq = useRef(0);
   const loadMyTickets = async () => {
+    const mine = ++myTicketsSeq.current;
+    const forUser = currentUser ? currentUser.id : null;
+    const stillMine = () => mine === myTicketsSeq.current && forUser === signedInId.current;
     setMyTicketsLoading(true);
     // The open assessments ride along, best effort — a failed read leaves
     // the last list rather than blanking the drafts, which are the screen.
-    Db.listMyOpenJhas(currentUser.id).then(setMyOpenJhas).catch(e => console.warn("Couldn't load open JHAs:", e.message));
-    try { setMyTickets(await Db.listMyTickets(currentUser.id)); }
+    Db.listMyOpenJhas(forUser).then(r => { if (stillMine()) setMyOpenJhas(r); }).catch(e => console.warn("Couldn't load open JHAs:", e.message));
+    try { const rows = await Db.listMyTickets(forUser); if (stillMine()) setMyTickets(rows); }
     catch (e) { console.error("Failed to load your tickets:", e.message); }
-    setMyTicketsLoading(false);
+    if (stillMine()) setMyTicketsLoading(false);
   };
   // Once on sign-in, because the drawer badge needs a count before the screen
   // has been opened… The list is emptied first: it is the previous person's
@@ -623,7 +640,22 @@ export function App() {
   // Opening a specific ticket from a job. Deliberately not gated on the tab:
   // the button on the job is the way tickets are meant to be reached, whether
   // or not the billing section is in this person's menu.
-  const openTicketDraft = ticketId => {
+  //
+  // The record has to be this job's before the editor sees it, for the same
+  // reason startTicketForJob loads one: the editor reads the AFE, the LSD and
+  // the client rep off it, so a draft opened over a record still belonging to
+  // the last job would show that job's details and address its approval to
+  // that job's rep. The record names the job it was built for, so the check
+  // is that name — no fetch on the ordinary path, where Job detail has
+  // already loaded it. `haveRecord` is openTicket saying it loaded the record
+  // itself a moment ago, which this render's state hasn't been told yet.
+  const openTicketDraft = async (ticketId, haveRecord = false) => {
+    if (!haveRecord && (!activeJob || jobRecord.job !== activeJob.id)) {
+      if (!activeJob) return;
+      const record = await recordFor(activeJob, "ticket");
+      if (!record) return;
+      setJobRecord(record);
+    }
     setActiveTicket(ticketId);
     setContextScreen("ticket");
     setScreen("ticket");
@@ -701,10 +733,22 @@ export function App() {
   // screen, because going straight to the ticket skips it — and a stale record
   // would show the previous job's rep on this ticket.
   const openTicket = async t => {
-    let job = activeJob;
-    try { job = await Db.getJobByNumber(t.job); } catch (e) { console.error("Couldn't load that ticket's job:", e.message); }
+    // Nothing moves until the ticket's own job is in hand. This used to start
+    // from whatever job happened to be open and keep it when the read failed
+    // — no signal, or the job renumbered out from under the tracker — so the
+    // ticket opened against the last job: its header, "Start from last ticket"
+    // copying its lines, its client rep on the approval email, and its id on
+    // a queued replay. Say so and stay put instead, the way openJobByNumber
+    // does.
+    let job;
+    try { job = await Db.getJobByNumber(t.job); }
+    catch (e) {
+      console.error("Couldn't load that ticket's job:", e.message);
+      Toasts.show(`Couldn't open ${t.job}: ${e.message || "try again."}`, "error");
+      return;
+    }
     setActiveJob(job);
-    if (t.status === "Draft" && job) {
+    if (t.status === "Draft") {
       // Same rule as startTicketForJob: a draft opened over another job's
       // record would read that job's rep. The job page loads its own
       // record, so land there instead and let the ticket be opened from it.
@@ -715,7 +759,7 @@ export function App() {
         gotoContext("job");
         return;
       }
-      openTicketDraft(t.id);
+      openTicketDraft(t.id, true);
       return;
     }
     gotoContext("job");
@@ -729,7 +773,13 @@ export function App() {
       setActiveJob(created);
       Db.listContractors().then(setContractors).catch(() => {});
     } catch (e) {
+      // The job was raised — this is only the read-back that fills the board's
+      // row in. Left silent, the dialog closed on nothing and the job that had
+      // in fact been created looked like a save that vanished. activeJob is
+      // deliberately untouched: standing the previous job in for this one is
+      // the mistake openTicket used to make.
       console.error("Couldn't load the new job:", e.message);
+      Toasts.show(`${id} was created, but couldn't be opened: ${e.message || "open it from the board."}`, "error");
     }
   };
 

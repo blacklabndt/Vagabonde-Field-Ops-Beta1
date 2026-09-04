@@ -1,5 +1,5 @@
 import React, { useState, useEffect, useRef } from "react";
-import { money, todayLocal, localDate, dayMonth, initialsOf, ticketDateStamp, lastNumbers, JOB_FIELDS, seesPrices as pricesFor } from "../data.js";
+import { money, todayLocal, localDate, dayMonth, initialsOf, ticketDateStamp, lastNumbers, JOB_FIELDS, EMPTY_JOB_RECORD, seesPrices as pricesFor } from "../data.js";
 import { Db } from "../db.js";
 import { OfflineCache } from "../offlineCache.js";
 import { OfflineQueue } from "../offlineQueue.js";
@@ -21,6 +21,11 @@ export function JobDetailScreen({ job, currentUser, onStartJha, onOpenTicket, on
   const [draft, setDraft] = useState(jobRecord);
   const [savingRecord, setSavingRecord] = useState(false);
   const [recordError, setRecordError] = useState("");
+  // Whether THIS job's record has landed. Until it has, the panel is showing
+  // an empty record and the screens downstream of it would be reading one —
+  // so Edit and the draft-ticket rows wait for it rather than acting on a
+  // record that isn't this job's.
+  const [recordLoaded, setRecordLoaded] = useState(false);
   const [statusBusy, setStatusBusy] = useState(false);
   const [statusError, setStatusError] = useState("");
   const [closingJha, setClosingJha] = useState(null);
@@ -127,12 +132,25 @@ export function JobDetailScreen({ job, currentUser, onStartJha, onOpenTicket, on
   useEffect(() => {
     if (!job || !job.dbId) return;
     let live = true;
+    // Blanked before the read, not after it. The record is App's, shared with
+    // the ticket and hazard-assessment screens, and it arrives here still
+    // holding the last job opened. A failed read used to leave that one under
+    // this job's name: the wrong client rep, contractor rep, AFE, LSD and
+    // area on the panel — and Edit → Save would have written them onto this
+    // job, filing the other client's rep against this one.
+    setRecordLoaded(false);
+    setRecordError("");
+    setJobRecord(EMPTY_JOB_RECORD);
     Db.getJobRecord(job)
       // Guard against an out-of-order response: opening two jobs quickly used
       // to leave whichever request finished last in the panel, regardless of
       // which job was actually on screen.
-      .then(r => { if (live) setJobRecord(r); })
-      .catch(e => console.error("Failed to load job record:", e.message));
+      .then(r => { if (!live) return; setJobRecord(r); setRecordLoaded(true); })
+      .catch(e => {
+        if (!live) return;
+        console.error("Failed to load job record:", e.message);
+        setRecordError(e.message || "Couldn't load this job's record.");
+      });
     return () => { live = false; };
   }, [job ? job.dbId : null]);
 
@@ -391,7 +409,13 @@ export function JobDetailScreen({ job, currentUser, onStartJha, onOpenTicket, on
                   const editable = t.status === "Draft" && !complete;
                   // Reading a ticket is reading its bill; without the prices
                   // the row is information enough and opens nothing.
-                  const open = editable ? () => onOpenTicket(t.id) : seesPrices ? () => setViewingTicket(t.id) : null;
+                  //
+                  // A draft waits for this job's record: the editor takes the
+                  // AFE, the LSD and the client rep from it, and tapped before
+                  // the record landed it opened showing the last job's — and
+                  // addressed the approval to that job's rep.
+                  const open = editable ? (recordLoaded ? () => onOpenTicket(t.id) : null)
+                    : seesPrices ? () => setViewingTicket(t.id) : null;
                   // Sent but not signed: still ours to pull back. The same
                   // people the tickets update policy names — that technician,
                   // or an admin.
@@ -400,7 +424,9 @@ export function JobDetailScreen({ job, currentUser, onStartJha, onOpenTicket, on
                     <tr key={t.id} onClick={open || undefined}
                       tabIndex={open ? 0 : undefined}
                       role={open ? "button" : undefined}
-                      title={editable ? "Open this draft to add the day's charges" : open ? "Read this ticket" : undefined}
+                      title={editable
+                        ? (recordLoaded ? "Open this draft to add the day's charges" : "Waiting for this job's details — see the Job record panel")
+                        : open ? "Read this ticket" : undefined}
                       // Only the row's own key presses: an Enter on the cancel
                       // button bubbles up here too, and would open the ticket
                       // it just cancelled.
@@ -441,9 +467,20 @@ export function JobDetailScreen({ job, currentUser, onStartJha, onOpenTicket, on
               <span style={{ marginLeft: 10, fontSize: 13, fontWeight: 600, color: "var(--color-accent-700)" }}>✓ Saved to this job</span>
             )}
             {!editingRecord
-              ? <Btn variant="secondary" style={{ marginLeft: "auto" }} disabled={complete} onClick={() => { setDraft(jobRecord); setSavedNote(false); setEditingRecord(true); }}>Edit</Btn>
+              ? <Btn variant="secondary" style={{ marginLeft: "auto" }}
+                  // Not until this job's own record is in hand. Editing what
+                  // is still on screen from the last job, then saving, files
+                  // that job's reps against this one.
+                  disabled={complete || !recordLoaded}
+                  title={!complete && !recordLoaded ? "Waiting for this job's details" : undefined}
+                  onClick={() => { setDraft(jobRecord); setSavedNote(false); setEditingRecord(true); }}>Edit</Btn>
               : <span style={{ marginLeft: "auto", fontSize: 12, color: "color-mix(in srgb, var(--color-text) 55%, transparent)" }}>Editing — changes aren't kept until you save</span>}
           </div>
+          {/* The read that fills this panel, when it failed. It used to be a
+              console line, so the panel simply sat empty with no way to tell
+              a job with nothing filled in from a job whose details never
+              arrived. */}
+          {!editingRecord && <ErrorBox>{recordError}</ErrorBox>}
           {!editingRecord ? (
             // Three fixed columns, read down: identifier, client, contractor —
             // fixed rather than auto-fit, because auto-fit reflowed to four

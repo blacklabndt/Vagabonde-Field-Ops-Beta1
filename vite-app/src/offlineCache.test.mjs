@@ -146,6 +146,51 @@ test("an unchanged result skips the disk; a changed one does not", async () => {
   assert.equal(hit.value.film, 1350);
 });
 
+test("a write that failed leaves the key writable, not silenced", async () => {
+  // IndexedDB refuses to store a function and JSON drops it, so this value
+  // fails to write while comparing equal to the plain object after it — the
+  // shape of the bug exactly. The skip-unchanged guard used to be recorded
+  // before the write was known to have landed, so one failed write meant this
+  // key had no offline copy for the rest of the tab's life.
+  await OfflineCache.readThrough("rates.default", async () => ({ film: 1200, render: () => {} }));
+  await OfflineCache.put("_probe", 1);   // an awaited write, so the failed one has had its turn
+  assert.equal(await OfflineCache.read("rates.default"), null, "nothing was stored");
+
+  await OfflineCache.readThrough("rates.default", async () => ({ film: 1200 }));
+  const hit = await eventually(() => OfflineCache.read("rates.default"), "the copy the failed write still owes");
+  assert.deepEqual(hit.value, { film: 1200 });
+});
+
+test("liveOnly refuses the remembered copy, and only while it runs", async () => {
+  const rows = [{ id: "KK-0818-26-01" }];
+  await OfflineCache.readThrough("tickets.7", async () => rows);
+  await eventually(() => OfflineCache.read("tickets.7"), "the value to reach disk");
+
+  await assert.rejects(
+    () => OfflineCache.liveOnly(() => OfflineCache.readThrough("tickets.7", failedFetch)),
+    /Failed to fetch/,
+    "the archive would rather fail than zip what this device happens to remember"
+  );
+  assert.equal(OfflineCache.state.servingCached, false, "and nothing pretends the app went offline");
+
+  // Outside it the fallback is exactly what it always was.
+  assert.deepEqual(await OfflineCache.readThrough("tickets.7", failedFetch), rows);
+});
+
+test("liveOnly holds until the outermost call is done, and hands back its answer", async () => {
+  await OfflineCache.readThrough("contacts", async () => [{ name: "Athabasca Energy" }]);
+  await eventually(() => OfflineCache.read("contacts"), "the value to reach disk");
+
+  const answer = await OfflineCache.liveOnly(async () => {
+    // A nested call that finishes early must not take the switch with it.
+    await OfflineCache.liveOnly(async () => "inner");
+    await assert.rejects(() => OfflineCache.readThrough("contacts", failedFetch), /Failed to fetch/);
+    return "outer";
+  });
+  assert.equal(answer, "outer");
+  assert.deepEqual(await OfflineCache.readThrough("contacts", failedFetch), [{ name: "Athabasca Energy" }]);
+});
+
 test("signing out empties the cache — and the guard that skips writes with it", async () => {
   const rates = { film: 1200 };
   await OfflineCache.readThrough("rates.default", async () => rates);

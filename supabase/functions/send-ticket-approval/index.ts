@@ -8,7 +8,7 @@
 import { createClient } from "https://esm.sh/@supabase/supabase-js@2";
 import { sendMail, appSettings, corsHeaders, wrapEmail, esc, recipients, optionalRecipients } from "../_shared/mail.ts";
 import { invoicePage, GST_RATE, invoiceTotals } from "../_shared/invoice.ts";
-import { loadInvoice, TICKET_LINES_ORDER } from "../_shared/ticketInvoice.ts";
+import { loadInvoice } from "../_shared/ticketInvoice.ts";
 import { hashToken } from "../_shared/approvalToken.ts";
 
 const money = (n: number) =>
@@ -17,27 +17,30 @@ const money = (n: number) =>
 Deno.serve(async (req) => {
   if (req.method === "OPTIONS") return new Response("ok", { headers: corsHeaders });
 
+  // Who is calling is settled before a single byte of the body is read. The
+  // parse and the recipient checks below throw on junk, and the catch at the
+  // bottom writes a function_errors row — so leaving them in front of this
+  // meant any anonymous POST could put a line in the error log.
+  const authHeader = req.headers.get("Authorization") ?? "";
+  const asUser = createClient(
+    Deno.env.get("SUPABASE_URL")!,
+    Deno.env.get("SUPABASE_ANON_KEY")!,
+    { global: { headers: { Authorization: authHeader } } }
+  );
+  const { data: { user } } = await asUser.auth.getUser();
+  if (!user) return new Response(JSON.stringify({ error: "Not signed in" }), {
+    status: 401, headers: { ...corsHeaders, "Content-Type": "application/json" }
+  });
+
   try {
     const { ticketId, to, cc } = await req.json();
     if (!ticketId) throw new Error("ticketId is required");
     const toList = recipients(to, "to");
     const ccList = optionalRecipients(cc, "cc");
 
-    const authHeader = req.headers.get("Authorization") ?? "";
-    const asUser = createClient(
-      Deno.env.get("SUPABASE_URL")!,
-      Deno.env.get("SUPABASE_ANON_KEY")!,
-      { global: { headers: { Authorization: authHeader } } }
-    );
-    const { data: { user } } = await asUser.auth.getUser();
-    if (!user) return new Response(JSON.stringify({ error: "Not signed in" }), {
-      status: 401, headers: { ...corsHeaders, "Content-Type": "application/json" }
-    });
-
     const { data: ticket, error: tErr } = await asUser
       .from("tickets")
-      .select("id, technician_id, work_date, total, status, delays, client_contact, jobs(job_number, project, lsd, afe, area, clients(name), contractors(name)), ticket_lines(kind, label, unit, quantity, unit_rate)")
-      .order(...TICKET_LINES_ORDER)
+      .select("id, technician_id, work_date, total, status, delays, client_contact, jobs(job_number, project, lsd, afe, area, clients(name), contractors(name))")
       .eq("id", ticketId).single();
     if (tErr || !ticket) throw new Error("Ticket not found, or you don't have access to it");
     if (ticket.status === "Approved" || ticket.status === "Invoiced") {
@@ -59,20 +62,6 @@ Deno.serve(async (req) => {
     }
 
     const job = ticket.jobs as any;
-    const lines = (ticket.ticket_lines as any[]) ?? [];
-
-    // Summed from the lines, like the invoice does, rather than read off
-    // tickets.total — the email and the document it links to must not be
-    // able to quote a client two different numbers. Each line rounded to
-    // the cent, summed in integer cents: the same formula the database
-    // stores (migration 20260818140051) and invoice.ts prints.
-    const lineTotal = (l: any) => Math.round(Number(l.quantity || 0) * Number(l.unit_rate || 0) * 100) / 100;
-    // One formula, shared with the invoice and the approval page — a third
-    // hand-rolled copy here was a third number free to disagree.
-    const totals = invoiceTotals({ lines } as any);
-    const subtotal = totals.subtotal / 100;
-    const gst = totals.gst / 100;
-    const grand = totals.grand / 100;
 
     // Single-use token, 30 days. Long enough to survive a rep's holiday,
     // short enough that a stale forwarded email stops working.
@@ -83,6 +72,30 @@ Deno.serve(async (req) => {
       Deno.env.get("SUPABASE_URL")!,
       Deno.env.get("SUPABASE_SERVICE_ROLE_KEY")!
     );
+
+    // One read of the money, with the service role, feeding both the summary
+    // in the email and the invoice attached to it. Reading the lines as the
+    // caller instead is how a Coordinator — allowed to send a ticket, but not
+    // to read ticket_lines (Admin and Technician only, migration
+    // 20260903010110) — mailed a client a $0.00 summary beside an attachment
+    // showing the real bill. Sending the authority check still belongs to the
+    // caller above; only the numbers come from here.
+    const { data: invoiceData, error: invErr } = await loadInvoice(admin, ticketId, toList);
+    if (invErr || !invoiceData) throw new Error(invErr ?? "Ticket not found");
+    const lines = invoiceData.lines ?? [];
+
+    // Summed from the lines, like the invoice does, rather than read off
+    // tickets.total — the email and the document it links to must not be
+    // able to quote a client two different numbers. Each line rounded to
+    // the cent, summed in integer cents: the same formula the database
+    // stores (migration 20260818140051) and invoice.ts prints.
+    const lineTotal = (l: any) => Math.round(Number(l.quantity || 0) * Number(l.unit_rate || 0) * 100) / 100;
+    // One formula, shared with the invoice and the approval page — a third
+    // hand-rolled copy here was a third number free to disagree.
+    const totals = invoiceTotals(invoiceData);
+    const subtotal = totals.subtotal / 100;
+    const gst = totals.gst / 100;
+    const grand = totals.grand / 100;
 
     // The link goes to the app's own domain, which proxies this function and
     // re-serves it as HTML — Supabase forces text/plain on HTML returned from
@@ -148,9 +161,8 @@ Deno.serve(async (req) => {
     // the same document the approval page renders, so a rep who files the
     // attachment and a rep who clicks the link are looking at one bill. It
     // opens and prints from a browser without needing a PDF renderer here.
-    //
-    const { data: invoiceData } = await loadInvoice(admin, ticketId, toList);
-    const attachment = invoicePage(invoiceData!);
+    // It renders the same invoiceData the summary above was built from.
+    const attachment = invoicePage(invoiceData);
     const encoded = btoa(unescape(encodeURIComponent(attachment)));
 
     // Send first, record second. The other way round — which this used to do —

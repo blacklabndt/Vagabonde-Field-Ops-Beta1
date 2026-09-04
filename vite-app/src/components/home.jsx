@@ -555,7 +555,23 @@ function NewJobDialog({ currentUser, clients, contractors, contacts, onClose, on
     setSaving(true);
     setError("");
 
+    // The job's uuid is minted here, before either path is taken, and both
+    // paths use this one. It is the answer to a request that succeeded on the
+    // server and never came back — the 30-second abort in config.js surfaces
+    // as a network error, so the catch below queues the job, and a fresh uuid
+    // there would be a second identity for a row that already exists: the
+    // replay couldn't find it by id, would hit the job number's unique index,
+    // and being a refusal rather than a network fault would sit in the outbox
+    // for ever with the day's JHA and ticket stuck behind it. With the same id
+    // on both, createJob's "did this already land?" lookup answers yes and the
+    // replay is a no-op.
+    //
+    // Left undefined where crypto can't mint one (Postgres then assigns it, as
+    // it always did); queueNewJob keeps its own fallback for the offline path.
+    const jobId = typeof crypto !== "undefined" && crypto.randomUUID ? crypto.randomUUID() : undefined;
+
     const details = {
+      id: jobId,
       jobNumber: id, project: form.project.trim(), clientName: form.client, lsd: form.lsd.trim(),
       afe: form.afe.trim(),
       createdBy: currentUser.id,

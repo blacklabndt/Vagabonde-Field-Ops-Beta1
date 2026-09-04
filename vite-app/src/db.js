@@ -3,6 +3,7 @@ import { todayLocal, localDate, dayMonth, ticketDateStamp, primaryContact, ageIn
 import { OfflineCache } from "./offlineCache.js";
 import { Toasts } from "./toastBus.js";
 import { OfflineQueue, isNetworkError } from "./offlineQueue.js";
+import { RESPONSE_ROW_CAP, fetchAllPages, fetchAllKeyset } from "./paging.js";
 
 // Thin data-access layer over the tables that are wired to Supabase so far
 // (see README "What's wired"). Screens call these instead of touching
@@ -218,41 +219,6 @@ const isDuplicateJobNumber = error =>
 const jobNumberTakenMessage = jobNumber =>
   `Job ${jobNumber} already exists — job numbers have to be unique. Give this one a different number.`;
 
-// Fetch every page of something that exceeds the 1000-row response cap.
-//
-// The two callers used to walk pages one at a time, each waiting on the last.
-// That is the only safe shape when you don't know how many pages there are,
-// but it costs a full round trip per 1000 rows: exporting 50,000 tickets was
-// 51 sequential requests and about fourteen seconds.
-//
-// Page 0 comes back with the total, which is all that's needed to know how
-// many pages exist and ask for them at once. Six at a time rather than all of
-// them — a phone on a lease does not benefit from fifty concurrent requests,
-// and PostgREST is happier too. Pages are reassembled in order, which matters:
-// the underlying queries have a total order and the CSV inherits it.
-const PAGE_CONCURRENCY = 6;
-async function fetchAllPages(fetchPage) {
-  const first = await fetchPage(0);
-  const total = first.total;
-  const rows = first.rows.slice();
-  if (!first.rows.length || rows.length >= total) return rows;
-
-  const pageCount = Math.ceil(total / RESPONSE_ROW_CAP);
-  const pages = new Array(pageCount);
-  pages[0] = first.rows;
-
-  for (let start = 1; start < pageCount; start += PAGE_CONCURRENCY) {
-    const batch = [];
-    for (let p = start; p < Math.min(start + PAGE_CONCURRENCY, pageCount); p++) {
-      batch.push(fetchPage(p).then(r => { pages[p] = r.rows; }));
-    }
-    await Promise.all(batch);
-  }
-  // Rows added between page 0 and the last page would land beyond `total`;
-  // flat() keeps whatever actually arrived rather than trusting the estimate.
-  return pages.flat();
-}
-
 function invalidate(...keys) {
   keys.forEach(k => {
     delete _cache[k];
@@ -327,16 +293,6 @@ function shapeJobTicket(t) {
   };
 }
 const JOB_TICKET_COLUMNS = "id, job_id, work_date, status, total, created_at, technician_id, profiles(name)";
-
-// PostgREST will not return more than 1000 rows in a single response, no
-// matter what limit is asked for — and it does not say so. A request for
-// 100000 rows comes back with 1000 and looks complete.
-//
-// That is fine for anything paged, and quietly wrong for anything that means
-// "all of them": the accounting export was writing a CSV of the first 1000
-// tickets, and a pay period with more than 1000 crew rows would have dropped
-// hours off a timesheet. Both now page until the source is exhausted.
-const RESPONSE_ROW_CAP = 1000;
 
 // The board is re-fetched on every filter tap and every return to Home;
 // re-pulling the detail for ten jobs each time would be a lot of traffic for
@@ -933,9 +889,11 @@ export const Db = {
     return data;
   },
 
-  // `id` is optional and normally left to Postgres. A job created offline
-  // supplies its own (see queueNewJob) so that the id it was given in the
-  // field is the id it keeps once it syncs.
+  // `id` is optional, but the New job dialog always supplies one now, and a
+  // job created offline supplies its own (see queueNewJob) so that the id it
+  // was given in the field is the id it keeps once it syncs. Minting it on
+  // the device is also what lets a create whose response went missing be
+  // retried instead of duplicated — see the lookup below.
   async createJob({ id, jobNumber, project, clientName, lsd, afe, createdBy, clientRep, contractorName, contractorRep }) {
     // Replaying a queued job has to be safe to do twice. The insert can
     // succeed and a later step fail — filing the reps into the directory, say
@@ -1007,8 +965,15 @@ export const Db = {
   // UNIQUE and nothing on this device knows what the office has issued. So it
   // is typed, not suggested, and a collision surfaces in the queue panel as a
   // refusal to sync rather than being silently resolved.
-  async queueNewJob({ jobNumber, project, clientId, clientName, lsd, afe, createdBy, createdByName, clientRep, contractorName, contractorRep }) {
-    const id = crypto.randomUUID ? crypto.randomUUID() : String(Date.now()) + Math.random();
+  // …and when the caller has already minted one, that is the id this uses.
+  // The New job dialog does: it tries createJob first, and a lost response
+  // (the 30-second abort rethrows as a network error) sends it here. Minting
+  // a second uuid at that point would queue a job the database may well
+  // already hold under the first one, and the replay — finding no row with
+  // the new id — would die on the job number's unique index for ever, taking
+  // the day's JHA and ticket with it.
+  async queueNewJob({ id: givenId, jobNumber, project, clientId, clientName, lsd, afe, createdBy, createdByName, clientRep, contractorName, contractorRep }) {
+    const id = givenId || (crypto.randomUUID ? crypto.randomUUID() : String(Date.now()) + Math.random());
 
     const contractors = await this.listContractors().catch(() => []);
     const known = contractorName ? contractors.find(c => c.name === contractorName) : null;
@@ -1592,7 +1557,11 @@ export const Db = {
       const { data } = await sbClient.from("jobs")
         .select("client_contact_id, contractor_contact_id").eq("id", job.dbId).maybeSingle();
       if (data) named = data;
-    } catch (e) { /* offline — the primaries below are a fine stand-in */ }
+    } catch (e) {
+      // Offline, the primaries below are a fine stand-in — except for the
+      // archive, which asked for the record as it is or not at all.
+      if (OfflineCache.isLiveOnly()) throw e;
+    }
 
     const byId = id => (id && contacts.find(c => c.id === id)) || null;
     const clientContact = byId(named.client_contact_id) || primaryContact(contacts, "client", job.clientId);
@@ -1626,7 +1595,8 @@ export const Db = {
   // Turns whatever the job record's rep boxes contain into a contact row, and
   // returns its id. Picking someone from the dropdown and editing their phone
   // number updates the directory entry; typing a name nobody has on file adds
-  // them. Returns null for an empty name, which unlinks the rep.
+  // them; typing a name somebody else already holds links to them without
+  // overwriting them. Returns null for an empty name, which unlinks the rep.
   async resolveJobContact(orgType, orgId, rep) {
     if (!orgId || !rep) return null;
     const name = (rep.name || "").trim();
@@ -1635,18 +1605,37 @@ export const Db = {
     const phone = (rep.phone || "").trim() || null;
 
     const existing = await this.listContactsForOrg(orgType, orgId);
-    const match = (rep.id && existing.find(c => c.id === rep.id))
-      || existing.find(c => (c.name || "").trim().toLowerCase() === name.toLowerCase());
+    const picked = rep.id ? existing.find(c => c.id === rep.id) : null;
+    const match = picked || existing.find(c => (c.name || "").trim().toLowerCase() === name.toLowerCase());
 
-    if (match) {
-      // Only write if something actually changed — an unedited pick shouldn't
-      // touch the directory at all.
-      if (match.name !== name || (match.email || null) !== email || (match.phone || null) !== phone) {
+    if (picked) {
+      // Somebody chosen from the dropdown and then corrected: the boxes are
+      // about this person, so they win. Only write if something actually
+      // changed — an unedited pick shouldn't touch the directory at all.
+      if (picked.name !== name || (picked.email || null) !== email || (picked.phone || null) !== phone) {
         const { error } = await sbClient.from("contacts")
-          .update({ name, email, phone, last_used_at: new Date().toISOString() }).eq("id", match.id);
+          .update({ name, email, phone, last_used_at: new Date().toISOString() }).eq("id", picked.id);
         if (error) throw error;
         invalidate("contacts");
       }
+      return picked.id;
+    }
+
+    if (match) {
+      // A name typed over the top of somebody else's. RepEditor drops the
+      // link when the name changes but leaves the email and phone boxes
+      // alone, so what's in them belongs to the *previous* rep — and this
+      // used to write them straight over the person the new name matched,
+      // giving a curated directory entry a stranger's phone number.
+      //
+      // So: rememberContact's rule (fill blanks only), and never the name —
+      // the row already carries the spelling everyone else's jobs point at.
+      const patch = { last_used_at: new Date().toISOString() };
+      if (!match.email && email) patch.email = email;
+      if (!match.phone && phone) patch.phone = phone;
+      const { error } = await sbClient.from("contacts").update(patch).eq("id", match.id);
+      if (error) throw error;
+      invalidate("contacts");
       return match.id;
     }
 
@@ -1892,27 +1881,26 @@ export const Db = {
   async listTimesheetEntries({ start, end }) {
     // Paged to exhaustion rather than fetched in one go: this is what people
     // get paid from, and the 1000-row response cap would silently take hours
-    // off the end of a busy period. Ordered by id so the ranges can't overlap
-    // or skip a row between requests.
+    // off the end of a busy period.
     //
-    // Asking for the count is what lets the rest of the pages be fetched
-    // concurrently — the first response says how many there are, so the others
-    // go out together instead of one round trip per thousand rows.
-    //
-    // Only page 0 asks for it. An exact count has to be counted through the
-    // join, and every later page would be paying for a number already known.
+    // By key, not by offset. This used to walk ranges concurrently and claim
+    // that ordering by id kept them from overlapping — it doesn't: OFFSET
+    // counts rows, so a crew row deleted while the read is in flight shifts
+    // every later row up and the one that crossed a page boundary is never
+    // asked for. One entry short is somebody's afternoon, and nothing on the
+    // timesheet says a row is missing. Asking for "the next thousand after
+    // this id" costs the concurrency and cannot skip.
     const SELECT = "id, profile_id, crew_role, straight_hours, ot_hours, solo_hours, solo_ot_hours, dose_mr, mileage_km, profiles(name, first_name, last_name, is_subcontractor), tickets!inner(id, work_date, status, jobs(job_number, project, clients(name)))";
-    const data = await fetchAllPages(async page => {
-      const from = page * RESPONSE_ROW_CAP;
-      const { data: batch, count, error } = await sbClient
+    const data = await fetchAllKeyset(async after => {
+      let query = sbClient
         .from("ticket_crew")
-        .select(SELECT, page === 0 ? { count: "exact" } : undefined)
+        .select(SELECT)
         .gte("tickets.work_date", start)
-        .lte("tickets.work_date", end)
-        .order("id")
-        .range(from, from + RESPONSE_ROW_CAP - 1);
+        .lte("tickets.work_date", end);
+      if (after != null) query = query.gt("id", after);
+      const { data: batch, error } = await query.order("id").limit(RESPONSE_ROW_CAP);
       if (error) throw error;
-      return { rows: batch || [], total: count == null ? (batch || []).length : count };
+      return batch || [];
     });
 
     return data.map(c => {
@@ -2071,8 +2059,28 @@ export const Db = {
   // Every ticket matching a filter, for the accounting export — paged, because
   // "give me all of them" is exactly the request the 1000-row cap silently
   // truncates, and a short CSV of financial records is worse than none.
-  async listTicketsForExport(status = "All") {
-    return fetchAllPages(page => this.searchTickets({ page, pageSize: RESPONSE_ROW_CAP, status }));
+  //
+  // It takes the whole filter the tracker is showing — status, search and the
+  // work-date window — not just the status. It used to take the status alone,
+  // so an admin who had narrowed the screen to one client's March and pressed
+  // Export got a CSV of all history, which looks like a wrong answer to a
+  // question nobody asked.
+  //
+  // Sequential, unlike the other exhaustive reads. search_tickets is an RPC
+  // that pages by page_num, and there is no cursor to hand it, so this cannot
+  // be walked by key: OFFSET is all there is. Which means the honest caveat —
+  // a ticket deleted while the export runs shifts the rows behind it and one
+  // can be skipped. Going one page at a time makes the window as narrow as it
+  // can be from here; closing it properly needs a cursor on the function.
+  async listTicketsForExport({ status = "All", q = "", from = null, to = null } = {}) {
+    const all = [];
+    for (let page = 0; ; page++) {
+      const { rows } = await this.searchTickets({ page, pageSize: RESPONSE_ROW_CAP, status, q, from, to });
+      if (!rows.length) break;
+      for (const r of rows) all.push(r);
+      if (rows.length < RESPONSE_ROW_CAP) break;
+    }
+    return all;
   },
 
   // Every unsigned ticket's client contact, for the tracker's bulk chase —
@@ -2082,14 +2090,19 @@ export const Db = {
     // Paged: "chase everything unsigned" means everything — a capped read
     // would quietly leave the tickets past row 1,000 unchased while the
     // dialog reported the truncated count as the whole job done.
-    const data = await fetchAllPages(async page => {
-      const { data: rows, error, count } = await sbClient
-        .from("tickets").select("id, client_contact, chased_at", page === 0 ? { count: "exact" } : {})
-        .eq("status", "Awaiting approval")
-        .order("id")
-        .range(page * RESPONSE_ROW_CAP, (page + 1) * RESPONSE_ROW_CAP - 1);
+    //
+    // By key rather than by offset, for the same reason the timesheet read is:
+    // a ticket getting approved or cancelled while this walks (which is
+    // exactly what happens on a busy morning) would shift the offsets and drop
+    // a still-unsigned ticket out of the chase without a word.
+    const data = await fetchAllKeyset(async after => {
+      let query = sbClient
+        .from("tickets").select("id, client_contact, chased_at")
+        .eq("status", "Awaiting approval");
+      if (after != null) query = query.gt("id", after);
+      const { data: rows, error } = await query.order("id").limit(RESPONSE_ROW_CAP);
       if (error) throw error;
-      return { rows: rows || [], total: count ?? (rows || []).length };
+      return rows || [];
     });
     return data.map(t => ({ id: t.id, contactLabel: t.client_contact ? t.client_contact.name : "", chasedAt: t.chased_at || null }));
   },

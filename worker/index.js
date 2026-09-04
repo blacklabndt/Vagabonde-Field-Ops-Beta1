@@ -102,7 +102,7 @@ async function approvalPage(request, url, payload) {
   const clientIp = request.headers.get("CF-Connecting-IP");
   if (clientIp) headers.set("x-forwarded-for", clientIp);
 
-  let upstream;
+  let upstream, body;
   try {
     upstream = await fetch(target, {
       method: request.method,
@@ -111,11 +111,14 @@ async function approvalPage(request, url, payload) {
       redirect: "manual",
       signal: AbortSignal.timeout(UPSTREAM_TIMEOUT_MS)
     });
+    // Read inside the same try. The timeout covers the body as well as the
+    // headers, so a response that stalls or resets part-way through throws
+    // here — outside, that threw out of the handler entirely and the rep got
+    // Cloudflare's raw error page instead of the one below.
+    body = await upstream.text();
   } catch {
     return htmlError("This approval link couldn't be opened right now. Please try again in a moment.");
   }
-
-  const body = await upstream.text();
 
   // Re-served as HTML. The upstream's own Content-Type is deliberately
   // discarded — it is the text/plain the platform forced on it, and it is the

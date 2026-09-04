@@ -1,0 +1,86 @@
+// Tests for the two ways the app asks for "all of them".
+//
+// Run with: node --test src/paging.test.mjs
+//
+// The rule under test is invisible by definition: a row that a read skipped
+// looks exactly like a row that was never there. A timesheet short by one
+// crew entry is somebody's afternoon, and nothing on the screen says so —
+// which is why the pager that people are paid from is the one pinned here.
+
+import test from "node:test";
+import assert from "node:assert/strict";
+import { fetchAllPages, fetchAllKeyset, RESPONSE_ROW_CAP } from "./paging.js";
+
+// A source of `n` rows with ids 1..n, deletable mid-walk. Offset reads slice
+// the live array (which is what the database does); keyset reads take the
+// first cap rows whose id is greater than the cursor.
+function source(n) {
+  const rows = Array.from({ length: n }, (_, i) => ({ id: i + 1 }));
+  return {
+    rows,
+    remove(id) { const i = rows.findIndex(r => r.id === id); if (i >= 0) rows.splice(i, 1); },
+    page(p) {
+      const from = p * RESPONSE_ROW_CAP;
+      return { rows: rows.slice(from, from + RESPONSE_ROW_CAP), total: rows.length };
+    },
+    after(key) {
+      const start = key == null ? 0 : rows.findIndex(r => r.id > key);
+      if (start < 0) return [];
+      return rows.slice(start, start + RESPONSE_ROW_CAP);
+    }
+  };
+}
+
+test("keyset paging walks every row of a multi-page read", async () => {
+  const s = source(RESPONSE_ROW_CAP * 2 + 7);
+  const all = await fetchAllKeyset(key => s.after(key));
+  assert.equal(all.length, RESPONSE_ROW_CAP * 2 + 7);
+  assert.deepEqual(all.map(r => r.id).slice(0, 3), [1, 2, 3]);
+  assert.equal(all[all.length - 1].id, RESPONSE_ROW_CAP * 2 + 7);
+});
+
+test("keyset paging keeps every surviving row when one is deleted mid-walk", async () => {
+  // Two full pages plus a tail. A row on the second page is deleted after the
+  // first page comes back — exactly what an admin cancelling a ticket while
+  // an export runs does.
+  const s = source(RESPONSE_ROW_CAP * 2 + 5);
+  let seen = 0;
+  const all = await fetchAllKeyset(key => {
+    if (seen === 1) s.remove(RESPONSE_ROW_CAP + 500);
+    seen++;
+    return s.after(key);
+  });
+  const ids = new Set(all.map(r => r.id));
+  // Every row still on file came back. The deleted one is allowed to be
+  // absent; nothing else is.
+  for (const r of s.rows) assert.ok(ids.has(r.id), `row ${r.id} was skipped`);
+});
+
+test("offset paging skips a row when one is deleted mid-walk", async () => {
+  // The reason the paid-from reads moved off it: this is not a hypothetical.
+  const s = source(RESPONSE_ROW_CAP * 2 + 5);
+  let seen = 0;
+  const all = await fetchAllPages(async p => {
+    if (seen === 1) s.remove(1);
+    seen++;
+    return s.page(p);
+  });
+  const ids = new Set(all.map(r => r.id));
+  const missed = s.rows.filter(r => !ids.has(r.id));
+  assert.ok(missed.length > 0, "offset paging is expected to lose a row here");
+});
+
+test("keyset paging stops rather than spinning when the key never advances", async () => {
+  // A caller whose order and key disagree would otherwise ask for the same
+  // thousand rows for ever. It has to terminate with what it has.
+  const stuck = Array.from({ length: RESPONSE_ROW_CAP }, () => ({ id: 7 }));
+  const all = await fetchAllKeyset(() => stuck);
+  assert.equal(all.length, RESPONSE_ROW_CAP * 2);
+});
+
+test("keyset paging ends on the first short page", async () => {
+  let calls = 0;
+  const all = await fetchAllKeyset(() => { calls++; return [{ id: 1 }, { id: 2 }]; });
+  assert.equal(calls, 1);
+  assert.equal(all.length, 2);
+});

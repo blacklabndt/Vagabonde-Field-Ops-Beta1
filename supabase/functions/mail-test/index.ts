@@ -19,18 +19,21 @@ const json = (body: unknown, status = 200) =>
 Deno.serve(async (req) => {
   if (req.method === "OPTIONS") return new Response("ok", { headers: corsHeaders });
 
+  // Who is asking comes before anything is read from them — the address check
+  // below answers a stranger with a description of what it wanted, and this
+  // family of functions all settles the caller first.
+  const authHeader = req.headers.get("Authorization") ?? "";
+  const asUser = createClient(
+    Deno.env.get("SUPABASE_URL")!,
+    Deno.env.get("SUPABASE_ANON_KEY")!,
+    { global: { headers: { Authorization: authHeader } } }
+  );
+  const { data: { user } } = await asUser.auth.getUser();
+  if (!user) return json({ error: "Not signed in" }, 401);
+
   try {
     const { to } = await req.json();
     const toList = recipients(to, "to");
-
-    const authHeader = req.headers.get("Authorization") ?? "";
-    const asUser = createClient(
-      Deno.env.get("SUPABASE_URL")!,
-      Deno.env.get("SUPABASE_ANON_KEY")!,
-      { global: { headers: { Authorization: authHeader } } }
-    );
-    const { data: { user } } = await asUser.auth.getUser();
-    if (!user) return json({ error: "Not signed in" }, 401);
 
     const { data: callerProfile } = await asUser.from("profiles").select("role, name").eq("id", user.id).single();
     if (!callerProfile || callerProfile.role !== "Admin") {

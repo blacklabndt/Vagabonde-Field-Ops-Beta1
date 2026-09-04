@@ -37,20 +37,23 @@ const LOGO_PNG_B64 = "iVBORw0KGgoAAAANSUhEUgAAAoAAAAB7CAYAAADkBzHQAAAQAElEQVR4Ae
 Deno.serve(async (req) => {
   if (req.method === "OPTIONS") return new Response("ok", { headers: corsHeaders });
 
+  // Who is asking comes before anything is read from them: the parse below
+  // throws on a malformed body, and the catch at the bottom writes that to
+  // function_errors — a log an anonymous POST must not be able to fill.
+  const authHeader = req.headers.get("Authorization") ?? "";
+  const asUser = createClient(
+    Deno.env.get("SUPABASE_URL")!,
+    Deno.env.get("SUPABASE_ANON_KEY")!,
+    { global: { headers: { Authorization: authHeader } } }
+  );
+  const { data: { user } } = await asUser.auth.getUser();
+  if (!user) return new Response(JSON.stringify({ error: "Not signed in" }), {
+    status: 401, headers: { ...corsHeaders, "Content-Type": "application/json" }
+  });
+
   try {
     const { jhaId } = await req.json();
     if (!jhaId) throw new Error("jhaId is required");
-
-    const authHeader = req.headers.get("Authorization") ?? "";
-    const asUser = createClient(
-      Deno.env.get("SUPABASE_URL")!,
-      Deno.env.get("SUPABASE_ANON_KEY")!,
-      { global: { headers: { Authorization: authHeader } } }
-    );
-    const { data: { user } } = await asUser.auth.getUser();
-    if (!user) return new Response(JSON.stringify({ error: "Not signed in" }), {
-      status: 401, headers: { ...corsHeaders, "Content-Type": "application/json" }
-    });
 
     // Read as the caller: whatever RLS lets them see, they can render.
     const { data: jha, error } = await asUser

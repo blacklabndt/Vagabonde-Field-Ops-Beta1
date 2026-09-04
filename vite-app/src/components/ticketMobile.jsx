@@ -8,7 +8,15 @@ import { OfflineCache } from "../offlineCache.js";
 // Stored ticket lines back into the two on-screen lists, matched by label
 // against the client's catalog — what's offered, in what order, at what
 // price all come from the rate card now, so a line whose label is no longer
-// on the card is left off rather than guessed at.
+// on the card can't be driven by a dropdown that no longer has it.
+//
+// It is still a charge on the ticket, though. Anything unmatched comes back
+// as `orphans` — verbatim, rate and all — because the card being edited
+// underneath a saved draft (a line retired, or the client flipped onto the
+// house card) used to mean the next Save silently deleted that money:
+// buildLines rebuilt from the dropdowns alone and updateTicket replaces a
+// ticket's lines wholesale. The screen shows them, counts them, and writes
+// them back; taking one off is a decision someone makes on purpose.
 //
 // `keepQuantities` is the difference between reopening a draft (which must
 // come back exactly as it was left) and copying yesterday's ticket forward
@@ -20,18 +28,19 @@ function linesToForm(lines, keepQuantities, catalog) {
   // They still reopen and copy forward as the lines they are.
   if (serviceKeyByLabel["Straight time"]) serviceKeyByLabel["Technician — straight"] = serviceKeyByLabel["Straight time"];
   if (serviceKeyByLabel["Overtime"]) serviceKeyByLabel["Technician — overtime"] = serviceKeyByLabel["Overtime"];
-  const welds = [], others = [];
+  const welds = [], others = [], orphans = [];
   (lines || []).forEach(l => {
     const qty = keepQuantities ? Number(l.quantity) : 0;
-    if (l.kind === "weld") {
-      const key = weldKeyByLabel[l.label];
-      if (key) welds.push({ key, qty });
-    } else {
-      const key = serviceKeyByLabel[l.label];
-      if (key) others.push({ key, qty });
-    }
+    const key = l.kind === "weld" ? weldKeyByLabel[l.label] : serviceKeyByLabel[l.label];
+    if (key) (l.kind === "weld" ? welds : others).push({ key, qty });
+    // Copying a ticket forward is the one caller that must not carry these:
+    // a new ticket takes its shape from the card as it stands today.
+    else if (keepQuantities) orphans.push({
+      kind: l.kind, label: l.label, unit: l.unit,
+      quantity: Number(l.quantity) || 0, unit_rate: Number(l.unit_rate) || 0
+    });
   });
-  return { welds, others };
+  return { welds, others, orphans };
 }
 
 // Everything a crew row carries that is a measurement of today.
@@ -76,6 +85,11 @@ export function TicketMobileScreen({ job, jobRecord, currentUser, onSaved, ticke
   // same way the groups are.
   const [weldPicks, setWeldPicks] = useState({});
   const [otherLines, setOtherLines] = useState([]);
+  // Charges already on a saved draft that this client's card no longer
+  // offers. Read-only — there is no dropdown behind them to change a
+  // quantity against — but still money on the ticket, so they are totalled
+  // and written back untouched. See linesToForm.
+  const [orphanLines, setOrphanLines] = useState([]);
   const [servicePick, setServicePick] = useState("");
   const [saving, setSaving] = useState(false);
   const [saveError, setSaveError] = useState("");
@@ -213,34 +227,41 @@ export function TicketMobileScreen({ job, jobRecord, currentUser, onSaved, ticke
 
   // Reopening a draft: pull its lines and crew back into the form. Lines
   // are matched by label, which is what the ticket stores — a line whose label
-  // no longer exists in the rate card is left off rather than guessed at.
+  // no longer exists in the rate card comes back read-only rather than being
+  // dropped, since dropping it deleted the charge on the next save.
   // Waits for the catalog, since the labels are matched against it — and runs
   // once: the rates object is refetched when the work date changes, and
   // re-running this then would wipe edits back to the stored draft.
   const draftLoaded = useRef(false);
+  // The read itself, kept out of the effect because "Start empty" on a
+  // reopened draft runs it a second time: throwing away an unsaved copy has
+  // to mean going back to what is STORED, not to a blank ticket. Every field
+  // is assigned rather than filled in only when the row has something to say,
+  // so the second run can put back a delays note or a rep that was cleared.
+  const loadDraft = async () => {
+    try {
+      const [row, savedCrew] = await Promise.all([Db.getTicket(ticket), Db.listCrewForTicket(ticket)]);
+      const { welds, others, orphans } = linesToForm(row.ticket_lines, true, rates);
+      setWeldLines(welds);
+      setOtherLines(others);
+      setOrphanLines(orphans);
+      setWorkDate(row.work_date || todayLocal());
+      setDelays(row.delays || "");
+      setTicketClientContact((row.client_contact && row.client_contact.name) || "");
+      setTicketContractorContact((row.contractor_contact && row.contractor_contact.name) || "");
+      // A draft raised from Job detail arrives with no crew rows at all,
+      // and a ticket with nobody on it bills hours no one is paid for —
+      // so an empty crew is seeded with the filer, exactly as a fresh
+      // ticket is.
+      setCrew(savedCrew.length ? savedCrew : seedCrew(peopleRef.current));
+    } catch (e) {
+      setLoadError(e.message || "Couldn't open that ticket.");
+    }
+  };
   useEffect(() => {
     if (!ticket || !rates || draftLoaded.current) return;
     draftLoaded.current = true;
-    (async () => {
-      try {
-        const [row, savedCrew] = await Promise.all([Db.getTicket(ticket), Db.listCrewForTicket(ticket)]);
-        const { welds, others } = linesToForm(row.ticket_lines, true, rates);
-        if (welds.length) setWeldLines(welds);
-        if (others.length) setOtherLines(others);
-        if (row.work_date) setWorkDate(row.work_date);
-        if (row.delays) setDelays(row.delays);
-        if (row.client_contact && row.client_contact.name) setTicketClientContact(row.client_contact.name);
-        if (row.contractor_contact && row.contractor_contact.name) setTicketContractorContact(row.contractor_contact.name);
-        // A draft raised from Job detail arrives with no crew rows at all,
-        // and a ticket with nobody on it bills hours no one is paid for —
-        // so an empty crew is seeded with the filer, exactly as a fresh
-        // ticket is.
-        setCrew(savedCrew.length ? savedCrew : seedCrew(peopleRef.current));
-      } catch (e) {
-        setLoadError(e.message || "Couldn't open that ticket.");
-      }
-      setLoadingTicket(false);
-    })();
+    loadDraft().then(() => setLoadingTicket(false));
   }, [ticket, rates]);
 
   // ── Start from the last ticket ─────────────────────────────────────────
@@ -328,11 +349,23 @@ export function TicketMobileScreen({ job, jobRecord, currentUser, onSaved, ticke
       });
     }, 700);
     return () => clearTimeout(t);
-  }, [weldLines, otherLines, crew, workDate, delays, loadingTicket]);
+    // The reps and the idempotency key are written into the copy, so they
+    // have to be watched for it too: with only the lines and hours here, a
+    // rep changed after the last weld was typed never reached the copy, and
+    // the recovery brought the ticket back addressed to the wrong person.
+  }, [weldLines, otherLines, crew, workDate, delays, loadingTicket,
+      ticketClientContact, ticketContractorContact, clientKey]);
 
   const discardRecovered = () => {
     OfflineCache.remove(wipKey);
     setRecovered(null);
+    // On a reopened draft the recovery copy holds unsaved CHANGES, not the
+    // ticket: throwing it away means going back to the stored ticket, which
+    // is what the loader reads. Blanking the form here instead emptied the
+    // lines, zeroed the crew and cleared the reps — and the next Save wrote
+    // that emptiness over a real ticket, because updateTicket replaces
+    // lines and crew wholesale.
+    if (ticket) { loadDraft(); return; }
     // Back to what a fresh ticket opens with: nothing — and the day and the
     // reps the Create ticket dialog chose, when it chose them. "Start empty"
     // used to clear the lines and keep the recovered copy's date, delays
@@ -373,7 +406,13 @@ export function TicketMobileScreen({ job, jobRecord, currentUser, onSaved, ticke
   const weldCount = weldRows.filter(r => r.item.isWeld).reduce((s, r) => s + r.qty, 0);
   const weldDollars = centsOf(weldRows) / 100;
   const otherDollars = centsOf(otherRows) / 100;
-  const total = (centsOf(weldRows) + centsOf(otherRows)) / 100;
+  // Off-card lines are money on the ticket like any other, and they go back
+  // to the database on the next save — so they are summed the same way, in
+  // integer cents, and the figure on this screen stays the figure db.js
+  // stores.
+  const orphanCents = orphanLines.reduce((s, l) => s + Math.round(lineTotal(l.quantity, l.unit_rate) * 100), 0);
+  const orphanDollars = orphanCents / 100;
+  const total = (centsOf(weldRows) + centsOf(otherRows) + orphanCents) / 100;
 
   const availableWeld = rates.welds.filter(w => !weldLines.some(l => l.key === w.key));
   const availableService = rates.others.filter(s => !otherLines.some(l => l.key === s.key));
@@ -457,6 +496,8 @@ export function TicketMobileScreen({ job, jobRecord, currentUser, onSaved, ticke
   const setOtherQty = (key, qty) => setOtherLines(p => p.map(l => l.key === key ? { ...l, qty: Math.max(0, qty) } : l));
   const removeWeld = key => setWeldLines(p => p.filter(l => l.key !== key));
   const removeOther = key => setOtherLines(p => p.filter(l => l.key !== key));
+  // By position: an off-card line has no catalog key to be known by.
+  const removeOrphan = i => setOrphanLines(p => p.filter((_, j) => j !== i));
 
   // Stored — and therefore printed on the field invoice — in the card's
   // order, not the order lines were tapped in: the invoice reads like the
@@ -469,7 +510,11 @@ export function TicketMobileScreen({ job, jobRecord, currentUser, onSaved, ticke
       ...[...weldRows].sort((a, b) => weldOrder.get(a.key) - weldOrder.get(b.key))
         .map(r => ({ kind: "weld", label: r.item.label, unit: "weld", quantity: r.qty, unit_rate: r.item.rate })),
       ...[...otherRows].sort((a, b) => otherOrder.get(a.key) - otherOrder.get(b.key))
-        .map(r => ({ kind: "charge", label: r.item.label, unit: r.item.unit, quantity: r.qty, unit_rate: r.item.rate }))
+        .map(r => ({ kind: "charge", label: r.item.label, unit: r.item.unit, quantity: r.qty, unit_rate: r.item.rate })),
+      // Off the card, so there is no place in the card's order for them:
+      // they follow, verbatim, at the price they were billed at. Left out,
+      // they would be deleted by the very next save.
+      ...orphanLines.map(l => ({ kind: l.kind, label: l.label, unit: l.unit, quantity: l.quantity, unit_rate: l.unit_rate }))
     ];
   };
 
@@ -683,10 +728,17 @@ export function TicketMobileScreen({ job, jobRecord, currentUser, onSaved, ticke
               background: "color-mix(in srgb, var(--color-accent) 8%, transparent)",
               display: "flex", alignItems: "center", gap: 8, flexWrap: "wrap"
             }}>
-              <span>Brought back what you were entering{recovered ? ` at ${new Date(recovered).toLocaleTimeString("en-CA", { hour: "2-digit", minute: "2-digit" })}` : ""} — it was never saved.</span>
+              {/* On a reopened draft the copy is the unsaved edits, not the
+                  ticket — so it says so, and throwing it away goes back to
+                  the stored ticket rather than to a blank form. */}
+              <span>
+                {ticket ? "Brought back the changes you were making" : "Brought back what you were entering"}
+                {recovered ? ` at ${new Date(recovered).toLocaleTimeString("en-CA", { hour: "2-digit", minute: "2-digit" })}` : ""}
+                {ticket ? " — they were never saved." : " — it was never saved."}
+              </span>
               <button type="button" onClick={discardRecovered}
                 style={{ marginLeft: "auto", background: "none", border: "none", textDecoration: "underline", cursor: "pointer", color: "inherit", font: "inherit", padding: 0 }}>
-                Start empty
+                {ticket ? "Discard changes" : "Start empty"}
               </button>
             </div>
           )}
@@ -788,6 +840,38 @@ export function TicketMobileScreen({ job, jobRecord, currentUser, onSaved, ticke
               </select>
               <Btn variant="secondary" onClick={() => { const pick = effServicePick; if (!pick) return; setOtherLines(p => [...p, { key: pick, qty: 1 }]); const rest = availableService.filter(s => s.key !== pick); if (rest[0]) setServicePick(rest[0].key); }}>Add</Btn>
             </div>
+          )}
+
+          {/* Charges this ticket was billed with that the client's card no
+              longer offers. Shown so nobody is surprised by a number they
+              can't find a dropdown for, and kept read-only: without a
+              catalog line behind them there is no rate to re-price against.
+              They stay on the ticket unless someone takes one off here. */}
+          {orphanLines.length > 0 && (
+            <>
+              <div style={{ display: "flex", alignItems: "center", marginTop: 6 }}>
+                <span style={{ fontSize: 13, fontFamily: "var(--font-heading)", fontWeight: 600 }}>No longer on the rate card</span>
+                <span className="tabular" style={{ marginLeft: "auto", fontSize: 12, color: "var(--color-accent)" }}>{money(orphanDollars)}</span>
+              </div>
+              <div style={{ fontSize: 11, color: "color-mix(in srgb, var(--color-text) 55%, transparent)", marginTop: -4 }}>
+                Billed on this ticket at the price shown, and still counted in the total. They can't be edited here — an admin would have to put the line back on {job.client}'s rate card. Remove one only if it shouldn't be charged.
+              </div>
+              <div style={{ display: "flex", flexDirection: "column", gap: 6 }}>
+                {orphanLines.map((l, i) => (
+                  <div key={`${l.kind}:${l.label}:${i}`} style={{ display: "flex", alignItems: "center", gap: 8, borderBottom: "1px solid color-mix(in srgb, var(--color-text) 8%, transparent)", paddingBottom: 6 }}>
+                    <div style={{ flex: 1, minWidth: 0 }}>
+                      <div style={{ fontSize: 14 }}>{l.label} <TagX variant="outline">off card</TagX></div>
+                      <div className="tabular" style={{ fontSize: 10, color: "color-mix(in srgb, var(--color-text) 55%, transparent)" }}>{money(l.unit_rate)} / {l.unit}</div>
+                    </div>
+                    <span className="tabular" style={{ fontSize: 14 }}>{l.quantity}</span>
+                    <span style={{ fontSize: 11, width: 22 }}>{l.unit}</span>
+                    <span className="tabular" style={{ width: 62, textAlign: "right", fontSize: 14 }}>{money(lineTotal(l.quantity, l.unit_rate))}</span>
+                    <button onClick={() => removeOrphan(i)} aria-label={`Remove ${l.label}`}
+                      style={{ background: "none", border: "none", cursor: "pointer", color: "color-mix(in srgb, var(--color-text) 50%, transparent)", fontSize: 16 }}>×</button>
+                  </div>
+                ))}
+              </div>
+            </>
           )}
 
           {/* The figure the rep signs for is the one with tax on it; the

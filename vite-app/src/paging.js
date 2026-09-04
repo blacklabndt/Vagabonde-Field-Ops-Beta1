@@ -1,0 +1,88 @@
+// Reading past PostgREST's silent response cap.
+//
+// Two shapes, and which one a read gets is a judgement about what a wrong
+// answer costs. Both live here rather than in db.js so the rules can be
+// tested without a database — the failure they guard is a row that isn't
+// there, which no screen can show you.
+
+// PostgREST will not return more than 1000 rows in a single response, no
+// matter what limit is asked for — and it does not say so. A request for
+// 100000 rows comes back with 1000 and looks complete.
+//
+// That is fine for anything paged, and quietly wrong for anything that means
+// "all of them": the accounting export was writing a CSV of the first 1000
+// tickets, and a pay period with more than 1000 crew rows would have dropped
+// hours off a timesheet. Both now page until the source is exhausted.
+export const RESPONSE_ROW_CAP = 1000;
+
+// Fetch every page of something that exceeds the 1000-row response cap.
+//
+// The two callers used to walk pages one at a time, each waiting on the last.
+// That is the only safe shape when you don't know how many pages there are,
+// but it costs a full round trip per 1000 rows: exporting 50,000 tickets was
+// 51 sequential requests and about fourteen seconds.
+//
+// Page 0 comes back with the total, which is all that's needed to know how
+// many pages exist and ask for them at once. Six at a time rather than all of
+// them — a phone on a lease does not benefit from fifty concurrent requests,
+// and PostgREST is happier too. Pages are reassembled in order, which matters:
+// the underlying queries have a total order and the CSV inherits it.
+//
+// What it cannot do is survive a row leaving the source mid-walk. Every page
+// is an OFFSET, so a delete between page 0 and page 3 shifts every later row
+// up by one and the row that slid across the boundary is never asked for.
+// Ordering by id does not help — offsets count rows, not keys. That is an
+// acceptable trade for the reference lists (a dropped contractor reappears on
+// the next load); it is not acceptable for anything people are paid or billed
+// from, and those use fetchAllKeyset below.
+const PAGE_CONCURRENCY = 6;
+export async function fetchAllPages(fetchPage) {
+  const first = await fetchPage(0);
+  const total = first.total;
+  const rows = first.rows.slice();
+  if (!first.rows.length || rows.length >= total) return rows;
+
+  const pageCount = Math.ceil(total / RESPONSE_ROW_CAP);
+  const pages = new Array(pageCount);
+  pages[0] = first.rows;
+
+  for (let start = 1; start < pageCount; start += PAGE_CONCURRENCY) {
+    const batch = [];
+    for (let p = start; p < Math.min(start + PAGE_CONCURRENCY, pageCount); p++) {
+      batch.push(fetchPage(p).then(r => { pages[p] = r.rows; }));
+    }
+    await Promise.all(batch);
+  }
+  // Rows added between page 0 and the last page would land beyond `total`;
+  // flat() keeps whatever actually arrived rather than trusting the estimate.
+  return pages.flat();
+}
+
+// The same "all of them", asked for by key instead of by offset.
+//
+// Each page says "the next thousand rows after this id" rather than "rows
+// 3000 to 3999", so a row deleted while the walk is in flight moves nothing:
+// the keys that remain are still greater than the last one seen. It costs the
+// concurrency — page N+1 can't be asked for until page N has come back — and
+// that is the right price for a timesheet or an accounting export, where a
+// silently missing row is somebody's hours or somebody's invoice.
+//
+// `fetchAfter(lastKey)` gets null on the first call and the last row's key
+// after that, and returns the rows. A short page ends the walk.
+export async function fetchAllKeyset(fetchAfter, keyOf = row => row.id) {
+  const all = [];
+  let after = null;
+  for (;;) {
+    const rows = await fetchAfter(after);
+    if (!rows || !rows.length) return all;
+    for (const r of rows) all.push(r);
+    if (rows.length < RESPONSE_ROW_CAP) return all;
+    const next = keyOf(rows[rows.length - 1]);
+    // A full page whose last key is the one we already asked past would ask
+    // for the same thousand rows for ever. Stopping with what we have is the
+    // only answer that terminates; it can only happen if the ordering and the
+    // key disagree, which is a bug in the caller, not a state to spin on.
+    if (next == null || next === after) return all;
+    after = next;
+  }
+}

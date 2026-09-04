@@ -15,25 +15,28 @@ import { sendMail, base64, corsHeaders, wrapEmail, esc, MAX_ATTACHMENT_BYTES,
 Deno.serve(async (req) => {
   if (req.method === "OPTIONS") return new Response("ok", { headers: corsHeaders });
 
+  // 1. Who's asking? Reject anything without a valid session — before the
+  // body is even parsed. The parse and the recipient checks below throw on
+  // junk, and the catch at the bottom writes that to function_errors: an
+  // anonymous POST must not be able to fill the error log.
+  const authHeader = req.headers.get("Authorization") ?? "";
+  const asUser = createClient(
+    Deno.env.get("SUPABASE_URL")!,
+    Deno.env.get("SUPABASE_ANON_KEY")!,
+    { global: { headers: { Authorization: authHeader } } }
+  );
+  const { data: { user } } = await asUser.auth.getUser();
+  if (!user) return new Response(JSON.stringify({ error: "Not signed in" }), {
+    status: 401, headers: { ...corsHeaders, "Content-Type": "application/json" }
+  });
+
   try {
     const { reportId, to, cc, message } = await req.json();
     if (!reportId) throw new Error("reportId is required");
-    // The caller check below proves who is asking, not who receives — the
+    // The caller check above proves who is asking, not who receives — the
     // link this email carries opens a private PDF for 14 days.
     const toList = recipients(to, "to");
     const ccList = optionalRecipients(cc, "cc");
-
-    // 1. Who's asking? Reject anything without a valid session.
-    const authHeader = req.headers.get("Authorization") ?? "";
-    const asUser = createClient(
-      Deno.env.get("SUPABASE_URL")!,
-      Deno.env.get("SUPABASE_ANON_KEY")!,
-      { global: { headers: { Authorization: authHeader } } }
-    );
-    const { data: { user } } = await asUser.auth.getUser();
-    if (!user) return new Response(JSON.stringify({ error: "Not signed in" }), {
-      status: 401, headers: { ...corsHeaders, "Content-Type": "application/json" }
-    });
 
     // Seeing a report is not the same as being allowed to mail it off the
     // premises: reports_select includes the 'job' tab, which Helpers hold,

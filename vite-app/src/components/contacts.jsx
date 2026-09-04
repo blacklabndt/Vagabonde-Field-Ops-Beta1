@@ -238,10 +238,18 @@ function ContactCard({ contact, orgName, onSave, onMakePrimary, onRemove, canRem
   const muted = "color-mix(in srgb, var(--color-text) 60%, transparent)";
 
   if (editing) {
+    // Only a true closes the card. A failed save comes back as { error },
+    // which is truthy — collapsing on anything-but-false threw away the
+    // corrections that had just been typed. Handing the outcome straight
+    // back lets the form show the message where the person is looking.
     return (
       <ContactForm heading={`Edit ${contact.name}`} contact={contact}
         onCancel={() => setEditing(false)}
-        onSave={async form => { if ((await onSave(form)) !== false) setEditing(false); }} />
+        onSave={async form => {
+          const outcome = await onSave(form);
+          if (outcome === true) setEditing(false);
+          return outcome;
+        }} />
     );
   }
 

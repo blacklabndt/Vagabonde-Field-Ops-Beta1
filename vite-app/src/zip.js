@@ -58,15 +58,13 @@ class Writer {
   bytes(b) { this.parts.push(b); this.length += b.length; }
   u16(n) { this.bytes(new Uint8Array([n & 0xFF, (n >>> 8) & 0xFF])); }
   u32(n) { this.bytes(new Uint8Array([n & 0xFF, (n >>> 8) & 0xFF, (n >>> 16) & 0xFF, (n >>> 24) & 0xFF])); }
-  join() {
-    const out = new Uint8Array(this.length);
-    let at = 0;
-    for (const p of this.parts) { out.set(p, at); at += p.length; }
-    return out;
-  }
 }
 
-// files: [{ name, data: Uint8Array }] -> Blob
+// files: [{ name, data: Uint8Array, crc? }] -> Blob
+//
+// `crc` is optional and only an economy: the archive already computes one per
+// entry for its manifest, and a year of PDFs is a lot of bytes to run through
+// the same polynomial twice. Absent, it is computed here as it always was.
 export function makeZip(files, when = new Date()) {
   const { time, date } = dosStamp(when);
   const w = new Writer();
@@ -75,7 +73,7 @@ export function makeZip(files, when = new Date()) {
   for (const f of files) {
     const name = utf8(f.name);
     const data = f.data instanceof Uint8Array ? f.data : new Uint8Array(f.data);
-    const crc = crc32(data);
+    const crc = f.crc == null ? crc32(data) : f.crc >>> 0;
     const offset = w.length;
 
     // Local file header
@@ -128,7 +126,11 @@ export function makeZip(files, when = new Date()) {
   w.u32(centralStart);
   w.u16(0);               // no comment
 
-  return new Blob([w.join()], { type: "application/zip" });
+  // The pieces are handed to the Blob as they are, rather than copied into
+  // one buffer first: a year's archive is hundreds of megabytes, and holding
+  // the parts and a joined copy of them at the same time is twice the memory
+  // for a concatenation the Blob does anyway.
+  return new Blob(w.parts, { type: "application/zip" });
 }
 
 // Anything that could confuse a filesystem, plus the characters Windows

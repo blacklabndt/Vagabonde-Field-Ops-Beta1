@@ -833,7 +833,11 @@ export function TeamChatScreen({ currentUser, onOpenJob, onRead }) {
       const sent = await Db.sendChatMessage(currentUser.id, text, {
         imageFile, replyTo: replyTarget ? replyTarget.id : null
       });
-      setDraft("");
+      // Clear only what went out. The composer stays live through the send
+      // — shrinking and uploading a picture is not quick — so anything
+      // typed meanwhile is sitting after the sent text and is not part of
+      // the message; blanking the box wholesale swallowed it.
+      setDraft(d => (d.startsWith(draft) ? d.slice(draft.length) : d));
       dropAttachment();
       setReplyTarget(null);
       stickToBottom.current = true;

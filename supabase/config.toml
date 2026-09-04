@@ -439,3 +439,12 @@ verify_jwt = false
 
 [functions.chat-retention]
 verify_jwt = false
+
+# The other side of the approval flow: this one mints the token and mails it,
+# so only a signed-in account may call it. The function checks the caller
+# itself (and that they are the ticket's technician, or an Admin or
+# Coordinator), but it was deployed with verification off, which left the
+# platform's own gate open and the whole guard resting on that one check.
+# Pinned here so a deploy cannot quietly hand it back.
+[functions.send-ticket-approval]
+verify_jwt = true

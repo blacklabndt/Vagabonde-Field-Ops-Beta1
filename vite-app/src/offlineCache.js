@@ -73,6 +73,9 @@ const listeners = new Set();
 // What readThrough last wrote per key, serialized — the guard that keeps
 // an unchanged poll result from touching IndexedDB again.
 const rtLastWritten = new Map();
+// How many liveOnly calls are in flight. While any is, readThrough refuses
+// to fall back: see liveOnly below.
+let liveOnlyDepth = 0;
 const notify = () => listeners.forEach(fn => fn(state));
 
 function setState(next) {
@@ -127,6 +130,27 @@ export const OfflineCache = {
     return ocDelete(key).catch(() => {});
   },
 
+  // Run something with the fallback switched off: while it runs, a failed
+  // read throws instead of being answered from memory. For work whose whole
+  // point is that it read the server — the archive, which is checked and then
+  // used to justify deleting the jobs it holds. A signal blip mid-build would
+  // otherwise hand it this device's stale (or empty) copy of a job's tickets,
+  // and an archive that verifies while missing real tickets is how the one
+  // bulk delete in the app loses work.
+  //
+  // A counter, not a flag, so overlapping and nested calls each hold it. It
+  // is module-wide rather than per-call: anything else the tab reads while it
+  // is set loses its fallback too, which for the seconds each job's reads
+  // take is the safe way round — a screen shows an error instead of stale data.
+  async liveOnly(fn) {
+    liveOnlyDepth++;
+    try { return await fn(); }
+    finally { liveOnlyDepth--; }
+  },
+  // For a reader that swallows its own failures with a stand-in: inside
+  // liveOnly the stand-in is exactly what the caller refused.
+  isLiveOnly() { return liveOnlyDepth > 0; },
+
   // Network first, remembered copy second, and only ever for a real
   // connectivity failure. A permission error or a bad request is a genuine
   // answer from the server and has to surface as one.
@@ -144,11 +168,18 @@ export const OfflineCache = {
       this.markLive();
       const serialized = JSON.stringify(value);
       if (rtLastWritten.get(key) !== serialized) {
-        rtLastWritten.set(key, serialized);
-        ocPut(key, value).catch(() => {});
+        // Recorded when the write actually lands, and forgotten if it does
+        // not. Setting it up front meant a single failed IndexedDB write
+        // silenced that key for the life of the tab: every identical fetch
+        // afterwards compared equal and skipped the write it still needed,
+        // so the offline copy the guard was protecting was never there.
+        ocPut(key, value).then(() => rtLastWritten.set(key, serialized), () => rtLastWritten.delete(key));
       }
       return value;
     } catch (e) {
+      // Inside liveOnly nothing may be answered from memory — the caller has
+      // said a remembered copy would be worse than an error.
+      if (liveOnlyDepth > 0) throw e;
       if (!isNetworkError(e)) throw e;
       const hit = await ocGet(key).catch(() => null);
       if (!hit) throw e;

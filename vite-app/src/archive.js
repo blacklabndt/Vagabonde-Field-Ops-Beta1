@@ -13,6 +13,9 @@
 
 import { money, gstOn } from "./data.js";
 import { makeZip, safeFilename, crc32 } from "./zip.js";
+// Only for the switch that turns the offline fallback off while the archive
+// reads — no env, nothing browser-only, so the tests still load this module.
+import { OfflineCache } from "./offlineCache.js";
 
 const enc = new TextEncoder();
 const text = s => enc.encode(String(s ?? ""));
@@ -189,9 +192,12 @@ export async function buildArchive({ jobs, mode, from, to, by = "", onProgress =
   };
   const range = mode === "year" ? `archive of ${String(from).slice(0, 4)}` : `archive of ${from} to ${to}`;
   const meta = { at: fmtWhen(new Date().toISOString()), by, range };
+  // The CRC travels with the entry so the zip writer does not compute it a
+  // second time: for a year of PDFs that is the whole archive read twice.
   const add = (name, data) => {
-    files.push({ name, data });
-    manifest.push({ name, size: data.length, crc: crc32(data) });
+    const crc = crc32(data);
+    files.push({ name, data, crc });
+    manifest.push({ name, size: data.length, crc });
     summary.bytes += data.length;
   };
   const index = [["Client", "Month", "Job", "Project", "Contractor", "Status", "Raised", "Tickets", "Before GST", "JHAs", "Reports", "Folder"]];
@@ -202,12 +208,40 @@ export async function buildArchive({ jobs, mode, from, to, by = "", onProgress =
     summary.clients.add(job.client || "No client");
     const say = step => onProgress({ index: i, count: jobs.length, job: job.id, step, bytes: summary.bytes });
     say("reading the job");
-    const [record, jhas, reports, ticketRows] = await Promise.all([
-      db.getJobRecord(job), db.listJhasForJob(job.dbId), db.listReportsForJob(job.dbId), db.listTicketsForJob(job.dbId)
-    ]);
     const missing = [];
     const notOnFile = [];
     const used = new Map();
+
+    // Read live or not at all. These four reads sit on the offline cache, so
+    // a signal blip in the minutes a year takes would otherwise be answered
+    // from this device's remembered copy: a job's tickets as they were days
+    // ago, or an empty list, with nothing to say so. The zip would verify,
+    // the README would call itself complete, and the clear would delete
+    // tickets that are not in it. A failure has to land in `missing`, which
+    // is what keeps the clear locked.
+    //
+    // Belt and braces: if anything flipped to serving cached data while these
+    // four were being read, the same doubt applies to this job. (The PDF and
+    // ticket-detail reads below never touch the cache; they throw.)
+    let record = {}, jhas = [], reports = [], ticketRows = [];
+    let servedCached = false;
+    let firstCall = true;
+    const stopWatching = OfflineCache.subscribe(s => {
+      // subscribe reports where things stand before it reports a change, and
+      // a banner left up by some earlier screen is not this build's problem.
+      if (!firstCall && s.servingCached) servedCached = true;
+      firstCall = false;
+    });
+    try {
+      [record, jhas, reports, ticketRows] = await OfflineCache.liveOnly(() => Promise.all([
+        db.getJobRecord(job), db.listJhasForJob(job.dbId), db.listReportsForJob(job.dbId), db.listTicketsForJob(job.dbId)
+      ]));
+    } catch (e) {
+      missing.push(`The job's record, assessments, reports and tickets: ${e.message || "read failed"}`);
+    } finally {
+      stopWatching();
+    }
+    if (servedCached) missing.push("Read from this device's offline copy rather than the server — this job may be incomplete.");
 
     for (const j of jhas) {
       if (!j.pdfKey) { notOnFile.push(`JHA of ${j.workDate || j.at}`); continue; }

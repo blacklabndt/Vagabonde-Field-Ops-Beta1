@@ -102,6 +102,17 @@ test("the CRC is a real CRC-32", async () => {
   assert.equal(u32(b, 14), 0xCBF43926);
 });
 
+test("an entry may bring its own CRC, and it is the one that is written", async () => {
+  // The archive computes one per entry for its manifest; running a year of
+  // PDFs through the polynomial a second time is the whole archive read
+  // twice. A deliberately wrong value proves the supplied one is used, and
+  // that an entry without one is still computed here.
+  const b = await bytesOf(makeZip([{ ...file("check.txt", "123456789"), crc: 0xDEADBEEF }, file("other.txt", "123456789")]));
+  assert.equal(u32(b, 14), 0xDEADBEEF, "the given CRC");
+  const secondLocal = 30 + 9 + 9;   // header + name + data of the first entry
+  assert.equal(u32(b, secondLocal + 14), 0xCBF43926, "and one computed for the entry that brought none");
+});
+
 test("binary content survives byte for byte", async () => {
   const data = new Uint8Array(256);
   for (let i = 0; i < 256; i++) data[i] = i;          // every byte value, including 0

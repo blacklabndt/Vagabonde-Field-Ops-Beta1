@@ -1,9 +1,16 @@
 // The archive's pure half: the client → month → job layout, file naming,
-// the CSV guard, the job text file, and the check of a downloaded zip.
+// the CSV guard, the job text file, and the check of a downloaded zip. Plus
+// buildArchive itself against a fake data layer, for the one thing that is
+// not about formatting: an archive is only allowed to hold what the server
+// answered, because the clear behind it deletes the jobs for real.
+//
+// IndexedDB before the module: buildArchive reads through the offline cache.
+import "fake-indexeddb/auto";
 import test from "node:test";
 import assert from "node:assert/strict";
-import { jobFolderPaths, monthFolderOf, uniqueName, csvCell, jobDetailsText, archiveZipName, verifyZip } from "./archive.js";
+import { jobFolderPaths, monthFolderOf, uniqueName, csvCell, jobDetailsText, archiveZipName, verifyZip, buildArchive } from "./archive.js";
 import { makeZip, crc32 } from "./zip.js";
+import { OfflineCache } from "./offlineCache.js";
 
 test("jobs file under their client and the month they were raised", () => {
   const paths = jobFolderPaths([
@@ -125,6 +132,65 @@ test("a file left out of the download is caught, and so is one that isn't from t
   const other = await bytesOf(makeZip([...entries, { name: "stray.txt", data: enc.encode("x") }]));
   const w = verifyZip(other, manifest);
   assert.deepEqual(w.problems, ["not from this build: stray.txt"]);
+});
+
+// ── buildArchive ─────────────────────────────────────────────────────────
+// The data layer is handed in, so a fake one is the whole test rig.
+
+const fakeDb = (over = {}) => ({
+  getJobRecord: async () => ({ clientRep: "T. Beaudry" }),
+  listJhasForJob: async () => [],
+  listReportsForJob: async () => [],
+  listTicketsForJob: async () => [{ id: "KK-0818-26-01" }],
+  getTicketForArchive: async id => ({ id, workDate: "2026-08-18", status: "Approved", total: 1234.5, lines: [] }),
+  listCrewForTicket: async () => [],
+  renderTicketInvoice: async () => "<html>invoice</html>",
+  downloadObject: async () => new Uint8Array([0x25, 0x50, 0x44, 0x46]),
+  ...over
+});
+const oneJob = [{ id: "S-1004", dbId: 1, project: "Tie-in", client: "Athabasca Oil", createdAtIso: "2026-08-18T18:00:00Z" }];
+const build = (db, jobs = oneJob) => buildArchive({ jobs, mode: "year", from: "2026-01-01", to: "2026-12-31", by: "Kyle Keith", db });
+const zipText = async blob => new TextDecoder().decode(new Uint8Array(await blob.arrayBuffer()));
+const failedFetch = () => { throw new TypeError("Failed to fetch"); };
+
+test("a complete build says so and holds every job's paperwork", async () => {
+  const { blob, summary, manifest } = await build(fakeDb());
+  assert.deepEqual(summary.missing, []);
+  assert.equal(summary.tickets, 1);
+  assert.equal(summary.invoices, 1);
+  assert.equal(verifyZip(new Uint8Array(await blob.arrayBuffer()), manifest).ok, true);
+});
+
+test("a read the network could not answer is a gap in the archive, not an empty job", async () => {
+  // This device remembers this job's tickets from before. Outside the
+  // archive that copy is the right answer and the cache serves it...
+  await OfflineCache.clear();
+  await OfflineCache.put("tickets.1", [{ id: "KK-0818-26-01" }]);
+  assert.deepEqual(await OfflineCache.readThrough("tickets.1", failedFetch), [{ id: "KK-0818-26-01" }],
+    "the cache really would have answered this");
+  OfflineCache.markLive();
+
+  // ...but inside the build it must not be, or the zip would verify, the
+  // README would call itself complete, and the clear would delete a ticket
+  // that is nowhere in it.
+  const { blob, summary } = await build(fakeDb({ listTicketsForJob: () => OfflineCache.readThrough("tickets.1", failedFetch) }));
+  assert.equal(summary.tickets, 0);
+  assert.equal(summary.missing.length, 1);
+  assert.match(summary.missing[0], /^S-1004: .*Failed to fetch/);
+  assert.match(await zipText(blob), /NOT RETRIEVED — this archive is not complete/);
+});
+
+test("anything served from this device's memory during a build is flagged too", async () => {
+  // The second lock: some other read flipping the banner mid-build means the
+  // job in hand is not to be trusted either, whatever it returned.
+  const db = fakeDb({ listJhasForJob: async () => { OfflineCache.noteServingCached(Date.now()); return []; } });
+  try {
+    const { summary } = await build(db);
+    assert.equal(summary.missing.length, 1);
+    assert.match(summary.missing[0], /offline copy/);
+  } finally {
+    OfflineCache.markLive();
+  }
 });
 
 test("something that isn't a zip is said to be so", () => {

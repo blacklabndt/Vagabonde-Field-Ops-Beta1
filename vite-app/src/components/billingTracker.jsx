@@ -8,8 +8,21 @@ const TRACKER_FILTERS = ["All", "Draft", "Awaiting approval", "Approved", "Invoi
 
 const shortDate = iso => iso ? new Date(iso).toLocaleDateString("en-CA", { day: "2-digit", month: "short" }) : "";
 
-function exportTickets(tickets) {
+// What the CSV was built from, said in the file itself. A spreadsheet of
+// "the tickets" is unreadable a week later in accounting: there is no way to
+// tell a narrowed export from a whole one, and both look complete.
+function filterCaption(filter, q, from, to) {
+  const parts = [`Status: ${filter}`];
+  if (q) parts.push(`Search: ${q}`);
+  parts.push(from || to ? `Worked ${from || "earliest"} to ${to || "latest"}` : "All work dates");
+  return parts.join(" · ");
+}
+
+function exportTickets(tickets, caption) {
   downloadCsv(`Tickets ${todayLocal()}.csv`, [
+    [caption],
+    [`Exported ${todayLocal()} · ${tickets.length} ticket${tickets.length === 1 ? "" : "s"}`],
+    [],
     ["Ticket", "Date", "Age (days)", "Job", "Project", "Client", "Technician", "Amount", "Status", "Chased", "Invoiced"],
     ...tickets.map(t => [t.id, t.date, t.age, t.job, t.project, t.client, t.tech, t.amount, t.status,
       t.chasedAt ? t.chasedAt.slice(0, 10) : "", t.invoicedAt ? t.invoicedAt.slice(0, 10) : ""])
@@ -145,8 +158,13 @@ export function BillingTrackerScreen({ onOpenTicket, currentUser }) {
       // for one enormous page looked like it did that and didn't: PostgREST
       // caps a response at 1000 rows without complaining, so the CSV came out
       // short and looked whole.
-      const all = await Db.listTicketsForExport(filter);
-      exportTickets(all);
+      //
+      // The *whole* filter, too — search and the work-date window as well as
+      // the status. Only the status was sent, so an admin who had narrowed
+      // the screen to one client's March and pressed Export got every ticket
+      // ever raised, under a footer count that said otherwise.
+      const all = await Db.listTicketsForExport({ status: filter, q, from, to });
+      exportTickets(all, filterCaption(filter, q, from, to));
     } catch (e) {
       setError(e.message || "Couldn't build the export.");
     }
@@ -215,10 +233,17 @@ export function BillingTrackerScreen({ onOpenTicket, currentUser }) {
         </div>
         <div style={{ marginLeft: "auto", display: "flex", gap: 8 }}>
           <Btn variant="secondary" onClick={exportCurrentFilter} disabled={exporting || !total}>{exporting ? "Building…" : "Export to accounting"}</Btn>
-          <Btn variant="primary" onClick={chaseAllUnsigned} disabled={chasing || !(stats && stats.unsigned.count)}
-            title="Resends the approval-link email to every ticket still awaiting signature.">
-            {chasing ? "Sending…" : "Chase all unsigned"}
-          </Btn>
+          {/* Behind the same price gate as every other money control here.
+              The email this sends is a ticket summary with the amount on it,
+              and the database hands a role that can't see prices null totals
+              — so a Coordinator pressing this would have mailed every client
+              a $0.00 approval request, one tap, no undo. */}
+          {priced && (
+            <Btn variant="primary" onClick={chaseAllUnsigned} disabled={chasing || !(stats && stats.unsigned.count)}
+              title="Resends the approval-link email to every ticket still awaiting signature.">
+              {chasing ? "Sending…" : "Chase all unsigned"}
+            </Btn>
+          )}
         </div>
       </div>
 

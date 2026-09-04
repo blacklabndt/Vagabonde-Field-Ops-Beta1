@@ -31,6 +31,18 @@ const VALID_ROLES = ["Admin", "Coordinator", "Technician", "Helper"];
 Deno.serve(async (req) => {
   if (req.method === "OPTIONS") return new Response("ok", { headers: corsHeaders });
 
+  // Who is asking comes before anything is read from them: the parse and the
+  // checks below throw on junk, and the catch at the bottom writes that to
+  // function_errors — a log an anonymous POST must not be able to fill.
+  const authHeader = req.headers.get("Authorization") ?? "";
+  const asUser = createClient(
+    Deno.env.get("SUPABASE_URL")!,
+    Deno.env.get("SUPABASE_ANON_KEY")!,
+    { global: { headers: { Authorization: authHeader } } }
+  );
+  const { data: { user } } = await asUser.auth.getUser();
+  if (!user) return json({ error: "Not signed in" }, 401);
+
   try {
     const { email, password, name, role, cert, invite } = await req.json();
     if (!email) throw new Error("email is required");
@@ -39,15 +51,6 @@ Deno.serve(async (req) => {
     const secret = invite ? crypto.randomUUID() + crypto.randomUUID() : password;
     if (!secret) throw new Error("email and password are required");
     if (!VALID_ROLES.includes(role)) throw new Error("role must be one of: " + VALID_ROLES.join(", "));
-
-    const authHeader = req.headers.get("Authorization") ?? "";
-    const asUser = createClient(
-      Deno.env.get("SUPABASE_URL")!,
-      Deno.env.get("SUPABASE_ANON_KEY")!,
-      { global: { headers: { Authorization: authHeader } } }
-    );
-    const { data: { user } } = await asUser.auth.getUser();
-    if (!user) return json({ error: "Not signed in" }, 401);
 
     // Only an Admin may create an account — checked against the caller's
     // own profile, read through RLS, exactly as delete-user does it.
