@@ -147,13 +147,20 @@ async function tick(db: SupabaseClient, secret: string): Promise<Record<string, 
     if (sliceLooksAlive(running.heartbeat_at, Date.now())) {
       // Another slice of this same run is still going. Two at once would
       // upload the same part twice and fight over the cursor.
+      await tendWaitingRestore(db, running, secret);
       return { ok: true, busy: true, runId: running.id };
     }
-    return await advance(db, running, secret);
+    const moved = await advance(db, running, secret);
+    await tendWaitingRestore(db, running, secret);
+    return moved;
   }
 
   const queued = await openRun(db, "queued");
-  if (queued) return await advance(db, queued, secret);
+  if (queued) {
+    const moved = await advance(db, queued, secret);
+    await tendWaitingRestore(db, queued, secret);
+    return moved;
+  }
 
   // A restore in flight is somebody else's job; it still needs the poke,
   // and only when the chain of slices driving it has gone quiet.
@@ -191,6 +198,56 @@ async function tick(db: SupabaseClient, secret: string): Promise<Record<string, 
   return await advance(db, created, secret);
 }
 
+// A restore's first phase is a before_restore run raised by backup-restore
+// and driven here, and while it is in flight this tick returns above without
+// ever reaching the branch that forwards to a restore. So the restore
+// waiting on it goes unread for as long as the copy takes: its heartbeat
+// ages, the panel reads a run doing exactly what it was told to as a run
+// that died, and when the copy finishes nothing tells the restore — it waits
+// for the next cron tick, up to five minutes later, to be forwarded to.
+//
+// Both halves are this function. While the copy is going the waiting
+// restore's heartbeat is kept fresh; the moment the copy is finished with —
+// complete or failed — the restore is kicked so it can go on (or fail with
+// the reason, which is the same urgency: nothing has been deleted yet and
+// somebody is watching a dialog).
+//
+// The restore is found by the safety run's own id, which stepSafety wrote on
+// the restore's cursor as `safetyRunId` before its first slice returned —
+// read off the cursor here rather than asked for as a filter, because at
+// most one restore is ever in flight and the comparison is this function's
+// to make.
+async function tendWaitingRestore(db: SupabaseClient, safety: Run, secret: string): Promise<void> {
+  if (String(safety.kind) !== "before_restore") return;
+  const safetyId = String(safety.id);
+  const waiting = await openRun(db, "running", RESTORE_KINDS);
+  // Only the restore this copy was raised for. There is at most one restore
+  // in flight, but a before_restore run left over from one that failed is
+  // not the waiting one, and kicking a restore that is already past its
+  // safety phase would put a second slice beside the one driving it.
+  if (!waiting) return;
+  if (String(((waiting.cursor ?? {}) as Record<string, unknown>).safetyRunId ?? "") !== safetyId) return;
+
+  // The copy's status now, not the one this tick read before advancing it.
+  const { data: now, error: sErr } = await db.from("backup_runs")
+    .select("status").eq("id", safetyId).maybeSingle();
+  if (sErr) throw sErr;
+  const finished = !now || now.status === "complete" || now.status === "failed";
+  if (finished) {
+    // chain: true, and it has to be: the heartbeat this very function has
+    // been keeping fresh would make the restore's own aliveness gate refuse
+    // an unchained slice as "busy". There is nothing to collide with — a
+    // restore waiting on its safety copy has no slice in flight, which is
+    // the whole reason its heartbeat needed keeping.
+    kick("backup-restore", { action: "advance", runId: waiting.id, chain: true }, secret);
+    return;
+  }
+  const { error: bErr } = await db.from("backup_runs")
+    .update({ heartbeat_at: new Date().toISOString() })
+    .eq("id", waiting.id).eq("status", "running");
+  if (bErr) throw bErr;
+}
+
 // One slice of one named run: the link the last slice asked for.
 //
 // This exists because the chain used to say {action:"tick"}, and a tick
@@ -202,9 +259,17 @@ async function tick(db: SupabaseClient, secret: string): Promise<Record<string, 
 // The exemption is addressed at this run and no other. A slice the chain
 // did not start — the cron picking up what the chain dropped — still waits
 // for the heartbeat to go quiet, because two slices of one run would upload
-// the same part twice and fight over the cursor. `advance` claims the run
-// conditionally on the status it was read at, so even the exempt path
-// cannot end up with two.
+// the same part twice and fight over the cursor.
+//
+// What stands behind that gate is not the conditional claim: `advance`
+// claims on the status the run was read at, and two slices of a run that is
+// already `running` both read `running` and both match, so the claim stops a
+// second slice only where the first has yet to take a queued run. The
+// protection here is that every unit is idempotent — a part re-uploaded
+// replaces the file of the same name, a page re-walked lands on the same
+// keys — so the cost of two slices overlapping is repeated work and never a
+// hole. The stale-slice case is caught at the other end instead, by
+// stillHoldsRun on every write a slice makes after its claim.
 async function advanceById(
   db: SupabaseClient, runId: string, secret: string, chained: boolean
 ): Promise<Record<string, unknown>> {

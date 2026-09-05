@@ -906,6 +906,32 @@ test("the chain that drives a backup asks for the run it just moved", () => {
   assert.match(source, /if \(action === "advance"\)[\s\S]{0,200}caller\.internal/);
   // And the exemption is addressed at that run, not at whatever is running.
   assert.match(source, /!\(chained && String\(run\.id\) === runId\) && sliceLooksAlive/);
+  // What that exemption rests on is idempotent units, and the comment above
+  // it has to say so: the conditional claim cannot be the answer, because
+  // two slices of a run that is already `running` both match `status =
+  // running` and both take it.
+  const why = source.slice(
+    source.indexOf("// The exemption is addressed at this run"),
+    source.indexOf("async function advanceById")
+  );
+  assert.ok(why, "the comment that explains the exemption is still there");
+  assert.doesNotMatch(why, /claims the run conditionally on the status it was read at/);
+  assert.match(why, /idempotent/);
+});
+
+test("a restore waiting on its safety backup is tended by the tick", () => {
+  const source = read("supabase/functions/backup-run/index.ts");
+  // While the safety copy is the run in flight the tick never reaches its
+  // forward-to-a-restore branch — it returns after advancing its own kind —
+  // so the restore waiting on that copy would look dead for as long as the
+  // copy took. The tick therefore tends it: the restore is found by the
+  // safety run's own id on its cursor.
+  assert.match(source, /async function tendWaitingRestore\(/);
+  assert.match(source, /safetyRunId/);
+  assert.match(source, /String\(safety\.kind\) !== "before_restore"/);
+  // And when the copy is finished the restore is kicked rather than left
+  // for the next cron tick five minutes away.
+  assert.match(source, /kick\("backup-restore",\s*\{\s*action:\s*"advance",\s*runId:[^}]*chain:\s*true\s*\}/);
 });
 
 test("a slice that matched no row has lost the run and must stop writing", () => {
@@ -934,8 +960,9 @@ test("every write a slice makes to its own run is conditional on still holding i
   const updates = src.split('.from("backup_runs")').slice(1)
     .filter(rest => rest.trimStart().startsWith(".update("))
     .map(rest => rest.slice(0, rest.indexOf(";")));
-  assert.equal(updates.length, 5,
-    "claim, the folder, the cursor after every unit, the completion, and the failure");
+  assert.equal(updates.length, 6,
+    "claim, the folder, the cursor after every unit, the completion, the failure, " +
+    "and the heartbeat the tick keeps for a restore waiting on its safety copy");
   for (const statement of updates) {
     assert.match(statement, /\.eq\("status",/,
       `a write to backup_runs with no status guard: ${statement.replace(/\s+/g, " ").slice(0, 140)}`);

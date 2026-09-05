@@ -19,11 +19,12 @@ import {
   partsForTable, withoutAuthEmail, chatInsertRows, chatReplyPatches,
   settingsRestorePatch, ticketsForLoad, approvedTotalPatches, activityPatches,
   contentTypeFor, typedNameMatches, tooNewRefusal, accountFailureNote,
-  withoutMissingProfiles, wantsSetPasswordMail, droppedAccountsNote, quotesThatLanded
+  withoutMissingProfiles, wantsSetPasswordMail, droppedAccountsNote, quotesThatLanded,
+  rowsWithLiveParent
 } from "../../supabase/functions/_shared/backupRestore.ts";
 
 import {
-  LOAD_ORDER, WIPE_ORDER, PROFILE_REFS,
+  LOAD_ORDER, WIPE_ORDER, PROFILE_REFS, LIVE_PARENT_REFS,
   APP_SETTINGS_SECRETS, APP_SETTINGS_NEVER_RESTORED
 } from "../../supabase/functions/_shared/backupTables.ts";
 
@@ -271,6 +272,77 @@ test("a table that never names a profile is not filtered at all", () => {
   }
   // And the one that matters most is profiles' own id.
   assert.deepEqual(PROFILE_REFS.profiles.required, ["id"]);
+});
+
+test("a reaction to a message that was left out is left out with it", () => {
+  // chat_reactions.message_id is NOT NULL and names chat_messages, and
+  // chat_messages is a table this very restore can thin: a message written
+  // by an account that could not be re-created is not going in. The
+  // reaction would then name a row that is not there, and the foreign key
+  // would refuse the batch it rode in — after the wipe, with the database
+  // empty.
+  const rows = [
+    { id: "r1", message_id: "m1", profile_id: "sam", emoji: "👍" },
+    { id: "r2", message_id: "m2", profile_id: "sam", emoji: "🎉" },
+    { id: "r3", message_id: "m1", profile_id: "kyle", emoji: "👍" }
+  ];
+  const out = rowsWithLiveParent(rows, "message_id", ["m1"]);
+  assert.deepEqual(out.rows.map(r => r.id), ["r1", "r3"]);
+  assert.equal(out.dropped, 1);
+  assert.equal(out.rows[0], rows[0], "the rows that stay are the caller's own");
+  // Nothing dropped when every parent landed, and an empty list of parents
+  // drops everything that names one.
+  assert.equal(rowsWithLiveParent(rows, "message_id", ["m1", "m2"]).dropped, 0);
+  assert.equal(rowsWithLiveParent(rows, "message_id", []).rows.length, 0);
+  // A row that names nothing at all is nobody's orphan.
+  assert.equal(rowsWithLiveParent([{ id: "r4" }], "message_id", []).dropped, 0);
+  assert.deepEqual(rowsWithLiveParent(null, "message_id", []).rows, []);
+});
+
+test("every NOT NULL key into a table the restore can thin is named", () => {
+  // Read off pg_constraint against the live project: the only NOT NULL
+  // foreign key into a table a restore can leave rows out of — the tables
+  // PROFILE_REFS calls `required` — is chat_reactions.message_id.
+  // chat_reads names profiles and never chat_messages, which is why it is
+  // not here, and nothing at all names ticket_crew, arcade_scores,
+  // push_subscriptions or timesheet_approvals.
+  assert.deepEqual(LIVE_PARENT_REFS, {
+    chat_reactions: { column: "message_id", parent: "chat_messages" }
+  });
+  for (const [table, ref] of Object.entries(LIVE_PARENT_REFS)) {
+    assert.ok(LOAD_ORDER.includes(table), `${table} is loaded`);
+    assert.ok(LOAD_ORDER.indexOf(ref.parent) < LOAD_ORDER.indexOf(table),
+      `${ref.parent} loads before ${table}, or the check has nothing to read`);
+    // A parent that cannot lose rows would not need checking at all.
+    assert.ok((PROFILE_REFS[ref.parent]?.required ?? []).length > 0,
+      `${ref.parent} is a table the restore can thin`);
+  }
+});
+
+test("a part's skipped rows are counted once, however often a slice resumes", () => {
+  // The trap: a slice that runs out of budget on its very first batch
+  // persists batchDone at 0, and a resume that keys the counting off
+  // batchDone === 0 adds the same part's skipped rows a second time.
+  let c = newRestoreCursor({ folderId: "f", folderName: "n", keepProfileId: "k" });
+  assert.equal(c.partSkipCounted, false, "a fresh part has not been counted");
+  assert.equal(c.partDropped, 0);
+  c.partSkipCounted = true;
+  c.partDropped = 3;
+  // The next part starts uncounted, whether the last one ended a table or not.
+  c = afterPartLoaded(c, { table: "chat_reactions", rows: 10, lastPart: false, tableCount: 20 });
+  assert.equal(c.partSkipCounted, false);
+  assert.equal(c.partDropped, 0);
+  c.partSkipCounted = true;
+  c.partDropped = 2;
+  c = afterTableLoaded(c, 20, "chat_reactions");
+  assert.equal(c.partSkipCounted, false);
+  assert.equal(c.partDropped, 0);
+  // And it survives the round trip through jsonb, or a resumed slice would
+  // read it as false and count the part again.
+  const revived = reviveRestoreCursor({ partSkipCounted: true, partDropped: 4 });
+  assert.equal(revived.partSkipCounted, true);
+  assert.equal(revived.partDropped, 4);
+  assert.equal(reviveRestoreCursor({}).partSkipCounted, false);
 });
 
 test("a deactivated account is re-created but is not invited back in", () => {
@@ -537,6 +609,24 @@ test("a restore waiting on its safety backup still says it is alive", () => {
   const source = read("supabase/functions/backup-restore/index.ts");
   // The wait writes a heartbeat and nothing else. Without it the panel
   // reads a run that is behaving exactly as designed as a run that died.
+  // It is the second half of the answer: the tick tends the heartbeat while
+  // the safety backup is the run in flight, and this covers the poll the
+  // restore's own slice makes on its way into the wait.
   assert.match(source, /async function beat\(/);
   assert.match(source, /await beat\(db, runId, guard\)/);
+});
+
+test("an orphaned child is filtered against the rows that actually landed", () => {
+  const source = read("supabase/functions/backup-restore/index.ts");
+  // The batch's parents are read back before it is written, exactly as
+  // chat's second pass reads its quote targets back — and only when
+  // somebody was dropped, because with nobody dropped every parent in the
+  // backup is on the table.
+  assert.match(source, /LIVE_PARENT_REFS/);
+  assert.match(source, /rowsWithLiveParent/);
+  assert.match(source, /c\.droppedProfileIds\.length/);
+  // Counted once per part, on the cursor — not off batchDone, which is 0
+  // again on a slice that ran out of budget before its first batch.
+  assert.match(source, /if \(!c\.partSkipCounted\)/);
+  assert.doesNotMatch(source, /if \(c\.batchDone === 0\) c\.skipped/);
 });

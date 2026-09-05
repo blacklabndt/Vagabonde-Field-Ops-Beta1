@@ -238,6 +238,24 @@ export const PROFILE_REFS: Record<string, { required: string[]; optional: string
   arcade_scores: { required: ["profile_id"], optional: [] }
 };
 
+// The second order of orphan, and it follows from the first. A restore that
+// leaves an account out leaves that person's chat messages out with them —
+// chat_messages.profile_id is NOT NULL — and a row whose own NOT NULL
+// foreign key names one of those messages then has nowhere to go either.
+// One batch of them is one refused write, after the wipe, with the database
+// empty.
+//
+// Read off pg_constraint (contype 'f') against the live project, asking for
+// every NOT NULL foreign key whose parent is a table the restore can thin —
+// that is, a table PROFILE_REFS gives a `required` column. There is exactly
+// one: chat_reactions.message_id. chat_reads names profiles and never a
+// message, and nothing at all names ticket_crew, timesheet_approvals,
+// push_subscriptions or arcade_scores. chat_messages.reply_to is a nullable
+// self-reference and is dealt with by the second chat pass instead.
+export const LIVE_PARENT_REFS: Record<string, { column: string; parent: string }> = {
+  chat_reactions: { column: "message_id", parent: "chat_messages" }
+};
+
 // What "restore these jobs" reaches for, in the order it inserts them.
 export const JOB_CHILD_TABLES: string[] = [
   "tickets", "ticket_lines", "ticket_crew", "jhas", "reports", "rate_overrides"

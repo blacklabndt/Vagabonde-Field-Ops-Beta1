@@ -20,7 +20,7 @@
 // deno-lint-ignore-file no-explicit-any
 import type { SupabaseClient } from "https://esm.sh/@supabase/supabase-js@2";
 import {
-  LOAD_ORDER, WIPE_ORDER, TABLE_KEYS, PROFILE_REFS,
+  LOAD_ORDER, WIPE_ORDER, TABLE_KEYS, PROFILE_REFS, LIVE_PARENT_REFS,
   APP_SETTINGS_SECRETS, APP_SETTINGS_NEVER_RESTORED
 } from "../_shared/backupTables.ts";
 import {
@@ -40,7 +40,8 @@ import {
   partsForTable, withoutAuthEmail, chatInsertRows, chatReplyPatches,
   settingsRestorePatch, ticketsForLoad, approvedTotalPatches, activityPatches,
   contentTypeFor, typedNameMatches, tooNewRefusal, accountFailureNote,
-  withoutMissingProfiles, wantsSetPasswordMail, droppedAccountsNote, quotesThatLanded
+  withoutMissingProfiles, wantsSetPasswordMail, droppedAccountsNote, quotesThatLanded,
+  rowsWithLiveParent
 } from "../_shared/backupRestore.ts";
 import type { RestoreCursor } from "../_shared/backupRestore.ts";
 import { gunzip } from "../_shared/gzip.ts";
@@ -527,16 +528,41 @@ async function stepLoad(
   // row naming a profile that is not going in is a foreign key nothing will
   // ever satisfy, and one of them would fail the whole table's load.
   const missing = withoutMissingProfiles(shaped, table, c.droppedProfileIds, PROFILE_REFS);
-  // Counted once per part. A slice cut short comes back to the same part and
-  // filters it to the same rows, and a count added twice is a count that
-  // tells whoever reads it the wrong thing.
-  if (c.batchDone === 0) c.skipped += missing.skipped;
+  // Counted once per part, and the cursor is what remembers it: a slice that
+  // ran out of budget before writing anything comes back with batchDone at
+  // 0, so counting off that would add this part's figure a second time and
+  // tell whoever reads it the wrong thing.
+  if (!c.partSkipCounted) { c.skipped += missing.skipped; c.partSkipCounted = true; }
   const rows = missing.rows;
   const conflict = (TABLE_KEYS[table] ?? ["id"]).join(",");
+  // And the orphans of the orphans. A row whose own NOT NULL foreign key
+  // names a row this restore left out has nowhere to go either — a reaction
+  // to a message written by an account that could not be re-created — and
+  // one of them refuses the batch it rode in. Only when somebody was
+  // dropped: with nobody dropped every parent in the backup is on the table.
+  const parent = LIVE_PARENT_REFS[table];
+  const checkParents = !!parent && c.droppedProfileIds.length > 0;
 
   for (let at = c.batchDone; at < rows.length; at += WRITE_BATCH) {
     if (outOfBudget(deadline, Date.now())) { c.batchDone = at; return c; }
-    const batch = rows.slice(at, at + WRITE_BATCH);
+    let batch = rows.slice(at, at + WRITE_BATCH);
+    const targets = checkParents
+      ? batch.map(r => String(r[parent.column] ?? "")).filter(Boolean)
+      : [];
+    // An empty `in` list is a filter PostgREST reads as a syntax error, and
+    // a batch that names no parent has nothing to check anyway.
+    if (targets.length) {
+      const { data: there, error: thereErr } = await db.from(parent.parent).select("id").in("id", targets);
+      if (thereErr) throw new Error(`Reading ${parent.parent} back failed: ${thereErr.message}`);
+      const landed = rowsWithLiveParent(batch, parent.column, (there ?? []).map(r => String(r.id)));
+      batch = landed.rows;
+      // Counted per batch, and a batch is only walked once: the budget check
+      // above persists batchDone at the boundary, so a resumed slice starts
+      // after the batches whose drops are already on the cursor.
+      c.skipped += landed.dropped;
+      c.partDropped += landed.dropped;
+      if (!batch.length) continue;
+    }
     // Upsert rather than insert: the Admin's own profile row survived the
     // wipe and has to be replaced by the backup's version of it, and a
     // retried slice must not collide with itself.
@@ -550,7 +576,10 @@ async function stepLoad(
     if (error) throw new Error(`Restoring ${table} failed at row ${at + 1} of ${rows.length}: ${error.message}`);
   }
 
-  return afterPartLoaded(c, { table, rows: rows.length, lastPart, tableCount: LOAD_ORDER.length });
+  // What went in, which is what the part held less what was left out of it.
+  return afterPartLoaded(c, {
+    table, rows: rows.length - c.partDropped, lastPart, tableCount: LOAD_ORDER.length
+  });
 }
 
 // Chat history, in two passes over the same parts.
@@ -578,7 +607,8 @@ async function loadChatPart(
     // has nowhere to go: chat_messages.profile_id is NOT NULL. A pin by one
     // of them is only a pin forgotten.
     const missing = withoutMissingProfiles(raw, "chat_messages", c.droppedProfileIds, PROFILE_REFS);
-    if (c.batchDone === 0) c.skipped += missing.skipped;
+    // Once per part, off the cursor rather than off batchDone — see stepLoad.
+    if (!c.partSkipCounted) { c.skipped += missing.skipped; c.partSkipCounted = true; }
     const kept = missing.rows;
     for (let at = c.batchDone; at < kept.length; at += WRITE_BATCH) {
       if (outOfBudget(deadline, Date.now())) { c.batchDone = at; return c; }

@@ -77,6 +77,11 @@ const KIND_WORDS = {
 const rowsIn = counts => Object.values((counts && counts.rows) || {}).reduce((n, v) => n + Number(v || 0), 0);
 const filesIn = counts => Number((counts && counts.files) || 0);
 const bytesIn = counts => Number((counts && counts.bytes) || 0);
+// A restore's two other figures. Both are zero for a backup and for a
+// restore that had nothing to leave out, and both are worth saying when they
+// are not: a record left out is a record that is not in the app.
+const skippedIn = counts => Number((counts && counts.skipped) || 0);
+const collisionsIn = counts => Number((counts && counts.collisions) || 0);
 
 // While something is in flight the panel looks every few seconds; when
 // nothing is, it looks rarely — this screen is left open.
@@ -386,7 +391,24 @@ export function AutomaticBackupPanel() {
           {s.last_run.status === "complete" ? (
             <>finished {when(s.last_run.finished_at)} &middot; {s.last_run.folder_name} &middot;{" "}
               {plural(rowsIn(s.last_run.counts), "record")}, {plural(filesIn(s.last_run.counts), "file")}{" "}
-              ({mb(bytesIn(s.last_run.counts))}).</>
+              ({mb(bytesIn(s.last_run.counts))}).
+              {skippedIn(s.last_run.counts) > 0 && (
+                <> {plural(skippedIn(s.last_run.counts), "record")} could not be put back and{" "}
+                  {skippedIn(s.last_run.counts) === 1 ? "was" : "were"} left out.</>
+              )}
+              {collisionsIn(s.last_run.counts) > 0 && (
+                <> {plural(collisionsIn(s.last_run.counts), "record")} {collisionsIn(s.last_run.counts) === 1
+                  ? "was" : "were"} already in the app and {collisionsIn(s.last_run.counts) === 1
+                  ? "was" : "were"} left alone.</>
+              )}
+              {/* A run can finish and still have something an Admin has to be
+                  told — the accounts that could not be re-created, and what
+                  went with them. It is written on the run in `error`, and
+                  showing it only on a failure was showing it never. */}
+              {s.last_run.error && (
+                <div style={{ marginTop: 4, color: "var(--color-accent-700)" }}>{s.last_run.error}</div>
+              )}
+            </>
           ) : (
             <span style={{ color: "var(--color-accent-700)" }}>
               failed {when(s.last_run.finished_at)} &mdash; {s.last_run.error || "no reason recorded"}. The next

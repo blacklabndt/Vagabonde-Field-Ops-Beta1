@@ -56,6 +56,13 @@ export interface RestoreCursor {
   tableIndex: number;
   partIndex: number;
   batchDone: number;
+  // Whether this part's rows-left-out have already been added to `skipped`,
+  // and how many of its rows this restore has decided not to write. Both
+  // belong to the part rather than the slice: a slice that runs out of
+  // budget before its first batch persists batchDone at 0, so counting off
+  // batchDone === 0 would add the same part's figures again on the resume.
+  partSkipCounted: boolean;
+  partDropped: number;
   chatPass: number;
   // rate_lines' own insert trigger writes a history row per line, so the
   // history it wrote has to go before the backup's history file is loaded.
@@ -93,6 +100,8 @@ export function newRestoreCursor(o: {
     tableIndex: 0,
     partIndex: 0,
     batchDone: 0,
+    partSkipCounted: false,
+    partDropped: 0,
     chatPass: CHAT_INSERT_PASS,
     historyCleared: false,
     loaded: {},
@@ -139,6 +148,8 @@ export function reviveRestoreCursor(raw: unknown): RestoreCursor {
     tableIndex: num(c.tableIndex),
     partIndex: num(c.partIndex),
     batchDone: num(c.batchDone),
+    partSkipCounted: c.partSkipCounted === true,
+    partDropped: num(c.partDropped),
     chatPass: num(c.chatPass),
     historyCleared: c.historyCleared === true,
     loaded: (c.loaded ?? {}) as Record<string, number>,
@@ -193,12 +204,16 @@ export function wipeKeepsCaller(table: string): boolean {
 // ── Phase: tables ────────────────────────────────────────────────────────
 
 // One part of one table written. `lastPart` means the table is finished and
-// the next slice starts the one after it.
+// the next slice starts the one after it. The part's own bookkeeping — has
+// its skipped rows been counted, how many did it drop — goes back to nothing
+// here, because the next part is a different part.
 export function afterPartLoaded(c: RestoreCursor, done: {
   table: string; rows: number; lastPart: boolean; tableCount: number;
 }): RestoreCursor {
   c.loaded[done.table] = num(c.loaded[done.table]) + num(done.rows);
   c.batchDone = 0;
+  c.partSkipCounted = false;
+  c.partDropped = 0;
   if (done.lastPart) {
     c.partIndex = 0;
     return afterTableLoaded(c, done.tableCount, done.table);
@@ -215,11 +230,15 @@ export function afterTableLoaded(c: RestoreCursor, tableCount: number, table = "
     c.chatPass = CHAT_REPLY_PASS;
     c.partIndex = 0;
     c.batchDone = 0;
+    c.partSkipCounted = false;
+    c.partDropped = 0;
     return c;
   }
   c.tableIndex = num(c.tableIndex) + 1;
   c.partIndex = 0;
   c.batchDone = 0;
+  c.partSkipCounted = false;
+  c.partDropped = 0;
   c.chatPass = CHAT_INSERT_PASS;
   if (c.tableIndex >= tableCount) c.phase = "files";
   return c;
@@ -364,6 +383,33 @@ export function chatReplyPatches(rows: Record<string, unknown>[]): Record<string
   return out;
 }
 
+// ── Rows whose parent did not land ───────────────────────────────────────
+
+// The rows of one batch that still have something to point at. A restore
+// that could not re-create an account leaves that person's rows out, and a
+// row in a later table whose foreign key names one of them is a row nothing
+// will ever satisfy: one of those in a batch is the whole batch refused.
+//
+// `presentIds` is what the database says is actually there, read back for
+// this batch — not what the backup said should be there. That is the whole
+// point: the two differ by exactly the rows this restore left out.
+export function rowsWithLiveParent(
+  rows: Record<string, unknown>[], column: string, presentIds: Iterable<string>
+): { rows: Record<string, unknown>[]; dropped: number } {
+  const present = new Set<string>();
+  for (const id of presentIds || []) present.add(String(id));
+  const out: Record<string, unknown>[] = [];
+  let dropped = 0;
+  for (const row of rows || []) {
+    // A row that names nobody is nobody's orphan: chat's quote column is
+    // nullable, and a message that quotes nothing is not missing anything.
+    const target = String((row as Record<string, unknown>)[column] ?? "");
+    if (target && !present.has(target)) { dropped += 1; continue; }
+    out.push(row);
+  }
+  return { rows: out, dropped };
+}
+
 // Pass two, when somebody was left out. A message written by an account
 // that could not be re-created is not on the table, and a reply that quotes
 // it would name a row that is not there — the foreign key would refuse the
@@ -372,16 +418,7 @@ export function chatReplyPatches(rows: Record<string, unknown>[]): Record<string
 export function quotesThatLanded(
   patches: Record<string, unknown>[], presentIds: Iterable<string>
 ): { rows: Record<string, unknown>[]; dropped: number } {
-  const present = new Set<string>();
-  for (const id of presentIds || []) present.add(String(id));
-  const rows: Record<string, unknown>[] = [];
-  let dropped = 0;
-  for (const patch of patches || []) {
-    const target = String((patch as Record<string, unknown>).reply_to ?? "");
-    if (target && !present.has(target)) { dropped += 1; continue; }
-    rows.push(patch);
-  }
-  return { rows, dropped };
+  return rowsWithLiveParent(patches, "reply_to", presentIds);
 }
 
 // ── The settings row ─────────────────────────────────────────────────────
