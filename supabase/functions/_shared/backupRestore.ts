@@ -59,6 +59,8 @@ export interface RestoreCursor {
   filesDone: number;
   filesBytes: number;
   fileOffset: number;
+  totalsPart: number;
+  totalsDone: boolean;
   activityPart: number;
   // A row the restore chose not to write, and a row it found already there.
   // Both are zero for a restore-all — it writes into tables it has just
@@ -90,6 +92,8 @@ export function newRestoreCursor(o: {
     filesDone: 0,
     filesBytes: 0,
     fileOffset: 0,
+    totalsPart: 0,
+    totalsDone: false,
     activityPart: 0,
     skipped: 0,
     collisions: 0
@@ -133,6 +137,8 @@ export function reviveRestoreCursor(raw: unknown): RestoreCursor {
     filesDone: num(c.filesDone),
     filesBytes: num(c.filesBytes),
     fileOffset: num(c.fileOffset),
+    totalsPart: num(c.totalsPart),
+    totalsDone: c.totalsDone === true,
     activityPart: num(c.activityPart),
     skipped: num(c.skipped),
     collisions: num(c.collisions)
@@ -301,6 +307,42 @@ export function settingsRestorePatch(
     patch[column] = value;
   }
   return patch;
+}
+
+// ── Tickets and their money ──────────────────────────────────────────────
+
+// A ticket goes back in at zero, and the lines put its total on it.
+//
+// tickets_total_balances is a DEFERRED CONSTRAINT trigger: at the commit of
+// any insert or total-update it re-adds that ticket's lines and refuses the
+// write if they do not come to the total on the row. ticket_lines load after
+// tickets — they have to, the foreign key runs that way — so a ticket
+// carrying its real total would be a ticket whose lines add up to nothing,
+// and every priced ticket in the backup would be refused. Loading at zero
+// balances against no lines, and ticket_lines' own sync trigger writes the
+// real figure the moment the first line lands.
+export function ticketsForLoad(rows: Record<string, unknown>[]): Record<string, unknown>[] {
+  return (rows || []).map(row => ({ ...row, total: 0 }));
+}
+
+// Except for the ones nobody may re-price. An approved or invoiced ticket's
+// total is a figure a client has signed or been billed for, and the sync
+// trigger recomputes it from the lines like any other — which is the same
+// answer for consistent data and is not the same answer for a ticket whose
+// lines and total ever drifted apart. So the backup's own figure is written
+// back over it afterwards, and only for those: the balance trigger lets an
+// approved ticket alone, and a draft's total is its lines by definition.
+export function approvedTotalPatches(rows: Record<string, unknown>[]): Record<string, unknown>[] {
+  const out: Record<string, unknown>[] = [];
+  for (const row of rows || []) {
+    const r = row as Record<string, unknown>;
+    if (!r.id) continue;
+    const signed = r.approved_at !== null && r.approved_at !== undefined;
+    const billed = r.status === "Approved" || r.status === "Invoiced";
+    if (!signed && !billed) continue;
+    out.push({ id: r.id, total: r.total ?? 0 });
+  }
+  return out;
 }
 
 // ── Phase: activity ──────────────────────────────────────────────────────

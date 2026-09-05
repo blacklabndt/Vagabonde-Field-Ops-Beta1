@@ -38,8 +38,8 @@ import {
   newRestoreCursor, reviveRestoreCursor, restoreCounts,
   afterWipeStep, wipeKeepsCaller, afterPartLoaded, afterTableLoaded,
   partsForTable, withoutAuthEmail, chatInsertRows, chatReplyPatches,
-  settingsRestorePatch, activityPatches, contentTypeFor, typedNameMatches,
-  tooNewRefusal, accountFailureNote
+  settingsRestorePatch, ticketsForLoad, approvedTotalPatches, activityPatches,
+  contentTypeFor, typedNameMatches, tooNewRefusal, accountFailureNote
 } from "../_shared/backupRestore.ts";
 import type { RestoreCursor } from "../_shared/backupRestore.ts";
 import { gunzip } from "../_shared/gzip.ts";
@@ -474,8 +474,14 @@ async function stepLoad(
     return await loadChatPart(db, c, raw, lastPart, deadline);
   }
 
-  // auth_email rides in the JSON, not in the table.
-  const rows = table === "profiles" ? withoutAuthEmail(raw) : raw;
+  // Two tables go in altered, and both are put right later:
+  //   · profiles — auth_email rides in the JSON, not in the table, and an
+  //     insert that names it is one PostgREST refuses;
+  //   · tickets — the deferred balance trigger re-adds a ticket's lines at
+  //     the commit of its own insert, and ticket_lines cannot load first.
+  const rows = table === "profiles" ? withoutAuthEmail(raw)
+    : table === "tickets" ? ticketsForLoad(raw)
+    : raw;
   const conflict = (TABLE_KEYS[table] ?? ["id"]).join(",");
 
   for (let at = c.batchDone; at < rows.length; at += WRITE_BATCH) {
@@ -581,14 +587,36 @@ async function stepFilesBack(
 }
 
 // ── Phase: activity ──────────────────────────────────────────────────────
-// The board is ordered by jobs.last_activity_at, and definer triggers on
-// tickets, JHAs and reports keep it — which means the load just stamped
-// every restored job with today. Put the backup's own values back, now that
+// The two figures a trigger wrote over on the way in, put back now that
 // nothing else is going to touch them.
+//
+//   · a signed ticket's total, which ticket_lines' sync trigger recomputed
+//     from the lines. For consistent data that is the same number; for a
+//     ticket whose lines and total once drifted it is not, and re-pricing a
+//     ticket somebody has signed is not the restore's to do;
+//   · jobs.last_activity_at, which orders the board and which the definer
+//     triggers on tickets, JHAs and reports have just stamped with today for
+//     every job the load touched.
 
 async function stepActivity(
   db: SupabaseClient, drive: DriveClient, allParts: Part[], c: RestoreCursor, deadline: number
 ): Promise<RestoreCursor> {
+  if (!c.totalsDone) {
+    const parts = partsForTable(allParts, "tickets");
+    for (let p = c.totalsPart; p < parts.length; p++) {
+      if (outOfBudget(deadline, Date.now())) { c.totalsPart = p; return c; }
+      const patches = approvedTotalPatches(await readPart(drive, parts[p]));
+      for (let at = 0; at < patches.length; at += WRITE_BATCH) {
+        const { error } = await db.from("tickets")
+          .upsert(patches.slice(at, at + WRITE_BATCH), { onConflict: "id" });
+        if (error) throw new Error(`Restoring the signed tickets' totals failed: ${error.message}`);
+      }
+    }
+    c.totalsPart = 0;
+    c.totalsDone = true;
+    return c;
+  }
+
   const parts = partsForTable(allParts, "jobs");
   for (let p = c.activityPart; p < parts.length; p++) {
     if (outOfBudget(deadline, Date.now())) { c.activityPart = p; return c; }

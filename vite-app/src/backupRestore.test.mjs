@@ -17,8 +17,8 @@ import {
   newRestoreCursor, reviveRestoreCursor, restoreCounts,
   afterWipeStep, wipeKeepsCaller, afterPartLoaded, afterTableLoaded,
   partsForTable, withoutAuthEmail, chatInsertRows, chatReplyPatches,
-  settingsRestorePatch, activityPatches, contentTypeFor, typedNameMatches,
-  tooNewRefusal, accountFailureNote
+  settingsRestorePatch, ticketsForLoad, approvedTotalPatches, activityPatches,
+  contentTypeFor, typedNameMatches, tooNewRefusal, accountFailureNote
 } from "../../supabase/functions/_shared/backupRestore.ts";
 
 import {
@@ -292,6 +292,64 @@ test("every column the backup blanks is one the restore skips or never writes", 
   for (const column of APP_SETTINGS_SECRETS) blank[column] = null;
   const patch = settingsRestorePatch(blank, APP_SETTINGS_NEVER_RESTORED, APP_SETTINGS_SECRETS);
   assert.deepEqual(patch, {});
+});
+
+// ── Tickets and their money ──────────────────────────────────────────────
+
+test("a ticket goes back in at zero, because its lines are not there yet", () => {
+  // tickets_total_balances is a DEFERRED CONSTRAINT trigger: at the commit
+  // of a ticket's own insert it re-adds that ticket's lines and refuses the
+  // write if they do not come to the total on the row. ticket_lines load
+  // after tickets — the foreign key runs that way — so a ticket carrying its
+  // real total is a ticket whose lines add up to nothing, and every priced
+  // ticket in the backup would be refused.
+  const rows = [
+    { id: "t1", status: "Draft", total: 1250.5, job_id: "j1" },
+    { id: "t2", status: "Approved", total: 900, approved_at: "2026-08-01T00:00:00Z" }
+  ];
+  const out = ticketsForLoad(rows);
+  assert.deepEqual(out.map(r => r.total), [0, 0]);
+  // Everything else about the row is untouched, and so is the caller's copy.
+  assert.equal(out[0].job_id, "j1");
+  assert.equal(out[1].approved_at, "2026-08-01T00:00:00Z");
+  assert.equal(rows[0].total, 1250.5);
+});
+
+test("only a signed or invoiced ticket gets its own total written back", () => {
+  const patches = approvedTotalPatches([
+    { id: "t1", status: "Draft", total: 1250.5 },
+    { id: "t2", status: "Awaiting approval", total: 300 },
+    { id: "t3", status: "Approved", total: 900, approved_at: "2026-08-01T00:00:00Z" },
+    { id: "t4", status: "Invoiced", total: 410.25, approved_at: "2026-07-02T00:00:00Z" },
+    // Signed but somehow still called a draft: the signature is what counts.
+    { id: "t5", status: "Draft", total: 77, approved_at: "2026-08-09T00:00:00Z" }
+  ]);
+  // A draft's total IS its lines by definition — the balance trigger has
+  // been holding it to that all along — so the sync trigger's recomputation
+  // is the same number and there is nothing to put back. A signed ticket's
+  // is a figure a client agreed to, and re-pricing that is not the
+  // restore's to do.
+  assert.deepEqual(patches, [
+    { id: "t3", total: 900 },
+    { id: "t4", total: 410.25 },
+    { id: "t5", total: 77 }
+  ]);
+  assert.deepEqual(approvedTotalPatches([]), []);
+  assert.deepEqual(approvedTotalPatches(null), []);
+  // A signed ticket with nothing in the total column is still worth zero,
+  // not worth skipping.
+  assert.deepEqual(
+    approvedTotalPatches([{ id: "t6", status: "Approved", total: null }]),
+    [{ id: "t6", total: 0 }]
+  );
+});
+
+test("the restore remembers whether it has done the totals", () => {
+  const c = newRestoreCursor({ folderId: "f", folderName: "n", keepProfileId: "k" });
+  assert.equal(c.totalsDone, false);
+  assert.equal(c.totalsPart, 0);
+  assert.equal(reviveRestoreCursor({ totalsDone: true, totalsPart: 2 }).totalsDone, true);
+  assert.equal(reviveRestoreCursor({ totalsDone: "yes" }).totalsDone, false);
 });
 
 // ── The activity times ───────────────────────────────────────────────────

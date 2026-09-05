@@ -63,7 +63,7 @@ const PHASE_WORDS = {
   safety: "taking a backup first",
   wipe: "emptying the app",
   accounts: "putting the accounts back",
-  activity: "putting the job dates right",
+  activity: "putting the totals and dates right",
   done: "finishing"
 };
 
