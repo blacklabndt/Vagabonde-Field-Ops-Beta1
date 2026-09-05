@@ -68,9 +68,14 @@ delete from public.jobs;
 -- deleted below (a plain foreign key, no cascade), so keeping any of them
 -- would abort this whole transaction at the account delete. A history of
 -- placeholder prices is worth nothing to the client anyway.
-delete from public.rate_line_history;
+--
+-- The lines go BEFORE the history, not after: rate_lines_history_trigger
+-- fires AFTER DELETE and writes a history row per line removed, so clearing
+-- the history first would leave exactly as many rows behind as were deleted
+-- — and every one of them still pointing at a seed profile.
 delete from public.rate_lines
   where schedule_id in (select id from public.rate_schedules where client_id is not null);
+delete from public.rate_line_history;
 delete from public.rate_schedules where client_id is not null;
 delete from public.contacts;
 delete from public.clients;
