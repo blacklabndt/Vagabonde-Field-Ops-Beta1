@@ -11,7 +11,8 @@ import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import {
   BACKUP_PROVIDERS, PROVIDER_LABEL,
-  redirectUriFor, backupSettingsPatch, readBackupOutcome
+  redirectUriFor, backupSettingsPatch, readBackupOutcome,
+  BEFORE_RESTORE_PREFIX, isBeforeRestore, restoreNameMatches
 } from "./backupPanelLogic.js";
 
 // ── The redirect URI ─────────────────────────────────────────────────────
@@ -195,4 +196,30 @@ test("a refresh of the backup state does not rewrite the schedule boxes", () => 
   assert.match(load[2], /if \(seed\) \{[\s\S]*setForm\(/, "the only setForm in load() is behind that flag");
   // Exactly two callers seed: the mount effect and the save.
   assert.equal((src.match(/load\(true\)/g) || []).length, 2);
+});
+
+// ── The backups list, and the gate on the restore dialog ─────────────────
+
+test("a before-restore copy is recognised by the same prefix the server writes", () => {
+  // The two halves of this string live on either side of a network. If they
+  // ever drift, the list stops labelling the one folder retention never
+  // removes and nobody can tell why last Tuesday's backup is still there.
+  const shared = readFileSync(new URL("../../supabase/functions/_shared/backupManifest.ts", import.meta.url), "utf8");
+  assert.match(shared, new RegExp('BEFORE_RESTORE_PREFIX = "' + BEFORE_RESTORE_PREFIX + '"'));
+
+  assert.equal(isBeforeRestore("before-restore 2026-09-05 02-00"), true);
+  assert.equal(isBeforeRestore("2026-09-05 02-00"), false);
+  assert.equal(isBeforeRestore(""), false);
+  assert.equal(isBeforeRestore(null), false);
+});
+
+test("the restore is confirmed by the backup's own name, character for character", () => {
+  assert.equal(restoreNameMatches("2026-09-05 02-00", "2026-09-05 02-00"), true);
+  // A name copied off the screen brings a space with it.
+  assert.equal(restoreNameMatches("  2026-09-05 02-00 ", "2026-09-05 02-00"), true);
+  // The wrong night is the whole thing this gate is for.
+  assert.equal(restoreNameMatches("2026-09-04 02-00", "2026-09-05 02-00"), false);
+  assert.equal(restoreNameMatches("", "2026-09-05 02-00"), false);
+  assert.equal(restoreNameMatches("", ""), false, "empty is never a confirmation");
+  assert.equal(restoreNameMatches(undefined, undefined), false);
 });

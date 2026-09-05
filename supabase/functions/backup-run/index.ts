@@ -111,17 +111,28 @@ Deno.serve(async (req) => {
 
 // ── The tick ─────────────────────────────────────────────────────────────
 
-async function openRun(db: SupabaseClient, status: string): Promise<Run | null> {
+// The two kinds this function copies. A restore is backup-restore's work;
+// the tick still has to poke it, but it never claims it.
+const MY_KINDS = ["backup", "before_restore"];
+const RESTORE_KINDS = ["restore_all", "restore_jobs"];
+
+async function openRun(db: SupabaseClient, status: string, kinds = MY_KINDS): Promise<Run | null> {
   const { data, error } = await db.from("backup_runs")
-    .select(RUN_COLUMNS).eq("status", status).order("created_at").limit(1).maybeSingle();
+    .select(RUN_COLUMNS).eq("status", status).in("kind", kinds)
+    .order("created_at").limit(1).maybeSingle();
   if (error) throw error;
   return (data ?? null) as Run | null;
 }
 
 async function tick(db: SupabaseClient, secret: string): Promise<Record<string, unknown>> {
-  // A run in flight comes first, and the same run is picked up again after
-  // a slice that died: a stale heartbeat is a reason to reclaim this run,
-  // never to start a second one alongside it.
+  // This function's own kinds first, always. A restore's safety backup is a
+  // before_restore run raised AFTER the restore itself, and a tick that took
+  // the restore first would leave that backup unstarted and the restore
+  // waiting on it for ever.
+  //
+  // A run in flight comes first among them, and the same run is picked up
+  // again after a slice that died: a stale heartbeat is a reason to reclaim
+  // this run, never to start a second one alongside it.
   const running = await openRun(db, "running");
   if (running) {
     if (sliceLooksAlive(running.heartbeat_at, Date.now())) {
@@ -134,6 +145,16 @@ async function tick(db: SupabaseClient, secret: string): Promise<Record<string, 
 
   const queued = await openRun(db, "queued");
   if (queued) return await advance(db, queued, secret);
+
+  // A restore in flight is somebody else's job; it still needs the poke,
+  // and only when the chain of slices driving it has gone quiet.
+  const restore = await openRun(db, "running", RESTORE_KINDS);
+  if (restore) {
+    if (!sliceLooksAlive(restore.heartbeat_at, Date.now())) {
+      kick("backup-restore", { action: "advance", runId: restore.id }, secret);
+    }
+    return { ok: true, restoring: restore.id };
+  }
 
   // Nothing in flight: is one due?
   const { data: s, error } = await db.from("app_settings")
@@ -174,8 +195,12 @@ async function queueRun(db: SupabaseClient, kind: string, requestedBy: string | 
 // The kick starts that slice and is abandoned; the five-minute tick is the
 // backstop if it never arrives.
 async function backUpNow(db: SupabaseClient, requestedBy: string, secret: string): Promise<Record<string, unknown>> {
-  const running = await openRun(db, "running");
-  const queued = running ?? await openRun(db, "queued");
+  // Every kind, not only this function's: a backup taken while a restore is
+  // emptying and refilling the tables would be a copy of a half-restored
+  // database, filed under tonight's date and offered back as if it were one.
+  const kinds = [...MY_KINDS, ...RESTORE_KINDS];
+  const running = await openRun(db, "running", kinds);
+  const queued = running ?? await openRun(db, "queued", kinds);
   if (queued) {
     // Something is already going. Nudge it rather than starting a second
     // pile beside it.

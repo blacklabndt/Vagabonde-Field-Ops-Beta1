@@ -1,7 +1,10 @@
 import React, { useState, useEffect, useCallback, useRef } from "react";
 import { Db } from "../db.js";
-import { Blueprint, Btn, Field, ErrorBox, Loading, TagX } from "./common.jsx";
-import { BACKUP_PROVIDERS, PROVIDER_LABEL, redirectUriFor, readBackupOutcome } from "../backupPanelLogic.js";
+import { Blueprint, Btn, Dialog, Field, ErrorBox, Loading, TagX } from "./common.jsx";
+import {
+  BACKUP_PROVIDERS, PROVIDER_LABEL, redirectUriFor, readBackupOutcome,
+  isBeforeRestore, restoreNameMatches
+} from "../backupPanelLogic.js";
 import { describeSchedule, WEEKDAY_NAMES, nextRunAt, BACKUP_ZONE } from "../backupSchedule.js";
 
 // Automatic backup — the Admin screen's Archive block, below the year-end
@@ -60,6 +63,7 @@ const PHASE_WORDS = {
   safety: "taking a backup first",
   wipe: "emptying the app",
   accounts: "putting the accounts back",
+  activity: "putting the job dates right",
   done: "finishing"
 };
 
@@ -112,6 +116,14 @@ export function AutomaticBackupPanel() {
   const nudgedAt = useRef(0);
   const [lastRuns, setLastRuns] = useState([]);
   const [starting, setStarting] = useState(false);
+
+  // What is actually in the drive, and the backup a restore dialog is open
+  // for. The list is not read on load: it is a round trip to the drive per
+  // folder for the manifest, and this panel is opened far more often to
+  // check a schedule than to put a backup back.
+  const [backups, setBackups] = useState(null);
+  const [listing, setListing] = useState(false);
+  const [restoring, setRestoring] = useState(null);
 
   const showRun = value => { runRef.current = value; setRun(value); };
 
@@ -177,6 +189,14 @@ export function AutomaticBackupPanel() {
     look();
     return () => { alive = false; if (timer) clearTimeout(timer); };
   }, [load]);
+
+  const listBackups = async () => {
+    setListing(true);
+    setError("");
+    try { setBackups(await Db.listBackups()); }
+    catch (e) { setError(e.message || "Couldn't read the drive."); }
+    finally { setListing(false); }
+  };
 
   const backUpNow = async () => {
     setStarting(true);
@@ -391,6 +411,51 @@ export function AutomaticBackupPanel() {
         </details>
       )}
 
+      {/* What is in the drive. Read on request rather than on load: it is a
+          round trip per folder to open each manifest, and most visits to this
+          screen are about the schedule, not about putting anything back. */}
+      {connected && (
+        <div style={{ borderTop: "1px solid var(--color-neutral-300)", paddingTop: 14, marginBottom: 14 }}>
+          <div style={{ display: "flex", alignItems: "center", gap: 10, marginBottom: 8 }}>
+            <div style={{ ...SECTION_TITLE, marginBottom: 0 }}>Backups in the drive</div>
+            <Btn variant="secondary" style={{ marginLeft: "auto" }} disabled={listing} onClick={listBackups}>
+              {listing ? "Reading…" : backups ? "Refresh" : "Show backups"}
+            </Btn>
+          </div>
+          {backups && !backups.length && (
+            <div style={QUIET}>Nothing in the drive yet. The first backup will appear here.</div>
+          )}
+          {backups && backups.length > 0 && (
+            <div style={{ display: "grid", gap: 8 }}>
+              {backups.map(b => (
+                <div key={b.folderId} style={{ border: "1px solid var(--color-neutral-300)", padding: "10px 12px", fontSize: 13 }}>
+                  <div style={{ display: "flex", gap: 8, alignItems: "center", flexWrap: "wrap" }}>
+                    <strong>{b.name}</strong>
+                    {isBeforeRestore(b.name) && <TagX variant="outline">kept</TagX>}
+                    {b.incomplete && <TagX variant="outline">didn&rsquo;t finish</TagX>}
+                    <span style={{ marginLeft: "auto", display: "flex", gap: 6 }}>
+                      <Btn variant="secondary" disabled={!!b.incomplete || !!run}
+                        onClick={() => setRestoring({ ...b, mode: "all" })}>Restore everything</Btn>
+                    </span>
+                  </div>
+                  <div style={{ ...QUIET, marginTop: 4 }}>
+                    {b.incomplete
+                      ? "No index in this folder, so it is not offered for restoring."
+                      : <>{plural(b.rows || 0, "record")} &middot; {plural(b.files || 0, "file")} ({mb(b.bytes || 0)}) &middot;{" "}
+                          {plural(b.jobs || 0, "job")} &middot; app {b.app_version || "?"} &middot; {when(b.finished_at)}</>}
+                  </div>
+                </div>
+              ))}
+            </div>
+          )}
+        </div>
+      )}
+
+      {restoring && restoring.mode === "all" && (
+        <RestoreDialog backup={restoring} onClose={() => setRestoring(null)}
+          onStarted={() => { setRestoring(null); Db.currentBackupRun().then(showRun).catch(() => {}); }} />
+      )}
+
       {/* App registration — collapsed, because it is done once and never
           again, and it is the fiddliest thing on this screen. */}
       <Btn variant="secondary" onClick={() => setShowRegistration(v => !v)}>
@@ -448,5 +513,106 @@ export function AutomaticBackupPanel() {
         </Btn>
       </div>
     </Blueprint>
+  );
+}
+
+// Restore everything. The gate is the same shape as the archive dialog's
+// typed CLEAR, for the same reason and one more: this replaces every record
+// in the app with a copy of an older day, so the word to type is the
+// backup's own name — which cannot be typed by accident and cannot be typed
+// for the wrong night's backup.
+//
+// The preflight is asked before anything is offered, because whether a
+// backup may be loaded into this database at all is the server's answer: it
+// compares the schema the backup was taken at with the one this project is
+// on, and a backup from a newer app holds columns this database has not got.
+export function RestoreDialog({ backup, onClose, onStarted }) {
+  const [check, setCheck] = useState(null);
+  const [checking, setChecking] = useState(true);
+  const [typed, setTyped] = useState("");
+  const [starting, setStarting] = useState(false);
+  const [error, setError] = useState("");
+
+  useEffect(() => {
+    let alive = true;
+    Db.restorePreflight(backup.folderId)
+      .then(r => { if (alive) { setCheck(r); setChecking(false); } })
+      .catch(e => { if (alive) { setError(e.message || "Couldn't read that backup."); setChecking(false); } });
+    return () => { alive = false; };
+  }, [backup.folderId]);
+
+  const ready = !!check && !check.tooNew && restoreNameMatches(typed, backup.name);
+
+  const start = async () => {
+    setStarting(true);
+    setError("");
+    try {
+      await Db.restoreAll({ folderId: backup.folderId, folderName: backup.name, confirm: typed });
+      onStarted();
+    } catch (e) {
+      setError(e.message || "The restore couldn't be started.");
+      setStarting(false);
+    }
+  };
+
+  return (
+    <Dialog title="Restore everything" maxWidth={580} onClose={starting ? () => {} : onClose}
+      actions={<>
+        <Btn variant="secondary" onClick={onClose} disabled={starting}>Cancel</Btn>
+        <Btn variant="primary" disabled={!ready || starting} onClick={start}
+          title={check && check.tooNew
+            ? "That backup is newer than this app"
+            : !ready ? "Type the backup's name to confirm" : undefined}>
+          {starting ? "Starting…" : "Replace everything"}
+        </Btn>
+      </>}>
+      <ErrorBox>{error}</ErrorBox>
+      {checking && <Loading label="Reading that backup…" />}
+      {check && (<>
+        <div style={{ fontSize: 14 }}>
+          <strong>{backup.name}</strong> holds {plural(check.rows || 0, "record")}, {plural(check.files || 0, "file")}{" "}
+          ({mb(check.bytes || 0)}) and {plural(check.jobs || 0, "job")}.
+        </div>
+
+        {check.tooNew && (
+          <div style={{ fontSize: 13, border: "1px solid var(--color-accent-700)", padding: "8px 10px" }}>
+            <strong>This backup can&rsquo;t be restored here.</strong> It was taken from a newer version of the app
+            (database {check.schema_version}) than this one ({check.live_schema_version}), so it holds things this
+            app doesn&rsquo;t know about yet. Update the app first.
+          </div>
+        )}
+        {!check.tooNew && check.older && (
+          <div style={{ fontSize: 13, border: "1px solid var(--color-accent-700)", padding: "8px 10px" }}>
+            <strong>This backup is older than the app.</strong> It was taken at database {check.schema_version}; this
+            app is at {check.live_schema_version}. It will restore, but anything added to the app since then starts
+            empty.
+          </div>
+        )}
+
+        <div style={{ fontSize: 13, color: "color-mix(in srgb, var(--color-text) 70%, transparent)" }}>
+          What this does, in order: takes a complete backup of the app as it stands right now into a
+          <strong> before-restore</strong> folder that is never tidied away; empties every table; re-creates any
+          crew account that no longer exists and emails each of them a set-password link; loads every record
+          from <strong>{backup.name}</strong>; and puts every PDF and picture back. If that first copy fails,
+          nothing is emptied and nothing is restored.
+        </div>
+        <div style={{ fontSize: 13, color: "color-mix(in srgb, var(--color-text) 70%, transparent)" }}>
+          Everything filed since that backup was taken will be gone &mdash; tickets, assessments, reports, chat,
+          hours. Your own account keeps working throughout. The background error log and the audit trail are not
+          in a backup and start empty. Passwords are never in a backup, which is why the crew get a link.
+        </div>
+        <div style={QUIET}>
+          It runs on the server and keeps going whether this screen is open or not. A full restore takes about as
+          long as the backup did.
+        </div>
+
+        {!check.tooNew && (
+          <Field label={`Type the backup's name to confirm: ${backup.name}`}>
+            <input className="input" value={typed} onChange={e => setTyped(e.target.value)}
+              placeholder={backup.name} autoComplete="off" disabled={starting} style={{ width: "100%" }} />
+          </Field>
+        )}
+      </>)}
+    </Dialog>
   );
 }

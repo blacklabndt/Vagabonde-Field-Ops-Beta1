@@ -24,6 +24,29 @@ export const PROVIDER_LABEL = {
 
 const FREQUENCIES = ["daily", "weekdays", "weekly", "monthly"];
 
+// The copy taken automatically just before a restore. Retention never
+// removes one — it is the only copy of what the restore replaced — and the
+// list says so, so nobody has to work out why last Tuesday's is still there.
+// The prefix is backupManifest.ts's BEFORE_RESTORE_PREFIX; the two are the
+// same string on either side of a network, which is why it is written down
+// in both places rather than guessed from a shape.
+export const BEFORE_RESTORE_PREFIX = "before-restore ";
+
+export function isBeforeRestore(name) {
+  return String(name || "").startsWith(BEFORE_RESTORE_PREFIX);
+}
+
+// The typed confirmation on the restore dialog, which is the same answer the
+// function gives itself before it starts. Trimmed at both ends because a
+// name copied off the screen brings a space with it, and compared character
+// for character otherwise: the whole point of typing the folder's own name
+// is that it cannot be typed for the wrong night by accident.
+export function restoreNameMatches(typed, folderName) {
+  const a = String(typed ?? "").trim();
+  const b = String(folderName ?? "").trim();
+  return !!b && a === b;
+}
+
 // The address the app is served from is the address a drive sends the Admin
 // back to. It is stored (Admin screen → App address) rather than guessed,
 // because the drive's registration has to hold the same string — but this

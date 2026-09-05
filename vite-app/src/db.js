@@ -1791,6 +1791,33 @@ export const Db = {
     catch { /* the cron is the safety net */ }
   },
 
+  // What the restore dialog needs before it offers anything: whether this
+  // backup may be loaded into this database at all, and how big it is. The
+  // schema comparison is the server's — the browser has no way to know which
+  // migration this project last applied.
+  async restorePreflight(folderId) {
+    const { data, error } = await sbClient.functions.invoke("backup-restore", {
+      body: { action: "preflight", folderId }
+    });
+    if (error) throw await fnError(error);
+    if (data && data.error) throw new Error(data.error);
+    return data || {};
+  },
+
+  // The typed folder name goes to the server as well as being checked in the
+  // dialog: the browser's copy of a gate is a courtesy, and the function's is
+  // the gate. The answer comes back the moment the run is on the table — the
+  // restore itself takes as long as the backup did, and the panel watches
+  // backup_runs for the rest of it.
+  async restoreAll({ folderId, folderName, confirm }) {
+    const { data, error } = await sbClient.functions.invoke("backup-restore", {
+      body: { action: "restore_all", folderId, folderName, confirm }
+    });
+    if (error) throw await fnError(error);
+    if (data && data.error) throw new Error(data.error);
+    return data || {};
+  },
+
   async sendTicketApproval({ ticketId, to, cc }) {
     const { data, error } = await sbClient.functions.invoke("send-ticket-approval", {
       body: { ticketId, to, cc }
@@ -3775,6 +3802,7 @@ const SAVE_MESSAGES = {
   saveBackupSettings: "Backup settings saved",
   disconnectBackup: "Drive disconnected",
   backupNow: "Backup started",
+  restoreAll: "Restore started",
 
   // Rates
   setRateLine: "Rate saved",
