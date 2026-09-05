@@ -168,6 +168,14 @@ export function makeDrive(provider: string, accessToken: string): DriveClient {
 const GOOGLE_CHUNK = 8 * 1024 * 1024;
 const FOLDER_MIME = "application/vnd.google-apps.folder";
 
+// A name inside a Drive query is a single-quoted string, and a backslash or
+// an apostrophe in it has to be escaped or the query is a syntax error —
+// which Google answers with a 400, not with an empty list. Job folders and
+// client names carry apostrophes.
+function googleQuote(value: string): string {
+  return "'" + String(value).replace(/\\/g, "\\\\").replace(/'/g, "\\'") + "'";
+}
+
 export class GoogleDrive implements DriveClient {
   token: string;
   constructor(accessToken: string) { this.token = accessToken; }
@@ -209,7 +217,29 @@ export class GoogleDrive implements DriveClient {
   listFolders(parentId: string): Promise<DriveFolder[]> { return this.children(parentId, true); }
   listFiles(parentId: string): Promise<DriveEntry[]> { return this.children(parentId, false); }
 
+  // One request that asks about one name, rather than reading a folder of
+  // thousands to find out whether a name is taken. A run folder holds a
+  // part file per table slice and an entry per stored object, so listing it
+  // before every upload is the whole folder read once per file in it.
+  async findByName(parentId: string, name: string, foldersOnly: boolean): Promise<DriveEntry[]> {
+    const u = new URL("https://www.googleapis.com/drive/v3/files");
+    u.searchParams.set("q",
+      `name = ${googleQuote(name)} and ${googleQuote(parentId)} in parents and trashed = false` +
+      ` and mimeType ${foldersOnly ? "=" : "!="} ${googleQuote(FOLDER_MIME)}`);
+    u.searchParams.set("fields", "files(id, name, size)");
+    u.searchParams.set("pageSize", "100");
+    const j = await (await ok(await fetch(u.toString(), { headers: this.head() }), "Google Drive lookup")).json() as
+      { files?: { id: string; name: string; size?: string }[] };
+    return (j.files ?? []).map(f => ({ id: f.id, name: f.name, size: Number(f.size ?? 0) }));
+  }
+
   async createFolder(parentId: string, name: string): Promise<string> {
+    // Google makes a second folder of the same name without complaint, so
+    // a re-run would write half a backup into each. Find first, create only
+    // if it is genuinely not there.
+    const already = (await this.findByName(parentId, name, true))[0];
+    if (already) return already.id;
+
     const res = await ok(await fetch("https://www.googleapis.com/drive/v3/files?fields=id", {
       method: "POST",
       headers: this.head({ "Content-Type": "application/json" }),
@@ -221,8 +251,7 @@ export class GoogleDrive implements DriveClient {
   async upload(folderId: string, name: string, body: Uint8Array, contentType: string): Promise<string> {
     // Google is happy to hold two files with the same name in one folder,
     // which is exactly what a retried slice would leave behind.
-    const clash = (await this.listFiles(folderId)).find(f => f.name === name);
-    if (clash) await this.delete(clash.id);
+    for (const clash of await this.findByName(folderId, name, false)) await this.delete(clash.id);
 
     if (body.byteLength <= RESUMABLE_BYTES) {
       const boundary = "vgb" + crypto.randomUUID().replace(/-/g, "");
@@ -253,6 +282,7 @@ export class GoogleDrive implements DriveClient {
 
     let at = 0;
     let id = "";
+    let stalled = false;
     while (at < body.byteLength) {
       const end = Math.min(at + GOOGLE_CHUNK, body.byteLength);
       const res = await fetch(session, {
@@ -260,10 +290,32 @@ export class GoogleDrive implements DriveClient {
         headers: { "Content-Range": `bytes ${at}-${end - 1}/${body.byteLength}` },
         body: body.subarray(at, end)
       });
-      // 308 is Google saying "that chunk landed, send the next one".
+      // 308 is Google saying "send the next one" — and its Range header says
+      // how much it actually kept, which can be less than what was sent.
+      // Carrying on from `end` regardless would leave a hole in the middle
+      // of the part file that nothing downstream ever notices: the upload
+      // succeeds, the manifest counts the rows, and the gzip is corrupt.
+      // Only a Range Google did not send is a reason to assume the whole
+      // chunk landed.
       if (res.status === 308) {
         await res.body?.cancel();
-        at = end;
+        const stored = /bytes=\d+-(\d+)/.exec(res.headers.get("Range") ?? "");
+        const next = stored ? Math.min(Number(stored[1]) + 1, body.byteLength) : end;
+        if (next > at) {
+          stalled = false;
+        } else {
+          // None of that chunk was kept. Sending it again is the protocol's
+          // own answer, but twice over with nothing stored is a wedged
+          // session, and a loop that never ends is worse than a failure.
+          if (stalled) {
+            const e = new Error("Google Drive kept none of two identical chunks; the upload session is stuck.") as DriveError;
+            e.status = 308;
+            e.retryable = true;
+            throw e;
+          }
+          stalled = true;
+        }
+        at = next;
         continue;
       }
       id = String((await (await ok(res, "Google Drive upload")).json() as { id: string }).id);
@@ -332,15 +384,38 @@ export class OneDrive implements DriveClient {
   listFolders(parentId: string): Promise<DriveFolder[]> { return this.children(parentId, true); }
   listFiles(parentId: string): Promise<DriveEntry[]> { return this.children(parentId, false); }
 
+  // One request that asks about one name: Graph addresses a child by the
+  // parent's id and a path, and answers 404 when the name is free.
+  async childByName(parentId: string, name: string): Promise<{ id: string; folder: boolean } | null> {
+    const res = await fetch(
+      `${GRAPH}/items/${encodeURIComponent(parentId)}:/${encodeURIComponent(name)}?$select=id,folder`,
+      { headers: this.head() });
+    if (res.status === 404) { await res.body?.cancel(); return null; }
+    const j = await (await ok(res, "OneDrive lookup")).json() as { id: string; folder?: unknown };
+    return { id: String(j.id), folder: !!j.folder };
+  }
+
   async createFolder(parentId: string, name: string): Promise<string> {
-    const res = await ok(await fetch(`${GRAPH}/items/${encodeURIComponent(parentId)}/children`, {
+    // Find first, then create — and "fail" rather than "replace" on the
+    // conflict. A conflictBehavior of "replace" on a folder replaces the
+    // folder, which on a re-run means deleting the backup already in it.
+    const already = await this.childByName(parentId, name);
+    if (already && already.folder) return already.id;
+
+    const res = await fetch(`${GRAPH}/items/${encodeURIComponent(parentId)}/children`, {
       method: "POST",
       headers: this.head({ "Content-Type": "application/json" }),
-      // "replace" rather than "rename": running the same backup twice must
-      // land in the same folder, not in "2026-09-04 02-00 1".
-      body: JSON.stringify({ name, folder: {}, "@microsoft.graph.conflictBehavior": "replace" })
-    }), "OneDrive folder");
-    return String((await res.json() as { id: string }).id);
+      body: JSON.stringify({ name, folder: {}, "@microsoft.graph.conflictBehavior": "fail" })
+    });
+    if (res.status === 409) {
+      // Something got there between the two requests. If it is the folder
+      // this was going to make, that is the outcome asked for.
+      await res.body?.cancel();
+      const found = await this.childByName(parentId, name);
+      if (found && found.folder) return found.id;
+      throw new Error(`OneDrive already holds a file called "${name}" where this backup needs a folder.`);
+    }
+    return String((await (await ok(res, "OneDrive folder")).json() as { id: string }).id);
   }
 
   async upload(folderId: string, name: string, body: Uint8Array, contentType: string): Promise<string> {
@@ -468,13 +543,27 @@ export class Dropbox implements DriveClient {
 
   async createFolder(parentId: string, name: string): Promise<string> {
     const path = `${parentId}/${name}`;
+    // Find first, the same shape as the other two: get_metadata answers
+    // "path/not_found" for a path that is free, and the folder's own
+    // metadata for one that is taken.
+    let meta: Record<string, unknown> | null = null;
+    try {
+      meta = await this.rpc("files/get_metadata", { path }, "Dropbox lookup");
+    } catch (e) {
+      if (!/not_found/i.test((e as Error).message)) throw e;
+    }
+    if (meta) {
+      if (meta[".tag"] === "folder") return String((meta as { path_display?: string }).path_display ?? path);
+      throw new Error(`Dropbox already holds a file at "${path}" where this backup needs a folder.`);
+    }
+
     try {
       const j = await this.rpc("files/create_folder_v2", { path, autorename: false }, "Dropbox folder");
-      const meta = (j.metadata as { path_display?: string }) ?? {};
-      return String(meta.path_display ?? path);
+      const made = (j.metadata as { path_display?: string }) ?? {};
+      return String(made.path_display ?? path);
     } catch (e) {
-      // "already exists" is the outcome asked for; every other refusal is
-      // still a refusal.
+      // Something got there between the two requests; "already exists" is
+      // the outcome asked for. Every other refusal is still a refusal.
       if (/conflict/i.test((e as Error).message)) return path;
       throw e;
     }

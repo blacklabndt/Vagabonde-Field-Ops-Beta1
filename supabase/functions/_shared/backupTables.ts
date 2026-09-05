@@ -62,10 +62,15 @@ export const WIPE_ORDER: string[] = [
   "reports",
   "rate_overrides",
   "jobs",
-  // rate_lines before its history, not after: rate_lines_history_trigger
-  // fires AFTER DELETE and writes a history row per line removed, so
-  // clearing the history first leaves exactly as many phantom rows behind
-  // as there were lines, and the load that follows collides with them.
+  // rate_lines before its history, not after: rate_lines_history_trigger is
+  // AFTER INSERT OR DELETE OR UPDATE on rate_lines (baseline line 1182) and
+  // writes a history row for every one of those, so clearing the history
+  // first leaves exactly as many phantom rows behind as there were lines
+  // deleted after it. The ruling for the restore follows from the same
+  // trigger's INSERT arm: it loads rate_lines — whose inserts each write a
+  // fresh history row of their own — then deletes every rate_line_history
+  // row, and only then loads the backup's history file, so neither the
+  // delete's phantoms nor the insert's survive into the restored database.
   "rate_lines",
   "rate_line_history",
   "rate_schedules",
@@ -96,6 +101,15 @@ export const BUCKETS: string[] = ["reports", "jhas", "shared", "timesheets", "ch
 // a consumer drive. The list is checked against the migrations by the test:
 // a later app_settings column whose name says key, secret or token must be
 // added here.
+//
+// The rule the restore follows, recorded here because this is where the
+// nulls come from: an app_settings column that is in this list AND null in
+// the backup is SKIPPED on restore, never written. Every backup carries a
+// null where the key was, so writing those nulls back would disconnect
+// Resend and GIF search on a database whose own keys were perfectly good —
+// the restore would silently take the mail out of the building. A non-null
+// value in one of these columns is a backup taken before this list existed
+// and is restored like any other column.
 export const APP_SETTINGS_SECRETS: string[] = [
   "resend_api_key",
   "klipy_api_key",

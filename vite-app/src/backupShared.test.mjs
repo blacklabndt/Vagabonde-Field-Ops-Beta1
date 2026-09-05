@@ -27,7 +27,9 @@ import {
   schemaTooNew, fileEntryName, parseFileEntryName
 } from "../../supabase/functions/_shared/backupManifest.ts";
 
-import { FakeDrive, authorizeUrl, SCOPES, PROVIDERS } from "../../supabase/functions/_shared/drive.ts";
+import {
+  FakeDrive, GoogleDrive, OneDrive, Dropbox, authorizeUrl, SCOPES, PROVIDERS
+} from "../../supabase/functions/_shared/drive.ts";
 
 const ROOT = new URL("../../", import.meta.url);
 const read = rel => readFileSync(new URL(rel, ROOT), "utf8");
@@ -91,9 +93,14 @@ test("the wipe order is the handover script's own order", () => {
 });
 
 test("rate_lines is emptied before its history, because deleting one writes the other", () => {
-  // rate_lines_history_trigger fires AFTER DELETE and inserts a history
-  // row. Clearing rate_line_history first therefore leaves a phantom row
-  // per deleted line, and the load that follows collides with it.
+  // rate_lines_history_trigger is AFTER INSERT OR DELETE OR UPDATE on
+  // rate_lines and inserts a history row for each. Clearing
+  // rate_line_history first therefore leaves a phantom row per line deleted
+  // after it, and the load that follows collides with it. The restore's
+  // ruling comes from the trigger's INSERT arm: rate_lines is loaded first,
+  // then every rate_line_history row is deleted, and only then is the
+  // backup's history file loaded — so the rows the inserts wrote are gone
+  // before the real history goes in.
   const at = t => WIPE_ORDER.indexOf(t);
   assert.ok(at("rate_lines") >= 0 && at("rate_line_history") >= 0);
   assert.ok(at("rate_lines") < at("rate_line_history"),
@@ -429,6 +436,199 @@ test("the fake can be told to fail, so retries can be tested", async () => {
   await assert.rejects(() => drive.upload(folder, "a", bytes("a"), "text/plain"), /drive is unavailable/i);
   const id = await drive.upload(folder, "a", bytes("a"), "text/plain");
   assert.equal(text(await drive.download(id)), "a");
+});
+
+// ── The three real drives, against a stubbed fetch ───────────────────────
+// Nothing here touches a network. withFetch swaps globalThis.fetch for a
+// stub that records every request and answers it, and puts the real one
+// back afterwards however the test ends — so the parts of each provider
+// class that are pure protocol can be read back off the requests
+// themselves: which name it asks about, where it resumes an upload, and
+// what it does about a folder that is already there.
+
+async function withFetch(stub, fn) {
+  const real = globalThis.fetch;
+  const calls = [];
+  globalThis.fetch = async (url, init = {}) => {
+    calls.push({ url: String(url), init });
+    return await stub(String(url), init, calls.length - 1);
+  };
+  try {
+    return await fn(calls);
+  } finally {
+    globalThis.fetch = real;
+  }
+}
+
+const json = (value, status = 200, headers = {}) =>
+  new Response(JSON.stringify(value), { status, headers: { "Content-Type": "application/json", ...headers } });
+
+const GOOGLE_LIST = "https://www.googleapis.com/drive/v3/files?";
+
+test("Google resumes where the 308 says it got to, not where the sender hoped", async () => {
+  // A resumable PUT can be accepted in part. Google says how much it kept
+  // in the Range header of its 308, and carrying on past that would leave a
+  // hole in the middle of the file: the upload "succeeds", the manifest
+  // counts the rows, and the gzip is corrupt.
+  const size = 6 * 1024 * 1024;          // one 8 MiB chunk covers the body…
+  const kept = 1024 * 1024;              // …of which Google keeps 1 MiB.
+  const ranges = [];
+  const drive = new GoogleDrive("tok");
+
+  const id = await withFetch(async (url, init) => {
+    if (url.startsWith(GOOGLE_LIST)) return json({ files: [] });
+    if (url.includes("uploadType=resumable")) {
+      return json({}, 200, { Location: "https://upload.example/session-1" });
+    }
+    ranges.push(init.headers["Content-Range"]);
+    if (ranges.length === 1) {
+      return new Response(null, { status: 308, headers: { Range: `bytes=0-${kept - 1}` } });
+    }
+    return json({ id: "file-1" });
+  }, () => drive.upload("folder-1", "tickets.01.json.gz", new Uint8Array(size), "application/gzip"));
+
+  assert.equal(id, "file-1");
+  assert.deepEqual(ranges, [
+    `bytes 0-${size - 1}/${size}`,
+    `bytes ${kept}-${size - 1}/${size}`
+  ]);
+});
+
+test("a 308 with no Range at all is Google saying it took the whole chunk", async () => {
+  const size = 10 * 1024 * 1024;         // two chunks: 8 MiB then 2 MiB.
+  const chunk = 8 * 1024 * 1024;
+  const ranges = [];
+  const drive = new GoogleDrive("tok");
+
+  const id = await withFetch(async (url, init) => {
+    if (url.startsWith(GOOGLE_LIST)) return json({ files: [] });
+    if (url.includes("uploadType=resumable")) {
+      return json({}, 200, { Location: "https://upload.example/session-2" });
+    }
+    ranges.push(init.headers["Content-Range"]);
+    if (ranges.length === 1) return new Response(null, { status: 308 });
+    return json({ id: "file-2" });
+  }, () => drive.upload("folder-1", "ticket_lines.01.json.gz", new Uint8Array(size), "application/gzip"));
+
+  assert.equal(id, "file-2");
+  assert.deepEqual(ranges, [
+    `bytes 0-${chunk - 1}/${size}`,
+    `bytes ${chunk}-${size - 1}/${size}`
+  ]);
+});
+
+test("Google asks about the one name it is about to write, not the whole folder", async () => {
+  const drive = new GoogleDrive("tok");
+  const lookups = [];
+
+  const id = await withFetch(async (url, init) => {
+    if (url.startsWith(GOOGLE_LIST)) {
+      lookups.push(new URL(url));
+      return json({ files: [{ id: "old-1", name: "clients.01.json.gz" }] });
+    }
+    if (init.method === "DELETE") return new Response(null, { status: 204 });
+    return json({ id: "new-1" });
+  }, async calls => {
+    const out = await drive.upload("folder-1", "clients.01.json.gz", bytes("rows"), "application/gzip");
+    assert.equal(calls.length, 3, "one lookup, one delete, one upload — a folder read is not one of them");
+    return out;
+  });
+
+  assert.equal(id, "new-1");
+  assert.equal(lookups.length, 1);
+  assert.equal(lookups[0].searchParams.get("q"),
+    "name = 'clients.01.json.gz' and 'folder-1' in parents and trashed = false" +
+    " and mimeType != 'application/vnd.google-apps.folder'");
+});
+
+test("an apostrophe in a name does not become a Drive query syntax error", async () => {
+  const drive = new GoogleDrive("tok");
+  let q = "";
+  await withFetch(async url => {
+    if (url.startsWith(GOOGLE_LIST)) {
+      q = new URL(url).searchParams.get("q");
+      return json({ files: [] });
+    }
+    return json({ id: "new-1" });
+  }, () => drive.upload("folder-1", "O'Brien \\ Sons.pdf", bytes("x"), "application/pdf"));
+
+  // Unescaped, Google answers a 400 rather than an empty list, and the
+  // upload fails on a client whose name has an apostrophe in it.
+  assert.ok(q.startsWith("name = 'O\\'Brien \\\\ Sons.pdf' and "), q);
+});
+
+test("Google looks for the folder rather than making a second one of the same name", async () => {
+  const drive = new GoogleDrive("tok");
+  const found = await withFetch(async (url, init) => {
+    assert.notEqual(init.method, "POST", "nothing may be created when the folder is already there");
+    return json({ files: [{ id: "folder-9", name: "tables" }] });
+  }, async calls => {
+    const id = await drive.createFolder("run-1", "tables");
+    assert.equal(calls.length, 1);
+    return id;
+  });
+  assert.equal(found, "folder-9");
+});
+
+test("Google creates the folder when the lookup finds none", async () => {
+  const drive = new GoogleDrive("tok");
+  const made = await withFetch(async (url, init) => {
+    if (!init.method || init.method === "GET") return json({ files: [] });
+    assert.equal(JSON.parse(init.body).mimeType, "application/vnd.google-apps.folder");
+    return json({ id: "folder-new" });
+  }, () => drive.createFolder("run-1", "tables"));
+  assert.equal(made, "folder-new");
+});
+
+test("OneDrive creates a folder fail-on-conflict, and looks it up rather than replacing it", async () => {
+  const drive = new OneDrive("tok");
+  const lookups = [];
+  const bodies = [];
+
+  const id = await withFetch(async (url, init) => {
+    if (url.includes(":/tables")) {
+      lookups.push(url);
+      // Free the first time; taken by the time the 409 sends us back.
+      return lookups.length === 1
+        ? new Response(null, { status: 404 })
+        : json({ id: "folder-9", folder: {} });
+    }
+    bodies.push(JSON.parse(init.body));
+    return json({ error: { code: "nameAlreadyExists" } }, 409);
+  }, () => drive.createFolder("run-1", "tables"));
+
+  assert.equal(id, "folder-9");
+  assert.equal(bodies.length, 1);
+  assert.equal(bodies[0]["@microsoft.graph.conflictBehavior"], "fail",
+    "replace would throw away the backup already in that folder");
+  assert.equal(lookups.length, 2, "the 409 is answered by looking again, not by giving up");
+});
+
+test("Dropbox returns the folder it finds rather than asking to create it", async () => {
+  const drive = new Dropbox("tok");
+  const endpoints = [];
+  const path = await withFetch(async (url, init) => {
+    endpoints.push(url.replace("https://api.dropboxapi.com/2/", ""));
+    assert.equal(JSON.parse(init.body).path, "/VagaboNDE backups");
+    return json({ ".tag": "folder", path_display: "/VagaboNDE backups" });
+  }, () => drive.createFolder("", "VagaboNDE backups"));
+
+  assert.equal(path, "/VagaboNDE backups");
+  assert.deepEqual(endpoints, ["files/get_metadata"]);
+});
+
+test("Dropbox creates the folder when the path is free", async () => {
+  const drive = new Dropbox("tok");
+  const endpoints = [];
+  const path = await withFetch(async url => {
+    endpoints.push(url.replace("https://api.dropboxapi.com/2/", ""));
+    // "path/not_found" is Dropbox saying the name is going spare.
+    if (url.endsWith("files/get_metadata")) return json({ error_summary: "path/not_found/." }, 409);
+    return json({ metadata: { path_display: "/VagaboNDE backups/2026-09-04 02-00" } });
+  }, () => drive.createFolder("/VagaboNDE backups", "2026-09-04 02-00"));
+
+  assert.equal(path, "/VagaboNDE backups/2026-09-04 02-00");
+  assert.deepEqual(endpoints, ["files/get_metadata", "files/create_folder_v2"]);
 });
 
 // ── The consent URLs ─────────────────────────────────────────────────────
