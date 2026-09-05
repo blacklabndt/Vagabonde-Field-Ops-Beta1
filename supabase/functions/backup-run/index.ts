@@ -1,0 +1,510 @@
+// backup-run — the thing that actually copies the project to the drive.
+//
+// Called four ways, and it checks its own door before it reads a byte of
+// anybody's body:
+//
+//   {action:"tick"}      the pg_cron job, on x-internal-secret (the database
+//                        holds no user JWT), or an Admin keeping a run they
+//                        are watching moving between cron ticks
+//   {action:"now"}       an Admin pressing "Back up now"
+//   {action:"list"}      the backups in the drive, newest first
+//   {action:"manifest"}  one backup's manifest, for the per-job restore
+//
+// A run is done in slices. A function invocation has a wall-clock ceiling,
+// so no phase may need to finish inside one: the unit of work is one part
+// of one table, or one page of one bucket, and backup_runs.cursor says
+// where the next slice starts. Every unit is idempotent — an upload
+// replaces a file of the same name — so a slice cut short costs at most one
+// repeated unit and never leaves a hole.
+//
+// Five minutes between cron ticks would make a big backup take all night
+// for a few minutes of work, so a slice that made progress kicks the next
+// one itself and walks away from the answer. The cron is the safety net,
+// not the engine: it starts what is due, picks up what the chain dropped,
+// and reclaims a run whose heartbeat went quiet mid-slice.
+
+// deno-lint-ignore-file no-explicit-any
+import type { SupabaseClient } from "https://esm.sh/@supabase/supabase-js@2";
+import {
+  LOAD_ORDER, BUCKETS, CURSOR_COLUMN, TABLE_KEYS,
+  PAGE_ROWS, MAX_PART_ROWS, stripSecrets, partFileName
+} from "../_shared/backupTables.ts";
+import {
+  MANIFEST_NAME, TABLES_FOLDER, FILES_FOLDER,
+  newManifest, recordTable, recordFiles, finishManifest, jobsIndex,
+  folderStamp, foldersToDelete, fileEntryName, beforeRestoreName
+} from "../_shared/backupManifest.ts";
+import type { DriveClient } from "../_shared/drive.ts";
+import {
+  adminClient, backupDoor, connectDrive, corsHeaders, ensureFolder,
+  internalSecret, json, kick, logError, readManifest
+} from "../_shared/backupCommon.ts";
+import type { Connection } from "../_shared/backupCommon.ts";
+import {
+  BUDGET_MS, RETRIES, afterFilesPage, afterTablePart, countsOf, foldIntoIndex,
+  forgetIndex, newRunCursor, outOfBudget, pausePage, retryDelayMs, reviveCursor,
+  shouldRetry, sliceDeadline, sliceLooksAlive, startPrefixWalk
+} from "../_shared/backupRun.ts";
+import type { RunCursor } from "../_shared/backupRun.ts";
+import { gzip } from "../_shared/gzip.ts";
+import { nextRunAt } from "../_shared/backupSchedule.ts";
+
+const APP_VERSION = "0.9.0-Beta";
+
+const RUN_COLUMNS = "id, kind, status, phase, cursor, counts, folder_id, folder_name, created_at, started_at, heartbeat_at";
+
+type Run = Record<string, any>;
+
+const sleep = (ms: number) => new Promise(r => setTimeout(r, ms));
+
+// Retries what the drive says to retry — the flag on the error, never its
+// prose. Three goes with a widening gap; after that the run fails with the
+// last reason and the next scheduled one is unaffected.
+async function withRetry<T>(what: string, fn: () => Promise<T>): Promise<T> {
+  let last: Error | null = null;
+  for (let attempt = 0; attempt <= RETRIES; attempt++) {
+    try { return await fn(); }
+    catch (e) {
+      last = e as Error;
+      if (!shouldRetry(e, attempt)) break;
+      await sleep(retryDelayMs(attempt));
+    }
+  }
+  throw new Error(`${what}: ${last ? last.message : "failed"}`);
+}
+
+// ── The door ─────────────────────────────────────────────────────────────
+
+Deno.serve(async (req) => {
+  if (req.method === "OPTIONS") return new Response("ok", { headers: corsHeaders });
+  if (req.method !== "POST") return json({ error: "Not found" }, 404);
+
+  const db = adminClient();
+
+  // Who is asking, before anything is parsed and before anything is
+  // written down. A stranger's POST leaves no line in function_errors.
+  const caller = await backupDoor(db, req, "Only an Admin can run a backup");
+  if (caller instanceof Response) return caller;
+
+  let body: Record<string, unknown> = {};
+  try { body = await req.json(); } catch { /* an empty body is a tick */ }
+  const action = String(body.action ?? "tick");
+
+  try {
+    if (action === "tick") {
+      return json(await tick(db, caller.secret || await internalSecret(db)));
+    }
+    if (action === "now") {
+      return json(await backUpNow(db, caller.userId, caller.secret || await internalSecret(db)));
+    }
+    if (action === "list") return json({ backups: await listBackups(db) });
+    if (action === "manifest") {
+      const conn = await connectDrive(db);
+      return json({ manifest: await readManifest(conn.drive, String(body.folderId ?? "")) });
+    }
+    return json({ error: `Unknown action "${action}"` }, 400);
+  } catch (e) {
+    await logError("backup-run", (e as Error).message, { action });
+    return json({ error: (e as Error).message }, 400);
+  }
+});
+
+// ── The tick ─────────────────────────────────────────────────────────────
+
+async function openRun(db: SupabaseClient, status: string): Promise<Run | null> {
+  const { data, error } = await db.from("backup_runs")
+    .select(RUN_COLUMNS).eq("status", status).order("created_at").limit(1).maybeSingle();
+  if (error) throw error;
+  return (data ?? null) as Run | null;
+}
+
+async function tick(db: SupabaseClient, secret: string): Promise<Record<string, unknown>> {
+  // A run in flight comes first, and the same run is picked up again after
+  // a slice that died: a stale heartbeat is a reason to reclaim this run,
+  // never to start a second one alongside it.
+  const running = await openRun(db, "running");
+  if (running) {
+    if (sliceLooksAlive(running.heartbeat_at, Date.now())) {
+      // Another slice of this same run is still going. Two at once would
+      // upload the same part twice and fight over the cursor.
+      return { ok: true, busy: true, runId: running.id };
+    }
+    return await advance(db, running, secret);
+  }
+
+  const queued = await openRun(db, "queued");
+  if (queued) return await advance(db, queued, secret);
+
+  // Nothing in flight: is one due?
+  const { data: s, error } = await db.from("app_settings")
+    .select("backup_refresh_token, backup_next_run_at, backup_frequency, backup_weekday, backup_hour")
+    .maybeSingle();
+  if (error) throw error;
+  if (!s || !s.backup_refresh_token || !s.backup_next_run_at) return { ok: true, idle: true };
+  if (Date.parse(String(s.backup_next_run_at)) > Date.now()) {
+    return { ok: true, idle: true, next: s.backup_next_run_at };
+  }
+
+  // The clock moves the moment the run is created, not when it finishes —
+  // a run that takes two hours must not make the next one two hours late,
+  // and a failed run must not stop the next one happening at all.
+  const { error: nErr } = await db.from("app_settings").update({
+    backup_next_run_at: nextRunAt({
+      frequency: String(s.backup_frequency ?? "daily"),
+      weekday: Number(s.backup_weekday ?? 0),
+      hour: Number(s.backup_hour ?? 2)
+    }, Date.now())
+  }).eq("id", true);
+  if (nErr) throw nErr;
+
+  const created = await queueRun(db, "backup", null);
+  return await advance(db, created, secret);
+}
+
+async function queueRun(db: SupabaseClient, kind: string, requestedBy: string | null): Promise<Run> {
+  const { data, error } = await db.from("backup_runs")
+    .insert({ kind, status: "queued", requested_by: requestedBy || null })
+    .select(RUN_COLUMNS).single();
+  if (error) throw error;
+  return data as Run;
+}
+
+// "Back up now" queues the run and answers immediately: the first slice is
+// a hundred seconds of work and the browser is not going to wait for it.
+// The kick starts that slice and is abandoned; the five-minute tick is the
+// backstop if it never arrives.
+async function backUpNow(db: SupabaseClient, requestedBy: string, secret: string): Promise<Record<string, unknown>> {
+  const running = await openRun(db, "running");
+  const queued = running ?? await openRun(db, "queued");
+  if (queued) {
+    // Something is already going. Nudge it rather than starting a second
+    // pile beside it.
+    kick("backup-run", { action: "tick" }, secret);
+    return { ok: true, runId: queued.id, alreadyRunning: true };
+  }
+
+  const created = await queueRun(db, "backup", requestedBy || null);
+  kick("backup-run", { action: "tick" }, secret);
+  return { ok: true, runId: created.id };
+}
+
+// ── Starting a run ───────────────────────────────────────────────────────
+
+// Taking the run for this slice. The update is conditional on the status it
+// was read at, and zero rows back means another slice got there first —
+// "Back up now" kicks a slice at the same moment the cron may be ticking,
+// and two slices of one run would upload the same part twice and fight over
+// the cursor.
+//
+// Reclaiming a run whose heartbeat went quiet is deliberately NOT also
+// conditional on that heartbeat. A compare-and-swap on a timestamptz is a
+// string comparison across PostgREST, and getting it wrong once would wedge
+// the schedule for ever with a run nobody could pick up — which is far worse
+// than the thing it would prevent, two slices repeating a unit that replaces
+// rather than appends.
+async function claim(db: SupabaseClient, run: Run): Promise<Run | null> {
+  const now = new Date().toISOString();
+  const patch: Record<string, unknown> = { heartbeat_at: now };
+  if (String(run.status) === "queued") {
+    patch.status = "running";
+    patch.phase = "tables";
+    patch.cursor = newRunCursor(now);
+    patch.started_at = now;
+    patch.error = null;
+  }
+  const { data, error } = await db.from("backup_runs").update(patch)
+    .eq("id", run.id).eq("status", run.status).select(RUN_COLUMNS).maybeSingle();
+  if (error) throw error;
+  return (data ?? null) as Run | null;
+}
+
+// The folder is made before the first unit rather than inside it, so
+// backup_runs carries a name the panel can show from the very first poll —
+// and separately from the claim, so a slice that dies between the two
+// leaves a running row the next tick can pick up and finish the job for.
+async function ensureRunFolder(db: SupabaseClient, conn: Connection, run: Run): Promise<string> {
+  if (run.folder_id) return String(run.folder_id);
+  const stamp = folderStamp(Date.now());
+  const name = run.kind === "before_restore" ? beforeRestoreName(stamp) : stamp;
+  const folderId = await withRetry("Making the backup folder",
+    () => ensureFolder(conn.drive, conn.rootFolderId, name));
+  const { error } = await db.from("backup_runs")
+    .update({ folder_id: folderId, folder_name: name }).eq("id", run.id);
+  if (error) throw error;
+  return folderId;
+}
+
+// ── One slice ────────────────────────────────────────────────────────────
+
+async function advance(db: SupabaseClient, run: Run, secret: string): Promise<Record<string, unknown>> {
+  const deadline = sliceDeadline(Date.now(), BUDGET_MS);
+  const runId = String(run.id);
+
+  // The drive first: with none connected there is nothing to do but say so
+  // on the run itself, so the panel has a written reason rather than a run
+  // that sits queued for ever and a tick that complains every five minutes.
+  let conn: Connection;
+  try {
+    conn = await connectDrive(db);
+  } catch (e) {
+    return await fail(db, runId, (e as Error).message);
+  }
+
+  let cursor: RunCursor;
+  try {
+    const current = await claim(db, run);
+    if (!current) return { ok: true, runId, busy: true };
+    cursor = reviveCursor(current.cursor, String(current.started_at ?? new Date().toISOString()));
+
+    const folderId = await ensureRunFolder(db, conn, current);
+    const tablesFolder = await withRetry("Opening the tables folder",
+      () => ensureFolder(conn.drive, folderId, TABLES_FOLDER));
+    const filesFolder = await withRetry("Opening the files folder",
+      () => ensureFolder(conn.drive, folderId, FILES_FOLDER));
+
+    let units = 0;
+    while (!outOfBudget(deadline, Date.now()) && cursor.phase !== "done") {
+      if (cursor.phase === "tables") cursor = await stepTables(db, conn.drive, tablesFolder, cursor);
+      else if (cursor.phase === "files") cursor = await stepFiles(db, conn.drive, filesFolder, cursor, deadline);
+      else if (cursor.phase === "manifest") cursor = await stepManifest(db, conn.drive, folderId, cursor);
+      else if (cursor.phase === "retention") cursor = await stepRetention(conn.drive, conn.rootFolderId, conn.keep, cursor);
+      else cursor.phase = "done";
+      units += 1;
+      // The cursor is persisted after every unit, not at the end of the
+      // slice: a slice that dies here has to be resumable from what is on
+      // the row, and the heartbeat is how the next tick knows it died.
+      const { error } = await db.from("backup_runs").update({
+        phase: cursor.phase, cursor, heartbeat_at: new Date().toISOString(), counts: countsOf(cursor)
+      }).eq("id", runId);
+      if (error) throw error;
+    }
+
+    if (cursor.phase === "done") {
+      const finished = new Date().toISOString();
+      const { error } = await db.from("backup_runs").update({
+        status: "complete", phase: "done", finished_at: finished,
+        heartbeat_at: finished, counts: countsOf(cursor)
+      }).eq("id", runId);
+      if (error) throw error;
+      return { ok: true, runId, complete: true, counts: countsOf(cursor) };
+    }
+
+    if (units > 0) kick("backup-run", { action: "tick" }, secret);
+    return { ok: true, runId, phase: cursor.phase, continuing: true };
+  } catch (e) {
+    return await fail(db, runId, (e as Error).message);
+  }
+}
+
+async function fail(db: SupabaseClient, runId: string, message: string): Promise<Record<string, unknown>> {
+  await db.from("backup_runs").update({
+    status: "failed", error: message, finished_at: new Date().toISOString()
+  }).eq("id", runId);
+  await logError("backup-run", message, { runId });
+  return { ok: false, runId, error: message };
+}
+
+// ── Phase: tables ────────────────────────────────────────────────────────
+
+async function stepTables(
+  db: SupabaseClient, drive: DriveClient, tablesFolder: string, c: RunCursor
+): Promise<RunCursor> {
+  if (c.tableIndex >= LOAD_ORDER.length) { c.phase = "files"; return c; }
+  const table = LOAD_ORDER[c.tableIndex];
+  const cursorColumn = CURSOR_COLUMN[table];
+  const keys = TABLE_KEYS[table] ?? [];
+
+  // One part: up to MAX_PART_ROWS rows, read a PostgREST page at a time.
+  // Keyset where there is a single unique column — "the next thousand after
+  // this id" cannot skip a row when one is inserted mid-walk — and OFFSET
+  // for the two composite-key tables, which hold reactions and high scores.
+  const rows: Record<string, unknown>[] = [];
+  let lastKey: string | null = c.lastKey;
+  let offset = c.offset;
+  let exhausted = false;
+
+  while (rows.length < MAX_PART_ROWS) {
+    let q = db.from(table).select("*").limit(PAGE_ROWS);
+    if (cursorColumn) {
+      q = q.order(cursorColumn);
+      if (lastKey !== null) q = q.gt(cursorColumn, lastKey);
+    } else {
+      for (const k of keys) q = q.order(k);
+      q = q.range(offset, offset + PAGE_ROWS - 1);
+    }
+    const { data, error } = await q;
+    if (error) throw error;
+    const page = (data ?? []) as Record<string, unknown>[];
+    rows.push(...page);
+    if (cursorColumn && page.length) lastKey = String(page[page.length - 1][cursorColumn]);
+    offset += page.length;
+    if (page.length < PAGE_ROWS) { exhausted = true; break; }
+  }
+
+  if (table === "profiles") await addAuthEmails(db, rows);
+  c = foldIntoIndex(c, table, rows);
+
+  // An empty part is still written, so the manifest can say "clients: 0"
+  // and a restore does not have to tell "no rows" from "never read".
+  const name = partFileName(table, c.partIndex);
+  const payload = await gzip(new TextEncoder().encode(JSON.stringify(stripSecrets(table, rows))));
+  await withRetry(`Uploading ${name}`, () => drive.upload(tablesFolder, name, payload, "application/gzip"));
+
+  return afterTablePart(c, {
+    table, tableCount: LOAD_ORDER.length, rows: rows.length, partName: name,
+    exhausted, lastKey, offset
+  });
+}
+
+// Auth holds the email addresses; profiles does not. Without them a restore
+// into an empty project could re-create the crew's rows but would have
+// nowhere to send anybody a set-password link — the account would exist
+// with no way in. So each profile row carries auth_email into the backup,
+// as a field of the JSON rather than a column of the table; the restore
+// takes it off again before it inserts. It is the one place a backup holds
+// something the table it came from does not.
+async function addAuthEmails(db: SupabaseClient, rows: Record<string, unknown>[]): Promise<void> {
+  if (!rows.length) return;
+  const email = new Map<string, string>();
+  for (let page = 1; page <= 20; page++) {
+    const { data, error } = await db.auth.admin.listUsers({ page, perPage: 1000 });
+    if (error) throw error;
+    const users = data?.users ?? [];
+    for (const u of users) email.set(u.id, u.email ?? "");
+    if (users.length < 1000) break;
+  }
+  for (const r of rows) r.auth_email = email.get(String(r.id)) ?? null;
+}
+
+// ── Phase: files ─────────────────────────────────────────────────────────
+
+async function stepFiles(
+  db: SupabaseClient, drive: DriveClient, filesFolder: string, c: RunCursor, deadline: number
+): Promise<RunCursor> {
+  if (c.bucketIndex >= BUCKETS.length) { c.phase = "manifest"; return c; }
+  const bucket = BUCKETS[c.bucketIndex];
+
+  // An empty prefix stack means this bucket has not been started: the stack
+  // and the bucket index are advanced together at the end of a bucket, so
+  // an empty stack here is never a finished one.
+  const top = startPrefixWalk(c, bucket);
+
+  const { data: entries, error } = await db.storage.from(bucket).list(top.prefix, {
+    limit: PAGE_ROWS, offset: top.offset, sortBy: { column: "name", order: "asc" }
+  });
+  if (error) throw error;
+  const page = entries ?? [];
+
+  // Storage marks a folder by having no id of its own.
+  const folders = page.filter(e => !e.id);
+  const objects = page.filter(e => !!e.id);
+
+  let copied = 0;
+  let bytes = 0;
+  for (let i = c.pageDone; i < objects.length; i++) {
+    if (outOfBudget(deadline, Date.now())) {
+      // Stop where we are: the same page is re-listed next slice and the
+      // first pageDone objects are skipped.
+      return pausePage(c, i, copied, bytes);
+    }
+    const key = top.prefix + objects[i].name;
+    const blob = await withRetry(`Reading ${bucket}/${key}`, async () => {
+      const { data, error: dErr } = await db.storage.from(bucket).download(key);
+      if (dErr) throw dErr;
+      return data as Blob;
+    });
+    const payload = new Uint8Array(await blob.arrayBuffer());
+    const name = fileEntryName(bucket, key);
+    await withRetry(`Uploading ${bucket}/${key}`, () =>
+      drive.upload(filesFolder, name, payload, blob.type || "application/octet-stream"));
+    copied += 1;
+    bytes += payload.byteLength;
+  }
+
+  // Depth first: sub-prefixes go on the stack, and this prefix advances.
+  return afterFilesPage(c, {
+    bucketCount: BUCKETS.length, pageLength: page.length, pageRows: PAGE_ROWS,
+    folderNames: folders.map(f => f.name), files: copied, bytes
+  });
+}
+
+// ── Phase: manifest, then retention ──────────────────────────────────────
+
+async function stepManifest(
+  db: SupabaseClient, drive: DriveClient, folderId: string, c: RunCursor
+): Promise<RunCursor> {
+  // The schema version is the newest migration this database has applied —
+  // the one number that says whether a backup can be loaded back into it.
+  let schemaVersion: string | null = null;
+  try {
+    const { data } = await db.rpc("backup_schema_version");
+    schemaVersion = data ? String(data) : null;
+  } catch { schemaVersion = null; }
+
+  // recordTable, recordFiles and finishManifest all change the manifest
+  // they are handed and give it back; assigning the result is how that
+  // stays visible.
+  let m = newManifest(APP_VERSION, schemaVersion, c.startedAt);
+  for (const table of LOAD_ORDER) {
+    m = recordTable(m, table, Number(c.rows[table] ?? 0), c.parts[table] ?? []);
+  }
+  m = recordFiles(m, c.files, c.bytes);
+  m.jobs = jobsIndex(c.index as any);
+  m = finishManifest(m, new Date().toISOString());
+
+  await withRetry("Uploading the manifest", () =>
+    drive.upload(folderId, MANIFEST_NAME, new TextEncoder().encode(JSON.stringify(m, null, 2)), "application/json"));
+
+  // The index has done its job and is the biggest thing in the cursor.
+  c = forgetIndex(c);
+  c.phase = "retention";
+  return c;
+}
+
+async function stepRetention(
+  drive: DriveClient, rootFolderId: string, keep: number, c: RunCursor
+): Promise<RunCursor> {
+  const folders = await drive.listFolders(rootFolderId);
+  // foldersToDelete only ever names a folder whose name is the stamp
+  // exactly, so a before-restore copy — and anything the Admin put in the
+  // same drive themselves — is not retention's business.
+  const doomed = foldersToDelete(folders.map(f => f.name), keep);
+  for (const name of doomed) {
+    const f = folders.find(x => x.name === name);
+    if (f) await withRetry(`Removing ${name}`, () => drive.delete(f.id));
+  }
+  c.removed = doomed;
+  c.phase = "done";
+  return c;
+}
+
+// ── Reading the drive back ───────────────────────────────────────────────
+
+async function listBackups(db: SupabaseClient): Promise<Record<string, unknown>[]> {
+  const conn = await connectDrive(db);
+  const folders = await conn.drive.listFolders(conn.rootFolderId);
+  const out: Record<string, unknown>[] = [];
+  for (const folder of folders) {
+    const entry: Record<string, unknown> = { folderId: folder.id, name: folder.name };
+    try {
+      const m = await readManifest(conn.drive, folder.id);
+      const tables = (m.tables ?? {}) as Record<string, { rows?: number }>;
+      const files = (m.files ?? {}) as { count?: number; bytes?: number };
+      entry.app_version = m.app_version ?? null;
+      entry.schema_version = m.schema_version ?? null;
+      entry.finished_at = m.finished_at ?? null;
+      entry.rows = Object.values(tables).reduce((n, t) => n + Number(t?.rows ?? 0), 0);
+      entry.files = files.count ?? 0;
+      entry.bytes = files.bytes ?? 0;
+      entry.jobs = ((m.jobs ?? []) as unknown[]).length;
+    } catch (e) {
+      // A folder with no manifest is a run that never finished. Say so
+      // rather than offering it as something to restore from.
+      entry.incomplete = true;
+      entry.error = (e as Error).message;
+    }
+    out.push(entry);
+  }
+  // Newest first: the stamp sorts into date order, so this is a reverse sort.
+  return out.sort((a, b) => String(b.name).localeCompare(String(a.name)));
+}

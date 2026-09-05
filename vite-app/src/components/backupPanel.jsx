@@ -1,7 +1,8 @@
-import React, { useState, useEffect, useCallback } from "react";
+import React, { useState, useEffect, useCallback, useRef } from "react";
 import { Db } from "../db.js";
 import { Blueprint, Btn, Field, ErrorBox, Loading, TagX } from "./common.jsx";
 import { BACKUP_PROVIDERS, PROVIDER_LABEL, redirectUriFor, readBackupOutcome } from "../backupPanelLogic.js";
+import { describeSchedule, WEEKDAY_NAMES, nextRunAt } from "../backupSchedule.js";
 
 // Automatic backup — the Admin screen's Archive block, below the year-end
 // dropdown, because they are the same question asked two ways: what happens
@@ -35,6 +36,45 @@ const REGISTRATION = {
 
 const capitalise = p => `${p[0].toUpperCase()}${p.slice(1)}`;
 
+const mb = bytes => `${(bytes / 1048576).toFixed(bytes < 10 * 1048576 ? 1 : 0)} MB`;
+const plural = (n, one, many = one + "s") => `${n} ${n === 1 ? one : many}`;
+const when = iso => iso
+  ? new Date(iso).toLocaleString("en-CA", { day: "2-digit", month: "short", hour: "numeric", minute: "2-digit" })
+  : "—";
+
+// A run's phase, said the way somebody who has not read the code would say
+// it. The restore's own phases are in here too, because the same progress
+// box shows a restore.
+const PHASE_WORDS = {
+  tables: "copying the records",
+  files: "copying the PDFs and pictures",
+  manifest: "writing the index",
+  retention: "tidying up old backups",
+  safety: "taking a backup first",
+  wipe: "emptying the app",
+  accounts: "putting the accounts back",
+  done: "finishing"
+};
+
+const KIND_WORDS = {
+  backup: "Backup",
+  before_restore: "Safety backup",
+  restore_all: "Restore",
+  restore_jobs: "Restoring jobs"
+};
+
+const rowsIn = counts => Object.values((counts && counts.rows) || {}).reduce((n, v) => n + Number(v || 0), 0);
+const filesIn = counts => Number((counts && counts.files) || 0);
+const bytesIn = counts => Number((counts && counts.bytes) || 0);
+
+// While something is in flight the panel looks every few seconds; when
+// nothing is, it looks rarely — this screen is left open.
+const POLL_BUSY_MS = 4000;
+const POLL_IDLE_MS = 20000;
+// A nudge is a whole function invocation, so it is not sent on every poll.
+// The slice chain does the work; this is for when the chain drops.
+const NUDGE_EVERY_MS = 15000;
+
 export function AutomaticBackupPanel() {
   const [state, setState] = useState(null);
   const [loadState, setLoadState] = useState("loading"); // loading | ready | failed
@@ -56,21 +96,42 @@ export function AutomaticBackupPanel() {
     clientIdDropbox: "", clientSecretDropbox: ""
   });
 
-  const load = useCallback(() => {
+  // A run in flight, and the poll that watches it. It is in a ref as well as
+  // in state because the poll reschedules itself out of a closure: reading
+  // `run` there would read whatever it was when the effect was set up, and
+  // the interval would never change from idle to busy.
+  const [run, setRun] = useState(null);
+  const runRef = useRef(null);
+  const nudgedAt = useRef(0);
+  const [lastRuns, setLastRuns] = useState([]);
+  const [starting, setStarting] = useState(false);
+
+  const showRun = value => { runRef.current = value; setRun(value); };
+
+  // `seed` is what makes this safe to call on a timer: the schedule boxes
+  // are filled from the server once, and after that only a Save resets them.
+  // Refreshing them on every read would rewrite what the Admin is halfway
+  // through typing.
+  const load = useCallback((seed = false) => {
     setLoadState(s => (s === "ready" ? s : "loading"));
     Db.backupState()
       .then(row => {
         setState(row);
-        setForm(f => ({
-          ...f,
-          frequency: row.frequency || "daily",
-          weekday: Number(row.weekday) || 0,
-          hour: Number(row.hour) || 0,
-          keep: Number(row.keep) || 14,
-          clientIdGoogle: row.client_id_google || "",
-          clientIdMicrosoft: row.client_id_microsoft || "",
-          clientIdDropbox: row.client_id_dropbox || ""
-        }));
+        if (seed) {
+          setForm(f => ({
+            ...f,
+            frequency: row.frequency || "daily",
+            weekday: Number(row.weekday) || 0,
+            hour: Number(row.hour) || 0,
+            keep: Number(row.keep) || 14,
+            clientIdGoogle: row.client_id_google || "",
+            clientIdMicrosoft: row.client_id_microsoft || "",
+            clientIdDropbox: row.client_id_dropbox || ""
+          }));
+          // backup_state answers with the run in flight, so the progress box
+          // is there on the first paint rather than one poll later.
+          if (runRef.current === null) showRun(row.active_run || null);
+        }
         setLoadState("ready");
         setError("");
       })
@@ -80,7 +141,48 @@ export function AutomaticBackupPanel() {
       });
   }, []);
 
-  useEffect(() => { load(); }, [load]);
+  useEffect(() => { load(true); }, [load]);
+
+  useEffect(() => {
+    let alive = true;
+    let timer = null;
+    const look = async () => {
+      try {
+        const open = await Db.currentBackupRun();
+        if (!alive) return;
+        const had = runRef.current;
+        showRun(open);
+        if (open) {
+          if (Date.now() - nudgedAt.current > NUDGE_EVERY_MS) {
+            nudgedAt.current = Date.now();
+            Db.nudgeBackup();
+          }
+        } else if (had) {
+          // Something finished while this screen was open: what it says now
+          // is the last-run line and the list behind it.
+          setLastRuns(await Db.listBackupRuns(5));
+          load();
+        }
+      } catch { /* a failed poll is not worth an error box */ }
+      if (alive) timer = setTimeout(look, runRef.current ? POLL_BUSY_MS : POLL_IDLE_MS);
+    };
+    Db.listBackupRuns(5).then(rows => { if (alive) setLastRuns(rows); }).catch(() => {});
+    look();
+    return () => { alive = false; if (timer) clearTimeout(timer); };
+  }, [load]);
+
+  const backUpNow = async () => {
+    setStarting(true);
+    setError("");
+    try {
+      await Db.backupNow();
+      showRun(await Db.currentBackupRun());
+    } catch (e) {
+      setError(e.message || "The backup couldn't be started.");
+    } finally {
+      setStarting(false);
+    }
+  };
 
   // Coming back from the drive's consent screen. The function redirects to
   // /?backup=connected (or =denied, or =failed&why=…); say so, then take the
@@ -105,7 +207,9 @@ export function AutomaticBackupPanel() {
       // The secrets were written; forget the typed copies so the boxes go
       // back to their ordinary blank state.
       setForm(f => ({ ...f, clientSecretGoogle: "", clientSecretMicrosoft: "", clientSecretDropbox: "" }));
-      load();
+      // A Save is the one thing that refills these boxes from the server:
+      // what comes back is the schedule as the database clamped it.
+      load(true);
     } catch (e) {
       setError(e.message || "Couldn't save the backup settings.");
     } finally {
@@ -188,6 +292,96 @@ export function AutomaticBackupPanel() {
           <strong>The drive needs reconnecting.</strong> {s.connection_error} Press Disconnect and connect it again;
           backups are not running until you do.
         </div>
+      )}
+
+      {/* Schedule */}
+      <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(150px, 1fr))", gap: 12, marginBottom: 12 }}>
+        <Field label="How often">
+          <select className="input" value={form.frequency} onChange={e => set("frequency", e.target.value)}>
+            <option value="daily">Every day</option>
+            <option value="weekdays">Weekdays only</option>
+            <option value="weekly">Once a week</option>
+            <option value="monthly">Once a month</option>
+          </select>
+        </Field>
+        {form.frequency === "weekly" && (
+          <Field label="Day">
+            <select className="input" value={form.weekday} onChange={e => set("weekday", Number(e.target.value))}>
+              {WEEKDAY_NAMES.map((d, i) => <option key={d} value={i}>{d}</option>)}
+            </select>
+          </Field>
+        )}
+        <Field label="At">
+          <select className="input" value={form.hour} onChange={e => set("hour", Number(e.target.value))}>
+            {Array.from({ length: 24 }, (_, h) => (
+              <option key={h} value={h}>{String(h).padStart(2, "0")}:00</option>
+            ))}
+          </select>
+        </Field>
+        <Field label="Keep this many">
+          <input className="input" type="number" min="1" max="365" value={form.keep}
+            onChange={e => set("keep", e.target.value)} />
+        </Field>
+      </div>
+
+      <div style={{ ...QUIET, marginBottom: 12 }}>
+        {describeSchedule(form)}. Older backups beyond the {plural(Number(form.keep) || 14, "most recent")} are
+        removed after each successful run &mdash; except the copies taken automatically just before a restore,
+        which are never tidied away.
+        {connected && <> Next due <strong>{when(s.next_run_at || nextRunAt(form, Date.now()))}</strong>.</>}
+      </div>
+
+      {/* Back up now, and what happened last time */}
+      <div style={{ display: "flex", gap: 8, alignItems: "center", flexWrap: "wrap", marginBottom: 12 }}>
+        <Btn variant="secondary" disabled={!connected || starting || !!run} onClick={backUpNow}>
+          {starting ? "Starting…" : run ? "A run is already going" : "Back up now"}
+        </Btn>
+        {!connected && <span style={QUIET}>Connect a drive first.</span>}
+      </div>
+
+      {run && (
+        <div style={{ border: "1px solid var(--color-accent)", padding: "10px 12px", marginBottom: 12, fontSize: 13 }}>
+          <strong>{KIND_WORDS[run.kind] || run.kind} in progress</strong>
+          {run.folder_name ? <> &middot; {run.folder_name}</> : null}
+          <div style={{ marginTop: 4 }}>
+            {PHASE_WORDS[run.phase] || run.phase || "starting"} &middot; {plural(rowsIn(run.counts), "record")},
+            {" "}{plural(filesIn(run.counts), "file")} ({mb(bytesIn(run.counts))}) so far.
+          </div>
+          <div style={{ ...QUIET, marginTop: 4 }}>
+            It keeps going on the server whether this screen is open or not &mdash; a big first backup can take an hour.
+          </div>
+        </div>
+      )}
+
+      {!run && s.last_run && (
+        <div style={{ fontSize: 13, marginBottom: 12 }}>
+          <strong>Last {(KIND_WORDS[s.last_run.kind] || "run").toLowerCase()}:</strong>{" "}
+          {s.last_run.status === "complete" ? (
+            <>finished {when(s.last_run.finished_at)} &middot; {s.last_run.folder_name} &middot;{" "}
+              {plural(rowsIn(s.last_run.counts), "record")}, {plural(filesIn(s.last_run.counts), "file")}{" "}
+              ({mb(bytesIn(s.last_run.counts))}).</>
+          ) : (
+            <span style={{ color: "var(--color-accent-700)" }}>
+              failed {when(s.last_run.finished_at)} &mdash; {s.last_run.error || "no reason recorded"}. The next
+              scheduled backup will still run.
+            </span>
+          )}
+        </div>
+      )}
+
+      {lastRuns.length > 1 && (
+        <details style={{ marginBottom: 12 }}>
+          <summary style={QUIET}>Earlier runs</summary>
+          <div style={{ display: "grid", gap: 6, marginTop: 8 }}>
+            {lastRuns.map(r => (
+              <div key={r.id} style={{ fontSize: 12, display: "flex", gap: 8, alignItems: "center" }}>
+                <TagX variant="outline">{KIND_WORDS[r.kind] || r.kind}</TagX>
+                <span>{r.folder_name || "—"}</span>
+                <span style={{ marginLeft: "auto" }}>{r.status} &middot; {when(r.finished_at || r.created_at)}</span>
+              </div>
+            ))}
+          </div>
+        </details>
       )}
 
       {/* App registration — collapsed, because it is done once and never

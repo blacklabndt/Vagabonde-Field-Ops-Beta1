@@ -1735,6 +1735,62 @@ export const Db = {
     if (data && data.error) throw new Error(data.error);
   },
 
+  // "Back up now" — a queued run, and an answer straight away. The function
+  // starts the first slice itself and abandons it: a slice is a hundred
+  // seconds of work and nothing here is going to wait for one. The panel
+  // watches backup_runs for what happens next.
+  async backupNow() {
+    const { data, error } = await sbClient.functions.invoke("backup-run", { body: { action: "now" } });
+    if (error) throw await fnError(error);
+    if (data && data.error) throw new Error(data.error);
+    return data || {};
+  },
+
+  // What is in the drive, newest first. Each entry is read from that
+  // folder's own manifest, so a folder with none is reported incomplete
+  // rather than offered as something to restore from.
+  async listBackups() {
+    const { data, error } = await sbClient.functions.invoke("backup-run", { body: { action: "list" } });
+    if (error) throw await fnError(error);
+    if (data && data.error) throw new Error(data.error);
+    return (data && data.backups) || [];
+  },
+
+  // The whole manifest, including the jobs index the per-job restore picks
+  // from. Fetched only when that dialog opens: it is the big one.
+  async backupManifest(folderId) {
+    const { data, error } = await sbClient.functions.invoke("backup-run", { body: { action: "manifest", folderId } });
+    if (error) throw await fnError(error);
+    if (data && data.error) throw new Error(data.error);
+    return (data && data.manifest) || null;
+  },
+
+  // The run in flight, if there is one — read straight from the table,
+  // which an Admin may select and nobody may write.
+  async currentBackupRun() {
+    const { data, error } = await sbClient.from("backup_runs")
+      .select("id, kind, status, phase, counts, error, folder_name, created_at, started_at, finished_at, heartbeat_at")
+      .in("status", ["queued", "running"]).order("created_at").limit(1).maybeSingle();
+    if (error) throw error;
+    return data || null;
+  },
+
+  async listBackupRuns(limit = 10) {
+    const { data, error } = await sbClient.from("backup_runs")
+      .select("id, kind, status, phase, counts, error, folder_name, created_at, started_at, finished_at")
+      .order("created_at", { ascending: false }).limit(limit);
+    if (error) throw error;
+    return data || [];
+  },
+
+  // A poke while somebody is watching, so a run does not sit still between
+  // five-minute cron ticks. Fire and forget: the panel polls the table for
+  // the truth, and a failed nudge costs nothing.
+  async nudgeBackup() {
+    try { await sbClient.functions.invoke("backup-run", { body: { action: "tick" } }); }
+    catch { /* the cron is the safety net */ }
+  },
+
   async sendTicketApproval({ ticketId, to, cc }) {
     const { data, error } = await sbClient.functions.invoke("send-ticket-approval", {
       body: { ticketId, to, cc }
@@ -3718,6 +3774,7 @@ const SAVE_MESSAGES = {
   // Automatic backup
   saveBackupSettings: "Backup settings saved",
   disconnectBackup: "Drive disconnected",
+  backupNow: "Backup started",
 
   // Rates
   setRateLine: "Rate saved",

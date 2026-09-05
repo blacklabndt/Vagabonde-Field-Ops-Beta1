@@ -36,6 +36,16 @@ import {
   credentialsFrom, nonceRefusal, providerRefusal
 } from "../../supabase/functions/_shared/backupOauth.ts";
 
+import {
+  BUDGET_MS, SLICE_ALIVE_MS, RETRIES, BACKOFF_MS,
+  newRunCursor, reviveCursor, sliceDeadline, budgetLeft, outOfBudget,
+  sliceLooksAlive, isRetryable, shouldRetry, retryDelayMs,
+  afterTablePart, foldIntoIndex, forgetIndex,
+  startPrefixWalk, pausePage, afterFilesPage, countsOf, totalRows
+} from "../../supabase/functions/_shared/backupRun.ts";
+
+import { gzip, gunzip } from "../../supabase/functions/_shared/gzip.ts";
+
 import { BACKUP_PROVIDERS } from "./backupPanelLogic.js";
 
 const ROOT = new URL("../../", import.meta.url);
@@ -821,7 +831,7 @@ test("the shared modules read nothing from the world around them", () => {
   // They are imported by the node suite AND by Deno Edge Functions. An
   // import of supabase-js or a read of Deno.env in any of the three breaks
   // this file outright; the assertion is here so the reason is named.
-  for (const f of ["backupTables.ts", "backupManifest.ts", "drive.ts", "backupOauth.ts"]) {
+  for (const f of ["backupTables.ts", "backupManifest.ts", "drive.ts", "backupOauth.ts", "backupRun.ts", "gzip.ts"]) {
     const src = read(`supabase/functions/_shared/${f}`);
     const imports = [...src.matchAll(/^import .*?from ["'](.+?)["']/gm)].map(m => m[1]);
     const allowed = f === "backupManifest.ts" ? ["./backupSchedule.ts"] : [];
@@ -833,4 +843,259 @@ test("the shared modules read nothing from the world around them", () => {
     // it binary); dropboxArg's high range is written as escapes.
     assert.ok(!/[\x00-\x08\x0e-\x1f\x7f]/.test(src), `${f} must hold no control characters`);
   }
+});
+
+// ── Gzip ─────────────────────────────────────────────────────────────────
+
+test("a table part survives being gzipped and read back", async () => {
+  const rows = Array.from({ length: 500 }, (_, i) => ({ id: `t-${i}`, total: i * 137, note: "Wapiti tie-in · RT" }));
+  const json = JSON.stringify(rows);
+  const packed = await gzip(new TextEncoder().encode(json));
+  assert.ok(packed.byteLength < json.length, "gzip should be smaller than the JSON it came from");
+  // A gzip member starts 1f 8b — the restore reads these back with a
+  // DecompressionStream that will not say so if it is handed something else.
+  assert.equal(packed[0], 0x1f);
+  assert.equal(packed[1], 0x8b);
+  assert.deepEqual(JSON.parse(new TextDecoder().decode(await gunzip(packed))), rows);
+});
+
+test("an empty table still round-trips", async () => {
+  const packed = await gzip(new TextEncoder().encode("[]"));
+  assert.equal(new TextDecoder().decode(await gunzip(packed)), "[]");
+});
+
+// ── The slice's budget, and the retry ────────────────────────────────────
+
+test("a slice's budget is spent against its own deadline", () => {
+  const start = Date.parse("2026-09-05T02:00:00Z");
+  const deadline = sliceDeadline(start);
+  assert.equal(deadline - start, BUDGET_MS);
+  assert.equal(budgetLeft(deadline, start), BUDGET_MS);
+  assert.equal(outOfBudget(deadline, start + BUDGET_MS - 1), false);
+  assert.equal(outOfBudget(deadline, start + BUDGET_MS), true);
+  // Past the deadline stays past it — a negative remainder is no remainder.
+  assert.equal(budgetLeft(deadline, start + BUDGET_MS + 5000), 0);
+});
+
+test("a heartbeat older than a slice can live is a run to reclaim", () => {
+  const now = Date.parse("2026-09-05T02:10:00Z");
+  // Shorter than the five minutes between cron ticks, so a slice whose
+  // self-kick was lost is picked up on the next tick and not ten minutes on.
+  assert.ok(SLICE_ALIVE_MS < 5 * 60_000, "a stale run must be reclaimable within one cron gap");
+  assert.ok(SLICE_ALIVE_MS > BUDGET_MS, "a slice must not be declared dead while it is still inside its budget");
+  assert.equal(sliceLooksAlive(new Date(now - 1000).toISOString(), now), true);
+  assert.equal(sliceLooksAlive(new Date(now - SLICE_ALIVE_MS - 1000).toISOString(), now), false);
+  // A run nobody has started yet has no heartbeat, and that is not "alive".
+  assert.equal(sliceLooksAlive(null, now), false);
+  assert.equal(sliceLooksAlive("", now), false);
+  assert.equal(sliceLooksAlive("not a date", now), false);
+});
+
+test("only the flag on a drive's refusal earns a retry", () => {
+  const busy = Object.assign(new Error("Uploading failed (429): slow down"), { status: 429, retryable: true });
+  const refused = Object.assign(new Error("Uploading failed (403): no"), { status: 403, retryable: false });
+  assert.equal(isRetryable(busy), true);
+  // Prose is not evidence: a 403 whose body happens to say "try again" is
+  // still an answer.
+  assert.equal(isRetryable(refused), false);
+  assert.equal(isRetryable(new Error("Failed to fetch")), false);
+  assert.equal(shouldRetry(busy, 0), true);
+  assert.equal(shouldRetry(busy, RETRIES - 1), true);
+  // The last attempt is the last: three goes over, then the run fails.
+  assert.equal(shouldRetry(busy, RETRIES), false);
+  assert.equal(shouldRetry(refused, 0), false);
+  assert.deepEqual([0, 1, 2, 9].map(retryDelayMs), [BACKOFF_MS[0], BACKOFF_MS[1], BACKOFF_MS[2], BACKOFF_MS[2]]);
+  // Every retry of a unit has to fit inside a slice with room to spare.
+  assert.ok(BACKOFF_MS.reduce((a, b) => a + b, 0) < BUDGET_MS / 2);
+});
+
+// ── The cursor: tables ───────────────────────────────────────────────────
+
+test("a table that is not finished continues from the key the walk reached", () => {
+  let c = newRunCursor("2026-09-05T02:00:00.000Z");
+  c = afterTablePart(c, {
+    table: "tickets", tableCount: 3, rows: 25000, partName: "tickets.01.json.gz",
+    exhausted: false, lastKey: "abc-999", offset: 25000
+  });
+  assert.equal(c.phase, "tables");
+  assert.equal(c.tableIndex, 0, "the same table continues");
+  assert.equal(c.partIndex, 1);
+  assert.equal(c.lastKey, "abc-999");
+  assert.equal(c.offset, 25000);
+  assert.equal(c.rows.tickets, 25000);
+  assert.deepEqual(c.parts.tickets, ["tickets.01.json.gz"]);
+
+  // The second part adds to the count rather than replacing it, and the
+  // parts list keeps both names — the restore reads them in that order.
+  c = afterTablePart(c, {
+    table: "tickets", tableCount: 3, rows: 400, partName: "tickets.02.json.gz",
+    exhausted: true, lastKey: null, offset: 0
+  });
+  assert.equal(c.rows.tickets, 25400);
+  assert.deepEqual(c.parts.tickets, ["tickets.01.json.gz", "tickets.02.json.gz"]);
+  assert.equal(c.tableIndex, 1, "an exhausted table moves to the next one");
+  assert.equal(c.partIndex, 0);
+  assert.equal(c.lastKey, null);
+  assert.equal(c.offset, 0);
+  assert.equal(c.phase, "tables");
+});
+
+test("the last table hands the run to the files phase", () => {
+  let c = newRunCursor("2026-09-05T02:00:00.000Z");
+  c.tableIndex = 2;
+  c = afterTablePart(c, {
+    table: "app_settings", tableCount: 3, rows: 1, partName: "app_settings.01.json.gz",
+    exhausted: true, lastKey: null, offset: 0
+  });
+  assert.equal(c.tableIndex, 3);
+  assert.equal(c.phase, "files");
+});
+
+test("an empty table is still a part, so the manifest can say zero", () => {
+  let c = newRunCursor("2026-09-05T02:00:00.000Z");
+  c = afterTablePart(c, {
+    table: "burned_ticket_numbers", tableCount: 5, rows: 0, partName: "burned_ticket_numbers.01.json.gz",
+    exhausted: true, lastKey: null, offset: 0
+  });
+  assert.equal(c.rows.burned_ticket_numbers, 0);
+  assert.deepEqual(c.parts.burned_ticket_numbers, ["burned_ticket_numbers.01.json.gz"]);
+});
+
+test("the jobs index is folded out of the rows the tables phase reads", () => {
+  let c = newRunCursor("2026-09-05T02:00:00.000Z");
+  c = foldIntoIndex(c, "clients", [{ id: "c1", name: "Pembina", address: "unused" }]);
+  c = foldIntoIndex(c, "jobs", [{
+    id: "j1", job_number: "25-1001", project: "Wapiti tie-in", status: "Open",
+    created_at: "2026-08-01T00:00:00Z", client_id: "c1", notes: "unused"
+  }]);
+  c = foldIntoIndex(c, "tickets", [{ id: "t1", job_id: "j1", total: 123456 }, { id: "t2", job_id: "j1" }]);
+  c = foldIntoIndex(c, "jhas", [{ id: "h1", job_id: "j1" }]);
+  c = foldIntoIndex(c, "reports", [{ id: "r1", job_id: "j1" }]);
+  // A table that is not one of the five leaves the index alone.
+  c = foldIntoIndex(c, "chat_messages", [{ id: "m1", body: "hello" }]);
+
+  assert.equal(c.index.clients.length, 1);
+  assert.deepEqual(c.index.clients[0], { id: "c1", name: "Pembina" });
+  // Only the columns the index shows: the rest would put the whole database
+  // in the cursor.
+  assert.deepEqual(Object.keys(c.index.jobs[0]).sort(),
+    ["client_id", "created_at", "id", "job_number", "project", "status"]);
+  assert.deepEqual(c.index.tickets, [{ job_id: "j1" }, { job_id: "j1" }]);
+
+  const built = jobsIndex(c.index);
+  assert.equal(built.length, 1);
+  assert.equal(built[0].client, "Pembina");
+  assert.equal(built[0].tickets, 2);
+  assert.equal(built[0].jhas, 1);
+  assert.equal(built[0].reports, 1);
+
+  c = forgetIndex(c);
+  assert.deepEqual(c.index, { jobs: [], clients: [], tickets: [], jhas: [], reports: [] });
+});
+
+// ── The cursor: files ────────────────────────────────────────────────────
+
+test("a bucket is walked depth first and the stack says where it got to", () => {
+  let c = newRunCursor("2026-09-05T02:00:00.000Z");
+  c.phase = "files";
+
+  const top = startPrefixWalk(c, "reports");
+  assert.deepEqual(top, { prefix: "", offset: 0 });
+  assert.equal(c.prefixStarted, "reports");
+
+  // A short page at the root, with two sub-folders on it: the root is
+  // finished and its folders go on the stack.
+  c = afterFilesPage(c, {
+    bucketCount: 2, pageLength: 3, pageRows: 1000,
+    folderNames: ["j-1", "j-2"], files: 1, bytes: 2048
+  });
+  assert.deepEqual(c.prefixes, [{ prefix: "j-1/", offset: 0 }, { prefix: "j-2/", offset: 0 }]);
+  assert.equal(c.files, 1);
+  assert.equal(c.bytes, 2048);
+  assert.equal(c.bucketIndex, 0, "the bucket is not done while its folders are on the stack");
+
+  // j-2 is the top of the stack and comes first; a full page leaves it there
+  // with its offset advanced, so the next listing carries on rather than
+  // repeating.
+  c = afterFilesPage(c, { bucketCount: 2, pageLength: 1000, pageRows: 1000, folderNames: [], files: 1000, bytes: 1000 });
+  assert.deepEqual(c.prefixes[c.prefixes.length - 1], { prefix: "j-2/", offset: 1000 });
+  c = afterFilesPage(c, { bucketCount: 2, pageLength: 4, pageRows: 1000, folderNames: [], files: 4, bytes: 40 });
+  assert.deepEqual(c.prefixes, [{ prefix: "j-1/", offset: 0 }]);
+
+  // The last prefix empties the stack, which is what ends the bucket.
+  c = afterFilesPage(c, { bucketCount: 2, pageLength: 1, pageRows: 1000, folderNames: [], files: 1, bytes: 10 });
+  assert.deepEqual(c.prefixes, []);
+  assert.equal(c.bucketIndex, 1);
+  assert.equal(c.prefixStarted, null);
+  assert.equal(c.phase, "files", "there is another bucket to do");
+
+  // The next bucket starts its own walk at its own root.
+  const next = startPrefixWalk(c, "jhas");
+  assert.deepEqual(next, { prefix: "", offset: 0 });
+  assert.equal(c.prefixStarted, "jhas");
+  c = afterFilesPage(c, { bucketCount: 2, pageLength: 0, pageRows: 1000, folderNames: [], files: 0, bytes: 0 });
+  assert.equal(c.bucketIndex, 2);
+  assert.equal(c.phase, "manifest", "the last bucket hands the run to the manifest");
+});
+
+test("a page cut short by the budget resumes where it stopped", () => {
+  let c = newRunCursor("2026-09-05T02:00:00.000Z");
+  c.phase = "files";
+  startPrefixWalk(c, "reports");
+
+  c = pausePage(c, 7, 7, 700);
+  assert.equal(c.pageDone, 7);
+  assert.equal(c.files, 7);
+  assert.equal(c.bytes, 700);
+  // Nothing else moved: the same page is listed again at the same offset,
+  // and the first seven objects are skipped rather than uploaded twice.
+  assert.deepEqual(c.prefixes, [{ prefix: "", offset: 0 }]);
+  assert.equal(c.bucketIndex, 0);
+
+  // Finishing that page clears the marker, and only the objects done in
+  // this second half are added.
+  c = afterFilesPage(c, { bucketCount: 1, pageLength: 12, pageRows: 1000, folderNames: [], files: 5, bytes: 500 });
+  assert.equal(c.pageDone, 0);
+  assert.equal(c.files, 12);
+  assert.equal(c.bytes, 1200);
+});
+
+// ── Reading a cursor back out of the database ────────────────────────────
+
+test("a cursor read back out of jsonb is filled in rather than trusted", () => {
+  const c = reviveCursor({
+    phase: "files", bucketIndex: 1, files: 40, bytes: 900,
+    prefixes: [{ prefix: "j-1/", offset: 1000 }],
+    rows: { jobs: 12 }, parts: { jobs: ["jobs.01.json.gz"] },
+    startedAt: "2026-09-05T02:00:00.000Z"
+  }, "2026-09-05T09:00:00.000Z");
+  assert.equal(c.phase, "files");
+  assert.equal(c.startedAt, "2026-09-05T02:00:00.000Z", "the run's own start, not this slice's");
+  assert.deepEqual(c.prefixes, [{ prefix: "j-1/", offset: 1000 }]);
+  assert.equal(c.rows.jobs, 12);
+  // Everything the writing slice did not have is present and harmless.
+  assert.deepEqual(c.index, { jobs: [], clients: [], tickets: [], jhas: [], reports: [] });
+  assert.equal(c.tableIndex, 0);
+  assert.equal(c.lastKey, null);
+  assert.equal(c.pageDone, 0);
+
+  // An empty cursor — a run that has only just been queued — is a fresh one.
+  const fresh = reviveCursor(null, "2026-09-05T09:00:00.000Z");
+  assert.deepEqual(fresh, newRunCursor("2026-09-05T09:00:00.000Z"));
+  assert.deepEqual(reviveCursor({}, "2026-09-05T09:00:00.000Z"), fresh);
+});
+
+test("the counts the panel shows are the cursor's own", () => {
+  let c = newRunCursor("2026-09-05T02:00:00.000Z");
+  c = afterTablePart(c, { table: "jobs", tableCount: 2, rows: 120, partName: "jobs.01.json.gz", exhausted: true, lastKey: null, offset: 0 });
+  c = afterTablePart(c, { table: "tickets", tableCount: 2, rows: 340, partName: "tickets.01.json.gz", exhausted: true, lastKey: null, offset: 0 });
+  c.files = 9;
+  c.bytes = 12345;
+  const counts = countsOf(c);
+  assert.deepEqual(counts.rows, { jobs: 120, tickets: 340 });
+  assert.equal(counts.files, 9);
+  assert.equal(totalRows(counts), 460);
+  // A run with nothing recorded yet counts zero rather than throwing.
+  assert.equal(totalRows(null), 0);
+  assert.equal(totalRows({}), 0);
 });

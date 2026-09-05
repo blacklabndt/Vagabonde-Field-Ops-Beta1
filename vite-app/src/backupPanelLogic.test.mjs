@@ -177,7 +177,22 @@ test("the reason a connection failed survives the reload that follows it", () =>
   assert.ok(src.includes("<ErrorBox>{outcomeError}</ErrorBox>"), "the outcome must be on the screen");
   // …and nothing inside load() may clear it: load's success handler ends with
   // setError(""), which is exactly what swallowed the reason before.
-  const load = /const load = useCallback\(\(\) => \{([\s\S]*?)\n  \}, \[\]\);/.exec(src);
+  const load = /const load = useCallback\(\([^)]*\) => \{([\s\S]*?)\n  \}, \[\]\);/.exec(src);
   assert.ok(load, "load() should still be a useCallback with no dependencies");
   assert.ok(!load[1].includes("setOutcomeError"), "load() must never clear the callback's own message");
+});
+
+// The same trick, for the same kind of mistake one screen further on: the
+// settings read is now on a timer while a run is in flight, and it used to
+// refill the schedule boxes every time it succeeded. That would rewrite what
+// the Admin is halfway through typing, every few seconds, from the server.
+// The boxes are filled once at load and again by a Save, and nowhere else.
+test("a refresh of the backup state does not rewrite the schedule boxes", () => {
+  const src = readFileSync(new URL("./components/backupPanel.jsx", import.meta.url), "utf8");
+  const load = /const load = useCallback\(\(([^)]*)\) => \{([\s\S]*?)\n  \}, \[\]\);/.exec(src);
+  assert.ok(load, "load() should still be a useCallback with no dependencies");
+  assert.match(load[1], /seed/, "load() takes a flag saying whether to refill the form");
+  assert.match(load[2], /if \(seed\) \{[\s\S]*setForm\(/, "the only setForm in load() is behind that flag");
+  // Exactly two callers seed: the mount effect and the save.
+  assert.equal((src.match(/load\(true\)/g) || []).length, 2);
 });
