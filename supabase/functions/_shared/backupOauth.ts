@@ -14,7 +14,12 @@
 
 export const NONCE_MS = 10 * 60 * 1000;
 
-const PROVIDERS: string[] = ["google", "microsoft", "dropbox"];
+// The same three as drive.ts's PROVIDERS and the panel's BACKUP_PROVIDERS,
+// written out a third time because this file imports nothing. Exported so
+// backupShared.test.mjs can hold the three copies against each other: a
+// provider added to one list and not the others is a Connect button whose
+// callback answers 404.
+export const PROVIDERS: string[] = ["google", "microsoft", "dropbox"];
 
 // ".../backup-oauth/google" — the last segment, and only when it names a
 // provider we know. The function's own name is not one, so a bare POST to
@@ -61,6 +66,33 @@ export function credentialsFrom(
     );
   }
   return { id, secret };
+}
+
+// What the Admin is shown when the drive itself turned the connection away.
+//
+// drive.ts's ok() throws "<what> failed (<status>): <up to 400 characters of
+// the provider's own response body>". That body is a JSON error blob at best
+// and it has no business travelling in a redirect's query string, where a
+// person reads it out of the address bar and a browser keeps it in history —
+// so a message of that shape is answered with a sentence written here, which
+// names the step and the status because that is the part anybody can act on.
+// The raw message still goes to function_errors, which is where the
+// provider's own words belong. Anything not of that shape is already this
+// app's own writing (an incomplete registration, a missing refresh token, a
+// refused nonce) and is passed through untouched.
+export function providerRefusal(message: string): string {
+  const said = String(message ?? "");
+  const m = /^(.+?) failed \((\d{3})\):/.exec(said);
+  if (!m) return said;
+  const step = m[1];
+  const status = Number(m[2]);
+  if (status === 401 || status === 403) {
+    return `The drive refused the connection (${step}, ${status}). Check that provider's client ID and client secret on the Admin screen, then press Connect again.`;
+  }
+  if (status === 429 || status >= 500) {
+    return `The drive was too busy to finish the connection (${step}, ${status}). Press Connect again in a minute.`;
+  }
+  return `The drive refused the connection (${step}, ${status}). The provider's own words are in the app's error log.`;
 }
 
 // "" when the callback may proceed; otherwise the sentence the Admin sees.

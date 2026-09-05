@@ -32,8 +32,11 @@ import {
 } from "../../supabase/functions/_shared/drive.ts";
 
 import {
-  NONCE_MS, providerInPath, callbackUri, credentialsFrom, nonceRefusal
+  NONCE_MS, PROVIDERS as OAUTH_PROVIDERS, providerInPath, callbackUri,
+  credentialsFrom, nonceRefusal, providerRefusal
 } from "../../supabase/functions/_shared/backupOauth.ts";
+
+import { BACKUP_PROVIDERS } from "./backupPanelLogic.js";
 
 const ROOT = new URL("../../", import.meta.url);
 const read = rel => readFileSync(new URL(rel, ROOT), "utf8");
@@ -726,6 +729,69 @@ test("credentials come out of the row by provider, and an incomplete pair is ref
   assert.throws(() => credentialsFrom(row, "microsoft"), /client secret|registration/i);
   assert.throws(() => credentialsFrom(row, "dropbox"), /client ID|registration/i);
   assert.throws(() => credentialsFrom({}, "google"), /registration/i);
+});
+
+test("the three provider lists are one list written three times", () => {
+  // drive.ts knows how to talk to them, backupOauth.ts decides whether a
+  // callback path names one, and the panel draws a Connect button per name.
+  // None of the three may import the others (two are erasable TypeScript
+  // read by Deno, one is browser JavaScript), so the copies are held level
+  // here instead: a provider added to drive.ts alone is a drive the callback
+  // answers 404 for, and one added to the panel alone is a button that
+  // cannot start.
+  assert.deepEqual(OAUTH_PROVIDERS, PROVIDERS);
+  assert.deepEqual(BACKUP_PROVIDERS, PROVIDERS);
+});
+
+test("the callback spends the nonce it was handed and no other", () => {
+  // Nulling the nonce on the settings row's id alone meant that any GET of
+  // the callback address — a crawler, a stranger, a stale link — cleared the
+  // nonce the Admin's Connect had just minted, and Connect could never
+  // finish. The function is read back here because the fix is a filter on an
+  // update, which no pure function can hold.
+  const src = read("supabase/functions/backup-oauth/index.ts");
+  const updates = [...src.matchAll(/\.update\(\{([^{}]*backup_oauth_state: null[^{}]*)\}\)([^;]*);/g)];
+  assert.equal(updates.length, 2, "the nonce is nulled in exactly two places: disconnect, and spending it");
+  for (const [, body, filters] of updates) {
+    // Disconnect is an Admin's own POST and lets go of the whole connection,
+    // so it clears the row's nonce unconditionally and rightly.
+    if (/backup_refresh_token: null/.test(body)) continue;
+    assert.match(filters, /\.eq\("backup_oauth_state",/,
+      "the callback may spend only the nonce actually presented to it");
+  }
+  // And both callback paths — the consent screen's Cancel and the real
+  // return — go through that one door.
+  assert.equal((src.match(/await spendNonce\(/g) ?? []).length, 2);
+});
+
+test("a drive's own refusal is retold rather than repeated into the address bar", () => {
+  // ok() in drive.ts throws "<what> failed (<status>): <up to 400 characters
+  // of the provider's response body>". That body rides the redirect's why=
+  // into an address bar and a browser history if it is passed through, so
+  // the shape is recognised and answered in this app's own words.
+  const raw = 'google token exchange failed (400): {"error":"invalid_grant","error_description":"Bad Request"}';
+  const said = providerRefusal(raw);
+  assert.ok(!said.includes("invalid_grant"), "the provider's body must not survive");
+  assert.match(said, /google token exchange/);
+  assert.match(said, /400/);
+
+  // 401/403 is the registration, and says so.
+  assert.match(providerRefusal("OneDrive account failed (401): {}"), /client ID and client secret/i);
+  assert.match(providerRefusal("Dropbox folder failed (403): nope"), /client ID and client secret/i);
+  // Busy is worth trying again; a 400 is not.
+  assert.match(providerRefusal("Google Drive folder failed (503): <html>busy</html>"), /again in a minute/i);
+  assert.match(providerRefusal("microsoft token exchange failed (429): slow down"), /again in a minute/i);
+  assert.ok(!providerRefusal("Google Drive folder failed (503): <html>busy</html>").includes("<html>"));
+
+  // Everything the app wrote itself is already a sentence and is left alone.
+  for (const own of [
+    "That connection link wasn't the one this app started. Press Connect again.",
+    "The drive sent us back without an authorisation code.",
+    "google sent an access token but no refresh token, so the connection would stop working within the hour."
+  ]) {
+    assert.equal(providerRefusal(own), own);
+  }
+  assert.equal(providerRefusal(""), "");
 });
 
 test("the nonce has to be the one we minted", () => {

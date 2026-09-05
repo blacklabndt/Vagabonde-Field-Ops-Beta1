@@ -8,6 +8,7 @@
 
 import test from "node:test";
 import assert from "node:assert/strict";
+import { readFileSync } from "node:fs";
 import {
   BACKUP_PROVIDERS, PROVIDER_LABEL,
   redirectUriFor, backupSettingsPatch, readBackupOutcome
@@ -157,4 +158,26 @@ test("no backup query at all means there is nothing to say", () => {
 test("an outcome word we don't know is treated as a failure, not as success", () => {
   const out = readBackupOutcome("?backup=sideways");
   assert.equal(out.outcome, "failed");
+});
+
+// ── The one thing about the panel itself that can be read off the source ──
+// The component needs a browser to run, but the mistake this guards against
+// is visible in the text: the reason a connection failed was put in the same
+// state that the settings read clears the instant it succeeds — and that read
+// is started by the very effect that wrote the reason. The Admin was left
+// looking at "No drive connected." with nothing said about why.
+
+test("the reason a connection failed survives the reload that follows it", () => {
+  const src = readFileSync(new URL("./components/backupPanel.jsx", import.meta.url), "utf8");
+  // The outcome has a state of its own…
+  assert.match(src, /const \[outcomeError, setOutcomeError\] = useState\(""\)/);
+  // …the callback's failure is written to it…
+  assert.match(src, /else setOutcomeError\(why \|\|/);
+  // …it is rendered…
+  assert.ok(src.includes("<ErrorBox>{outcomeError}</ErrorBox>"), "the outcome must be on the screen");
+  // …and nothing inside load() may clear it: load's success handler ends with
+  // setError(""), which is exactly what swallowed the reason before.
+  const load = /const load = useCallback\(\(\) => \{([\s\S]*?)\n  \}, \[\]\);/.exec(src);
+  assert.ok(load, "load() should still be a useCallback with no dependencies");
+  assert.ok(!load[1].includes("setOutcomeError"), "load() must never clear the callback's own message");
 });

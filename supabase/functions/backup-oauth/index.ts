@@ -24,7 +24,7 @@
 import { authorizeUrl, exchangeCode, makeDrive, PROVIDERS } from "../_shared/drive.ts";
 import { BACKUP_ROOT_NAME } from "../_shared/backupManifest.ts";
 import { nextRunAt } from "../_shared/backupSchedule.ts";
-import { callbackUri, credentialsFrom, nonceRefusal, providerInPath } from "../_shared/backupOauth.ts";
+import { callbackUri, credentialsFrom, nonceRefusal, providerInPath, providerRefusal } from "../_shared/backupOauth.ts";
 import { adminClient, corsHeaders, json, logError, requireAdmin } from "../_shared/backupCommon.ts";
 
 // Everything the two doors read out of the one settings row. Selected by
@@ -65,6 +65,24 @@ const appBaseUrl = (settings: Settings): string =>
 // back from a consent screen, and everything they hit is worth a line.
 const quiet = (message: string): Error => Object.assign(new Error(message), { quiet: true });
 const isQuiet = (e: unknown): boolean => !!(e as { quiet?: boolean })?.quiet;
+
+// Spend the nonce that was actually presented, and only that one.
+//
+// Nulling it on `id` alone was a door held open by anyone who knew the
+// callback address: a crawler, a stranger, a stale link — every GET cleared
+// the nonce the Admin's Connect had minted seconds earlier, so the real
+// callback arrived to find nothing to compare against and no connection
+// could ever be completed while that traffic continued. Matching on the
+// value keeps what the unconditional write was for: the second arrival of
+// the same callback URL finds the nonce gone and is refused.
+async function spendNonce(db: ReturnType<typeof adminClient>, presented: string): Promise<void> {
+  // An empty presentation matches nothing — nonceRefusal refuses it anyway —
+  // and there is no reason to write the row for it.
+  if (!presented) return;
+  await db.from("app_settings")
+    .update({ backup_oauth_state: null, backup_oauth_state_at: null })
+    .eq("id", true).eq("backup_oauth_state", presented);
+}
 
 Deno.serve(async (req) => {
   if (req.method === "OPTIONS") return new Response("ok", { headers: corsHeaders });
@@ -157,8 +175,9 @@ async function callback(provider: string, url: URL): Promise<Response> {
   try {
     // The Admin pressed Cancel on the consent screen. Not an error to log.
     if (url.searchParams.get("error")) {
-      await db.from("app_settings")
-        .update({ backup_oauth_state: null, backup_oauth_state_at: null }).eq("id", true);
+      // The Admin's own cancellation carries the state they were sent out
+      // with, so it spends that nonce and nothing else.
+      await spendNonce(db, url.searchParams.get("state") ?? "");
       return home("backup=denied");
     }
 
@@ -171,9 +190,9 @@ async function callback(provider: string, url: URL): Promise<Response> {
       ? Date.parse(String(settings.backup_oauth_state_at)) : NaN;
     // Spend the nonce before doing anything with it, so a re-opened callback
     // URL — a browser restoring tabs, a link in somebody's history — cannot
-    // run the exchange a second time.
-    await db.from("app_settings")
-      .update({ backup_oauth_state: null, backup_oauth_state_at: null }).eq("id", true);
+    // run the exchange a second time. Only the nonce presented here is spent;
+    // a stranger's GET must not clear one minted for somebody else.
+    await spendNonce(db, state);
     const refusal = nonceRefusal(expected as string | null, state, mintedAt, Date.now());
     if (refusal) throw quiet(refusal);
 
@@ -212,9 +231,13 @@ async function callback(provider: string, url: URL): Promise<Response> {
     return home("backup=connected");
   } catch (e) {
     const message = (e as Error).message;
+    // function_errors gets the message as it was thrown — the provider's own
+    // body and all, which is the whole use of a log.
     if (!isQuiet(e)) await logError("backup-oauth", message, { provider });
-    // The reason travels in the query string so the panel can say it; it is
-    // this function's own words, never the provider's raw body.
-    return home(`backup=failed&why=${encodeURIComponent(message.slice(0, 300))}`);
+    // The reason travels in the query string so the panel can say it, and it
+    // is this app's own words: providerRefusal turns a drive's refusal into a
+    // written sentence, so the up-to-400 characters of response body that
+    // drive.ts's ok() carries never reach an address bar.
+    return home(`backup=failed&why=${encodeURIComponent(providerRefusal(message).slice(0, 300))}`);
   }
 }

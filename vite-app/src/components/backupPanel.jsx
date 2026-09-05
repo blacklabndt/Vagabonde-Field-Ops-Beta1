@@ -39,6 +39,12 @@ export function AutomaticBackupPanel() {
   const [state, setState] = useState(null);
   const [loadState, setLoadState] = useState("loading"); // loading | ready | failed
   const [error, setError] = useState("");
+  // How the last connection ended, as the drive's own redirect reported it.
+  // It is kept apart from `error` on purpose: `load()` clears `error` the
+  // moment a read succeeds, and the read that follows the callback always
+  // succeeds — so a reason put in `error` was wiped a heartbeat later and the
+  // Admin was left reading "No drive connected." with nothing said about why.
+  const [outcomeError, setOutcomeError] = useState("");
   const [notice, setNotice] = useState("");
   const [saving, setSaving] = useState(false);
   const [connecting, setConnecting] = useState("");
@@ -84,7 +90,7 @@ export function AutomaticBackupPanel() {
     if (!outcome) return;
     if (outcome === "connected") setNotice("The drive is connected. The first backup runs at the next scheduled time.");
     else if (outcome === "denied") setNotice("The drive was not connected: the consent screen was cancelled.");
-    else setError(why || "The drive couldn't be connected.");
+    else setOutcomeError(why || "The drive couldn't be connected.");
     window.history.replaceState({}, "", window.location.pathname + (rest ? `?${rest}` : ""));
     load();
   }, [load]);
@@ -110,6 +116,9 @@ export function AutomaticBackupPanel() {
   const connect = async provider => {
     setConnecting(provider);
     setError("");
+    // A fresh attempt: how the last one ended is no longer the answer.
+    setOutcomeError("");
+    setNotice("");
     try {
       window.location.assign(await Db.backupOauthStartUrl(provider));
     } catch (e) {
@@ -120,6 +129,8 @@ export function AutomaticBackupPanel() {
 
   const disconnect = async () => {
     setError("");
+    setOutcomeError("");
+    setNotice("");
     try { await Db.disconnectBackup(); load(); }
     catch (e) { setError(e.message || "Couldn't disconnect the drive."); }
   };
@@ -142,6 +153,11 @@ export function AutomaticBackupPanel() {
         connect an account that belongs to the business.
       </div>
 
+      {/* Two boxes, on purpose. The first is how the connection attempt ended
+          — it arrived on the address bar and is only ever cleared by pressing
+          Connect or Disconnect again. The second is this screen's own reading
+          and saving, which clears itself. */}
+      <ErrorBox>{outcomeError}</ErrorBox>
       <ErrorBox>{error}</ErrorBox>
       {notice && <div style={{ fontSize: 13, marginBottom: 12, color: "var(--color-accent)" }}>{notice}</div>}
 
