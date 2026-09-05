@@ -86,8 +86,22 @@ export function providerRefusal(message: string): string {
   if (!m) return said;
   const step = m[1];
   const status = Number(m[2]);
-  if (status === 401 || status === 403) {
+  // Only the token exchange answers to the client ID and secret. A 401 or
+  // 403 on the step after it — the account, the folder — comes from a
+  // drive that took the sign-in and then refused the API call, which for
+  // Google is the Drive API not being enabled in the Cloud project (its
+  // body says so in as many words, and the first connection met exactly
+  // that): the credentials are fine and re-checking them helps nobody.
+  const registration = /token exchange/i.test(step);
+  if ((status === 401 || status === 403) && registration) {
     return `The drive refused the connection (${step}, ${status}). Check that provider's client ID and client secret on the Admin screen, then press Connect again.`;
+  }
+  if (status === 401 || status === 403) {
+    const apiOff = /has not been used in project|is disabled/i.test(said);
+    if (apiOff) {
+      return `Google signed you in but its Drive API is not enabled in your Cloud project (${step}, ${status}). Enable "Google Drive API" in the Google Cloud console for the project the registration lives in, wait a minute, then press Connect again.`;
+    }
+    return `The drive signed you in but refused the next call (${step}, ${status}). The provider's own words are in the app's error log on the Admin screen — usually an API that is not enabled for the registration, or a permission the registration does not grant.`;
   }
   if (status === 429 || status >= 500) {
     return `The drive was too busy to finish the connection (${step}, ${status}). Press Connect again in a minute.`;

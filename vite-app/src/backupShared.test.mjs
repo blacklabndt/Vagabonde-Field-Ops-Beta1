@@ -853,9 +853,16 @@ test("a drive's own refusal is retold rather than repeated into the address bar"
   assert.match(said, /google token exchange/);
   assert.match(said, /400/);
 
-  // 401/403 is the registration, and says so.
-  assert.match(providerRefusal("OneDrive account failed (401): {}"), /client ID and client secret/i);
-  assert.match(providerRefusal("Dropbox folder failed (403): nope"), /client ID and client secret/i);
+  // 401/403 on the token exchange is the registration, and says so.
+  assert.match(providerRefusal("google token exchange failed (401): {}"), /client ID and client secret/i);
+  assert.match(providerRefusal("dropbox token exchange failed (403): nope"), /client ID and client secret/i);
+  // 401/403 after the sign-in is the API, not the credentials — and Google's
+  // "not enabled" body is named for what it is, without the body itself.
+  const off = providerRefusal('Google Drive account failed (403): {"error":{"code":403,"message":"Google Drive API has not been used in project 1023 before or it is disabled. Enable it by visiting https://console…"}}');
+  assert.match(off, /Drive API is not enabled/);
+  assert.ok(!off.includes("console…") && !off.includes("1023"), "the body must not survive");
+  assert.match(providerRefusal("OneDrive account failed (401): {}"), /signed you in but refused the next call/i);
+  assert.ok(!providerRefusal("OneDrive account failed (401): {}").includes("client ID"));
   // Busy is worth trying again; a 400 is not.
   assert.match(providerRefusal("Google Drive folder failed (503): <html>busy</html>"), /again in a minute/i);
   assert.match(providerRefusal("microsoft token exchange failed (429): slow down"), /again in a minute/i);
