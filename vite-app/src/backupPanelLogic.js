@@ -1,0 +1,108 @@
+// The backup panel's arithmetic, kept out of the component so it can be
+// tested without a browser.
+//
+// Three questions, each with an expensive wrong answer:
+//
+//   · the redirect URI — it has to be character-for-character what the
+//     provider's own registration holds, and character-for-character what
+//     the callback rebuilds on the server, or the drive refuses at the door;
+//   · the settings patch — the panel can never see a stored client secret,
+//     so a blank box is the ordinary state, and treating blank as "erase"
+//     would break the connection on every save;
+//   · the query the drive sends the browser home with — read once, said
+//     once, and then off the address bar so a refresh does not repeat it.
+
+import { nextRunAt } from "./backupSchedule.js";
+
+export const BACKUP_PROVIDERS = ["google", "microsoft", "dropbox"];
+
+export const PROVIDER_LABEL = {
+  google: "Google Drive",
+  microsoft: "OneDrive",
+  dropbox: "Dropbox"
+};
+
+const FREQUENCIES = ["daily", "weekdays", "weekly", "monthly"];
+
+// The address the app is served from is the address a drive sends the Admin
+// back to. It is stored (Admin screen → App address) rather than guessed,
+// because the drive's registration has to hold the same string — but this
+// window's origin is what it almost always is, and saying so beats a blank
+// box. Anything unparseable falls back the same way: this is the panel's
+// display copy, and the server builds its own from the stored value.
+export function redirectUriFor(state, provider, fallbackOrigin) {
+  const configured = String((state && state.approval_base_url) || "").trim();
+  let origin = fallbackOrigin;
+  if (configured) {
+    try { origin = new URL(configured).origin; } catch { /* fall back to this window */ }
+  }
+  return `${origin}/backup/oauth/${provider}`;
+}
+
+// An empty box means "the default", which is not the same as zero: an
+// emptied "keep" is 14 backups, while a typed 0 is one. Anything that is
+// not a number at all is the default too.
+const clamp = (value, low, high, fallback) => {
+  if (value === null || value === undefined || String(value).trim() === "") return fallback;
+  const n = Math.trunc(Number(value));
+  if (!Number.isFinite(n)) return fallback;
+  return Math.min(high, Math.max(low, n));
+};
+
+// The columns a save from this screen is allowed to write. The connection's
+// own columns — provider, refresh token, account, folder — are the
+// callback's alone and are deliberately absent: a browser that could write
+// them could name a drive it does not own.
+export function backupSettingsPatch(form, nowMs) {
+  const f = form || {};
+  const frequency = FREQUENCIES.includes(f.frequency) ? f.frequency : "daily";
+  const weekday = clamp(f.weekday, 0, 6, 0);
+  const hour = clamp(f.hour, 0, 23, 0);
+  const keep = clamp(f.keep, 1, 365, 14);
+
+  const patch = {
+    id: true,
+    backup_frequency: frequency,
+    backup_weekday: weekday,
+    backup_hour: hour,
+    backup_keep: keep,
+    backup_client_id_google: String(f.clientIdGoogle || "").trim() || null,
+    backup_client_id_microsoft: String(f.clientIdMicrosoft || "").trim() || null,
+    backup_client_id_dropbox: String(f.clientIdDropbox || "").trim() || null,
+    updated_at: new Date(nowMs).toISOString()
+  };
+
+  for (const [field, column] of [
+    ["clientSecretGoogle", "backup_client_secret_google"],
+    ["clientSecretMicrosoft", "backup_client_secret_microsoft"],
+    ["clientSecretDropbox", "backup_client_secret_dropbox"]
+  ]) {
+    const typed = String(f[field] || "").trim();
+    if (typed) patch[column] = typed;
+  }
+
+  // The next due time is worked out here rather than left to the tick, so
+  // the line under the schedule changes the moment it is saved. The
+  // function's own copy of nextRunAt computes the same instant. With no
+  // drive connected there is nowhere for a run to go, so it stays null.
+  if (f.connected) patch.backup_next_run_at = nextRunAt({ frequency, weekday, hour }, nowMs);
+
+  return patch;
+}
+
+// What the callback redirected home with. `rest` is the rest of the query
+// string, so the panel can put the address bar back the way it found it
+// minus this one message.
+export function readBackupOutcome(search) {
+  const q = new URLSearchParams(search || "");
+  const raw = q.get("backup");
+  const why = q.get("why") || "";
+  q.delete("backup");
+  q.delete("why");
+  if (!raw) return { outcome: "", why: "", rest: q.toString() };
+  // An outcome this version does not recognise is a refusal, never a
+  // success: saying "connected" about something we cannot read would send
+  // an Admin away believing backups are running.
+  const outcome = ["connected", "denied", "failed"].includes(raw) ? raw : "failed";
+  return { outcome, why, rest: q.toString() };
+}

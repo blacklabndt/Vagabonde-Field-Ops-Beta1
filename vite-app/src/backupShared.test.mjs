@@ -31,6 +31,10 @@ import {
   FakeDrive, GoogleDrive, OneDrive, Dropbox, authorizeUrl, SCOPES, PROVIDERS
 } from "../../supabase/functions/_shared/drive.ts";
 
+import {
+  NONCE_MS, providerInPath, callbackUri, credentialsFrom, nonceRefusal
+} from "../../supabase/functions/_shared/backupOauth.ts";
+
 const ROOT = new URL("../../", import.meta.url);
 const read = rel => readFileSync(new URL(rel, ROOT), "utf8");
 
@@ -669,11 +673,89 @@ test("an unknown provider is refused rather than guessed at", () => {
   assert.throws(() => authorizeUrl("box", "id", "https://x/y", "n"), /provider/i);
 });
 
+// ── The connection's own doors ───────────────────────────────────────────
+// backup-oauth answers a browser that carries no token, so what stands in
+// for one is a nonce this app minted minutes earlier. These are the checks
+// that door is made of, with the network and the database taken out.
+
+test("the provider is the last segment of the callback's path, and only if we know it", () => {
+  assert.equal(providerInPath("/backup-oauth/google"), "google");
+  assert.equal(providerInPath("/functions/v1/backup-oauth/microsoft"), "microsoft");
+  assert.equal(providerInPath("/backup-oauth/dropbox/"), "dropbox");
+  // The function's own name is not a provider, so a bare POST is not a
+  // callback.
+  assert.equal(providerInPath("/backup-oauth"), "");
+  assert.equal(providerInPath("/functions/v1/backup-oauth"), "");
+  assert.equal(providerInPath("/backup-oauth/box"), "");
+  assert.equal(providerInPath("/backup-oauth/GOOGLE"), "");
+  assert.equal(providerInPath(""), "");
+});
+
+test("the callback URI is built from the stored app address, origin only", () => {
+  assert.deepEqual(callbackUri("https://ops.example.ca", "google"),
+    { uri: "https://ops.example.ca/backup/oauth/google", base: "https://ops.example.ca" });
+  assert.deepEqual(callbackUri("https://ops.example.ca/", "dropbox"),
+    { uri: "https://ops.example.ca/backup/oauth/dropbox", base: "https://ops.example.ca" });
+  assert.deepEqual(callbackUri("https://ops.example.ca/somewhere?x=1", "microsoft"),
+    { uri: "https://ops.example.ca/backup/oauth/microsoft", base: "https://ops.example.ca" });
+});
+
+test("the panel and the function build the same string from the same stored address", () => {
+  // The provider's registration holds one of these two and compares it with
+  // the other. They are computed in different languages on different
+  // machines; if they ever drift, every connection fails at the exchange.
+  const stored = "https://ops.example.ca/";
+  for (const p of PROVIDERS) {
+    assert.equal(callbackUri(stored, p).uri, `https://ops.example.ca/backup/oauth/${p}`);
+  }
+});
+
+test("with no app address stored the server refuses rather than guessing", () => {
+  assert.throws(() => callbackUri("", "google"), /App address/i);
+  assert.throws(() => callbackUri("   ", "google"), /App address/i);
+  assert.throws(() => callbackUri("ops.example.ca", "google"), /App address/i);
+});
+
+test("credentials come out of the row by provider, and an incomplete pair is refused", () => {
+  const row = {
+    backup_client_id_google: " gid ", backup_client_secret_google: " gsecret ",
+    backup_client_id_microsoft: "mid", backup_client_secret_microsoft: null,
+    backup_client_id_dropbox: null, backup_client_secret_dropbox: "dsecret"
+  };
+  assert.deepEqual(credentialsFrom(row, "google"), { id: "gid", secret: "gsecret" });
+  assert.throws(() => credentialsFrom(row, "microsoft"), /client secret|registration/i);
+  assert.throws(() => credentialsFrom(row, "dropbox"), /client ID|registration/i);
+  assert.throws(() => credentialsFrom({}, "google"), /registration/i);
+});
+
+test("the nonce has to be the one we minted", () => {
+  const now = Date.parse("2026-09-05T12:00:00Z");
+  const minted = now - 60_000;
+  assert.equal(nonceRefusal("abc", "abc", minted, now), "");
+  assert.match(nonceRefusal("abc", "xyz", minted, now), /wasn't the one this app started/);
+  // Nothing minted at all: a callback arriving out of nowhere, or a second
+  // one after the first spent it.
+  assert.match(nonceRefusal("", "abc", minted, now), /wasn't the one this app started/);
+  assert.match(nonceRefusal(null, "abc", minted, now), /wasn't the one this app started/);
+  // An empty presented value must never match an empty stored one.
+  assert.match(nonceRefusal("", "", minted, now), /wasn't the one this app started/);
+});
+
+test("the nonce goes stale at ten minutes", () => {
+  const now = Date.parse("2026-09-05T12:00:00Z");
+  assert.equal(NONCE_MS, 10 * 60 * 1000);
+  assert.equal(nonceRefusal("abc", "abc", now - NONCE_MS + 1000, now), "");
+  assert.match(nonceRefusal("abc", "abc", now - NONCE_MS - 1000, now), /more than ten minutes/);
+  // No mint time on the row is not "infinitely fresh".
+  assert.match(nonceRefusal("abc", "abc", 0, now), /more than ten minutes/);
+  assert.match(nonceRefusal("abc", "abc", NaN, now), /more than ten minutes/);
+});
+
 test("the shared modules read nothing from the world around them", () => {
   // They are imported by the node suite AND by Deno Edge Functions. An
   // import of supabase-js or a read of Deno.env in any of the three breaks
   // this file outright; the assertion is here so the reason is named.
-  for (const f of ["backupTables.ts", "backupManifest.ts", "drive.ts"]) {
+  for (const f of ["backupTables.ts", "backupManifest.ts", "drive.ts", "backupOauth.ts"]) {
     const src = read(`supabase/functions/_shared/${f}`);
     const imports = [...src.matchAll(/^import .*?from ["'](.+?)["']/gm)].map(m => m[1]);
     const allowed = f === "backupManifest.ts" ? ["./backupSchedule.ts"] : [];

@@ -2,6 +2,7 @@ import React, { useState, useEffect } from "react";
 import { Db } from "../db.js";
 import { Blueprint, Btn, Field, ErrorBox, Loading, TagX } from "./common.jsx";
 import { ArchiveDialog } from "./archiveDialog.jsx";
+import { AutomaticBackupPanel } from "./backupPanel.jsx";
 
 // Admin — every key and address the app needs to be fully alive, in one
 // screen, each with the instructions for getting it. The software ships to
@@ -119,6 +120,11 @@ export function AdminSetupScreen({ currentUser, onArchiveCleared }) {
             <option value="year">Archive a year</option>
             <option value="range">Archive a date range</option>
           </select>
+
+          {/* The other half of the same question: the year-end zip is a copy
+              taken by hand, this is one taken on a schedule to a drive of
+              the owner's own. */}
+          <AutomaticBackupPanel />
         </Blueprint>
 
         <Blueprint style={{ padding: "18px 20px" }}>

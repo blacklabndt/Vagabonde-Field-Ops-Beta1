@@ -31,7 +31,14 @@
     // /approve returned the app's sign-in screen while a fetch() of the same
     // URL correctly reached the Worker. Only a browser navigating there shows
     // it, which is exactly what a client rep does.
-    "run_worker_first": ["/approve", "/approve-ticket"],
+    //
+    // /backup/oauth/* is here for the same reason and was caught the same
+    // way: a drive redirecting the Admin back is a navigation, and without
+    // this line it landed on the app's own front page — cached at the edge,
+    // no less — instead of on the function that completes the connection.
+    // A POST to it reached the Worker perfectly well the whole time, which
+    // is exactly how the trap hides.
+    "run_worker_first": ["/approve", "/approve-ticket", "/backup/oauth/*"],
 
     // The app is a single page: every screen is state, not a route, and the
     // service worker already falls back to index.html for navigations. This

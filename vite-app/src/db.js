@@ -4,6 +4,7 @@ import { OfflineCache } from "./offlineCache.js";
 import { Toasts } from "./toastBus.js";
 import { OfflineQueue, isNetworkError } from "./offlineQueue.js";
 import { RESPONSE_ROW_CAP, fetchAllPages, fetchAllKeyset } from "./paging.js";
+import { backupSettingsPatch } from "./backupPanelLogic.js";
 
 // Thin data-access layer over the tables that are wired to Supabase so far
 // (see README "What's wired"). Screens call these instead of touching
@@ -1693,6 +1694,45 @@ export const Db = {
     if (error) throw await fnError(error);
     if (data && data.error) throw new Error(data.error);
     return data;
+  },
+
+  // ── Automatic backup ───────────────────────────────────────────────────
+  // Everything the panel is allowed to know, in one Admin-only definer RPC.
+  // The refresh token and the three client secrets are in the same row and
+  // are deliberately not in the answer — backup_state() reports them as
+  // has_secret_google and friends, so a browser can say "a secret is set"
+  // without ever holding one.
+  async backupState() {
+    const { data, error } = await sbClient.rpc("backup_state");
+    if (error) throw error;
+    return data || {};
+  },
+
+  // The schedule and the three app registrations. A blank secret field
+  // means "leave the stored one alone", never "erase it": the panel cannot
+  // show a stored secret, so an empty box is the normal state and treating
+  // it as a deletion would silently break the connection on every save.
+  // backupSettingsPatch is where that lives, and where it is tested.
+  async saveBackupSettings(form) {
+    const { error } = await sbClient.from("app_settings").upsert(backupSettingsPatch(form, Date.now()));
+    if (error) throw error;
+  },
+
+  // The consent URL is minted server-side, because it carries a nonce that
+  // only the function may write. The panel sends the browser to what comes
+  // back; the drive sends it to /backup/oauth/<provider> afterwards.
+  async backupOauthStartUrl(provider) {
+    const { data, error } = await sbClient.functions.invoke("backup-oauth", { body: { action: "start", provider } });
+    if (error) throw await fnError(error);
+    if (data && data.error) throw new Error(data.error);
+    if (!data || !data.url) throw new Error("The drive didn't give a sign-in address.");
+    return data.url;
+  },
+
+  async disconnectBackup() {
+    const { data, error } = await sbClient.functions.invoke("backup-oauth", { body: { action: "disconnect" } });
+    if (error) throw await fnError(error);
+    if (data && data.error) throw new Error(data.error);
   },
 
   async sendTicketApproval({ ticketId, to, cc }) {
@@ -3674,6 +3714,10 @@ const SAVE_MESSAGES = {
   // Email setup
   saveAppSettings: "Settings saved",
   sendTestEmail: "Test email sent",
+
+  // Automatic backup
+  saveBackupSettings: "Backup settings saved",
+  disconnectBackup: "Drive disconnected",
 
   // Rates
   setRateLine: "Rate saved",

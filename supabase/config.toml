@@ -452,3 +452,25 @@ verify_jwt = false
 # quietly hand it back.
 [functions.send-ticket-approval]
 verify_jwt = true
+
+# The drive connection's callback. The provider redirects a browser back to
+# /backup/oauth/<provider> and that browser carries no bearer token, so
+# verification has to be off or the Admin sees a 401 instead of a connected
+# drive. The function checks its own doors: POST reads the caller's profile
+# and demands Admin before it parses a byte of their body, and the GET
+# callback acts only on a nonce it minted itself, which is spent the moment
+# it is read.
+[functions.backup-oauth]
+verify_jwt = false
+
+# The other two are off for the same kind of reason and guard themselves the
+# same way. backup-run answers the pg_cron tick, which pg_net sends with no
+# Authorization header at all, and backup-restore answers a slice kick from
+# backup-run itself; both check x-internal-secret or an Admin's own profile
+# before they parse anything. Pinning it here keeps a later CLI deploy from
+# turning verification on and 401ing every tick.
+[functions.backup-run]
+verify_jwt = false
+
+[functions.backup-restore]
+verify_jwt = false

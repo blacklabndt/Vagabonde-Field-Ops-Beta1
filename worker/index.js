@@ -65,6 +65,19 @@ export default {
       return approvalPage(request, url, payload);
     }
 
+    // /backup/oauth/<provider>?code=… — where a drive sends the Admin back
+    // after they have said yes. Proxied for the same reason /approve is:
+    // the provider's app registration names an address on this domain, and
+    // the function that has to answer it lives on Supabase's. Unlike
+    // /approve this one answers with a redirect rather than a page, so the
+    // Location header is what has to survive the trip.
+    if (url.pathname.startsWith("/backup/oauth/")) {
+      if (request.method !== "GET" && request.method !== "HEAD") {
+        return new Response("Method not allowed", { status: 405, headers: { "Allow": "GET, HEAD" } });
+      }
+      return oauthCallback(request, url);
+    }
+
     return env.ASSETS.fetch(request);
   }
 };
@@ -137,14 +150,62 @@ async function approvalPage(request, url, payload) {
   });
 }
 
+// The callback proxy. Same allowlist as the approval page — this route
+// shares an origin with the app, so a browser attaches whatever it holds
+// for that origin, and Cookie and Authorization have no business going to
+// a third party. The one difference is the answer: a 302 back into the app,
+// whose Location is passed through unchanged.
+async function oauthCallback(request, url) {
+  const provider = url.pathname.slice("/backup/oauth/".length).replace(/\/+$/, "");
+  if (!/^[a-z]+$/.test(provider)) return new Response("Not found", { status: 404 });
+
+  const headers = new Headers();
+  for (const [k, v] of request.headers) {
+    if (FORWARD.has(k.toLowerCase())) headers.set(k, v);
+  }
+
+  let upstream;
+  try {
+    upstream = await fetch(FUNCTIONS_ORIGIN + "/backup-oauth/" + provider + url.search, {
+      method: request.method,
+      headers,
+      redirect: "manual",
+      signal: AbortSignal.timeout(UPSTREAM_TIMEOUT_MS)
+    });
+  } catch {
+    return htmlError("The drive couldn't be connected right now. Please try again in a moment.");
+  }
+
+  const location = upstream.headers.get("Location");
+  if (upstream.status >= 300 && upstream.status < 400 && location) {
+    return new Response(null, {
+      status: 302,
+      headers: { "Location": location, "Cache-Control": "no-store", "Referrer-Policy": "no-referrer" }
+    });
+  }
+
+  // Anything that is not a redirect is the function refusing before it got
+  // far enough to know where to send them.
+  const body = await upstream.text().catch(() => "");
+  return htmlError(body.slice(0, 300) || "The drive couldn't be connected.");
+}
+
+// Everything that reaches htmlError is meant to be this app's own words —
+// the function's plain-text refusal, or a sentence written above. Escaped
+// anyway: the day one of them carries something a caller supplied, the
+// escape is what stands between that and a script tag on our own origin.
+const escapeHtml = s => String(s ?? "")
+  .replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;")
+  .replace(/"/g, "&quot;").replace(/'/g, "&#39;");
+
 const htmlError = message => new Response(
   `<!DOCTYPE html><html lang="en"><head><meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>Ticket approval · VagaboNDE</title>
+<title>VagaboNDE</title>
 <style>body{margin:0;min-height:100vh;display:grid;place-items:center;background:#d9dcde;
 color:#1d1f20;font-family:Helvetica,Arial,sans-serif;padding:24px}
 .c{max-width:460px;background:#fff;border:1px solid rgba(29,31,32,.55);padding:26px 24px}
 h1{font-size:22px;margin:0 0 8px}p{color:#6b6d6e;font-size:14px;margin:0}</style></head>
-<body><div class="c"><h1>Something went wrong</h1><p>${message}</p></div></body></html>`,
+<body><div class="c"><h1>Something went wrong</h1><p>${escapeHtml(message)}</p></div></body></html>`,
   { status: 502, headers: { "Content-Type": "text/html; charset=utf-8" } }
 );
