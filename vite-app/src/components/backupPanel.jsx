@@ -1,6 +1,6 @@
 import React, { useState, useEffect, useCallback, useRef } from "react";
 import { Db } from "../db.js";
-import { Blueprint, Btn, Dialog, Field, ErrorBox, Loading, TagX } from "./common.jsx";
+import { Btn, Dialog, Field, ErrorBox, Loading, TagX } from "./common.jsx";
 import {
   BACKUP_PROVIDERS, PROVIDER_LABEL, redirectUriFor, readBackupOutcome,
   isBeforeRestore, restoreNameMatches, failedRunAdvice
@@ -105,6 +105,11 @@ const POLL_IDLE_MS = 20000;
 // A nudge is a whole function invocation, so it is not sent on every poll.
 // The slice chain does the work; this is for when the chain drops.
 const NUDGE_EVERY_MS = 15000;
+
+// The panel sits inside the Archive block's own box: a rule above it, not a
+// second box — the two are one subject, keeping the work and keeping the
+// app.
+const SECTION_STYLE = { marginTop: 18, paddingTop: 16, borderTop: "1px solid var(--color-divider)" };
 
 export function AutomaticBackupPanel() {
   const [state, setState] = useState(null);
@@ -287,14 +292,14 @@ export function AutomaticBackupPanel() {
   };
 
   if (loadState === "loading") {
-    return <Blueprint style={{ padding: "18px 20px", marginTop: 16 }}><Loading label="Loading the backup settings…" /></Blueprint>;
+    return <div style={SECTION_STYLE}><Loading label="Loading the backup settings…" /></div>;
   }
 
   const s = state || {};
   const connected = !!s.connected;
 
   return (
-    <Blueprint style={{ padding: "18px 20px", marginTop: 16 }}>
+    <div style={SECTION_STYLE}>
       <div style={SECTION_TITLE}>Automatic backup</div>
       <div style={SECTION_HELP}>
         A copy of everything &mdash; every job, ticket, assessment, report and their PDFs &mdash; written to one
@@ -589,7 +594,7 @@ export function AutomaticBackupPanel() {
           {saving ? "Saving…" : "Save backup settings"}
         </Btn>
       </div>
-    </Blueprint>
+    </div>
   );
 }
 
