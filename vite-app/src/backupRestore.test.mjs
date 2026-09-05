@@ -19,7 +19,8 @@ import {
   partsForTable, withoutAuthEmail, chatInsertRows, chatReplyPatches,
   settingsRestorePatch, ticketsForLoad, approvedTotalPatches, activityPatches,
   contentTypeFor, typedNameMatches, tooNewRefusal, accountFailureNote,
-  withoutMissingProfiles, wantsSetPasswordMail, droppedAccountsNote, quotesThatLanded,
+  withoutMissingProfiles, wantsSetPasswordMail, droppedAccountsNote, setPasswordMailNote,
+  quotesThatLanded,
   rowsWithLiveParent,
   JOB_RESTORE_KIND, JOB_RESTORE_PHASES, MAX_RESTORE_NOTES,
   newJobRestoreCursor, reviveJobRestoreCursor, isJobRestoreCursor, jobRestoreCounts,
@@ -84,6 +85,9 @@ test("a cursor read back out of jsonb is filled in rather than trusted", () => {
   // Everything the writing slice did not have is present and harmless.
   assert.deepEqual(c.accountsMade, []);
   assert.deepEqual(c.accountsFailed, []);
+  // A run raised before this field existed has none of it, and reading it as
+  // undefined would throw on the first bounced email.
+  assert.deepEqual(c.mailsFailed, []);
   assert.equal(c.fileOffset, 0);
   assert.equal(c.activityPart, 0);
   assert.equal(c.skipped, 0);
@@ -390,6 +394,53 @@ test("the people left out are named on the run itself", () => {
   const two = droppedAccountsNote(["p1", "p2"], ["a: x", "b: y"]);
   assert.match(two, /2 accounts could not be re-created/);
   assert.match(two, /profile ids: p1, p2/);
+});
+
+test("an account that only missed its email is not written down as an account that was lost", () => {
+  // The two outcomes share `accountsFailed`, and the error log is where the
+  // difference shows: an Admin reading a freshly restored database's error
+  // log saw "Account not restored" once per bounced email — on a 44-account
+  // roster, the whole company, every one of them actually there.
+  assert.equal(setPasswordMailNote([]), "", "every email went out: nothing is written at all");
+  assert.equal(setPasswordMailNote(null), "");
+  const one = setPasswordMailNote(["sam@example.ca: the account was re-created but the email did not go out."]);
+  assert.match(one, /^Set-password email not sent:/);
+  assert.match(one, /1 account was restored/);
+  assert.doesNotMatch(one, /not restored:/, "the words the dropped accounts get, and only them");
+  assert.match(one, /sam@example\.ca/);
+  const many = setPasswordMailNote(["a: x", "b: y", "c: z"]);
+  assert.match(many, /3 accounts were restored/);
+  // One line for all of them, and every one of them named in it.
+  assert.match(many, /a: x · b: y · c: z/);
+});
+
+test("the mail failures are marked as they are pushed, not guessed at afterwards", () => {
+  const source = read("supabase/functions/backup-restore/index.ts");
+  // The order the two kinds were pushed in cannot say which is which, so the
+  // one that is only a bounced email says so on the cursor as well as on the
+  // panel's list.
+  assert.match(source, /c\.accountsFailed\.push\(note\);\s*\n\s*c\.mailsFailed\.push\(note\);/);
+  assert.match(source, /const mailOnly = new Set\(r\.mailsFailed\);/);
+  assert.match(source, /if \(mailOnly\.has\(failure\)\) continue;/);
+  assert.match(source, /`Account not restored: \$\{failure\}`/);
+  assert.match(source, /const mails = setPasswordMailNote\(r\.mailsFailed\);/);
+  // The panel's note is unchanged: it is still every failure, and it is
+  // still gated on the accounts that were actually dropped.
+  assert.match(source, /droppedAccountsNote\(\(c as RestoreCursor\)\.droppedProfileIds, \(c as RestoreCursor\)\.accountsFailed\)/);
+});
+
+test("a restore that raised its safety backup starts it rather than waiting for the cron", () => {
+  const source = read("supabase/functions/backup-restore/index.ts");
+  // The copy is inserted queued, and queued is not started. Nothing else in
+  // this function ever pokes backup-run, so the restore used to sit in its
+  // safety phase until the five-minute cron came round — and for ever on a
+  // project whose cron job is missing or aimed at another project.
+  assert.match(source, /kick\("backup-run", \{ action: "advance", runId: c\.safetyRunId \}, secret\)/);
+  // Unchained on purpose: the chain flag is a slice following its own
+  // heartbeat, and this is a queued run being started, where the cron may be
+  // starting the very same row in the same second. Unchained, backup-run's
+  // conditional claim settles that and only one slice takes the run.
+  assert.doesNotMatch(source, /kick\("backup-run",[^)]*chain/);
 });
 
 // ── Chat history's two passes ────────────────────────────────────────────

@@ -1041,7 +1041,7 @@ test("the chain that drives a backup asks for the run it just moved", () => {
   assert.match(why, /idempotent/);
 });
 
-test("a restore waiting on its safety backup is tended by the tick", () => {
+test("a restore waiting on its safety backup is tended by whichever slice moved the copy", () => {
   const source = read("supabase/functions/backup-run/index.ts");
   // While the safety copy is the run in flight the tick never reaches its
   // forward-to-a-restore branch — it returns after advancing its own kind —
@@ -1054,6 +1054,18 @@ test("a restore waiting on its safety backup is tended by the tick", () => {
   // And when the copy is finished the restore is kicked rather than left
   // for the next cron tick five minutes away.
   assert.match(source, /kick\("backup-restore",\s*\{\s*action:\s*"advance",\s*runId:[^}]*chain:\s*true\s*\}/);
+  // The tick is not the only thing that moves a safety copy: the copy's own
+  // chain, and the restore's kick that starts it, both come through
+  // advanceById. A copy finished there with nobody tending it left the
+  // restore waiting for the cron — for ever on a project that has none.
+  const byId = source.slice(
+    source.indexOf("async function advanceById"),
+    source.indexOf("async function queueRun")
+  );
+  assert.match(byId, /await tend\(db, run, secret\);/,
+    "the chain pays the same courtesy the tick does");
+  assert.equal((source.match(/await tend\(/g) ?? []).length, 4,
+    "the tick's three branches and the chain");
 });
 
 test("a slice that matched no row has lost the run and must stop writing", () => {

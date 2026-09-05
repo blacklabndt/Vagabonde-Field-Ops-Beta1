@@ -47,6 +47,13 @@ export interface RestoreCursor {
   accountIndex: number;
   accountsMade: string[];
   accountsFailed: string[];
+  // The notes in `accountsFailed` that are about a set-password email and
+  // not about an account. Both kinds go in that list, because the panel
+  // shows it and both are things somebody has to be told; only this one
+  // says the account itself is here and working. Kept as the same strings
+  // rather than a count, because the log has to name them apart and the
+  // order they were pushed in cannot say which is which.
+  mailsFailed: string[];
   // The people the accounts phase could not put back. Their profile rows
   // cannot be inserted — profiles.id is a foreign key to auth.users — so
   // the load has to leave them, and every row in every later table that
@@ -96,6 +103,7 @@ export function newRestoreCursor(o: {
     accountIndex: 0,
     accountsMade: [],
     accountsFailed: [],
+    mailsFailed: [],
     droppedProfileIds: [],
     tableIndex: 0,
     partIndex: 0,
@@ -144,6 +152,7 @@ export function reviveRestoreCursor(raw: unknown): RestoreCursor {
     accountIndex: num(c.accountIndex),
     accountsMade: strs(c.accountsMade),
     accountsFailed: strs(c.accountsFailed),
+    mailsFailed: strs(c.mailsFailed),
     droppedProfileIds: strs(c.droppedProfileIds),
     tableIndex: num(c.tableIndex),
     partIndex: num(c.partIndex),
@@ -568,6 +577,22 @@ export function tooNewRefusal(backupVersion: string | null, liveVersion: string 
 // unrestored. This is how a failure is written down instead.
 export function accountFailureNote(who: string, why: string): string {
   return `${who}: ${why}`;
+}
+
+// The same failures, said once for the error log. A restored database starts
+// with an empty function_errors on purpose, so whatever is in it is the first
+// thing an Admin reads after a disaster recovery — and one line per bounced
+// email would fill that page with the whole company and read as a company
+// that had not come back. These accounts are here and their records are here;
+// what is missing is the way in, and that is one fact about however many
+// people. Empty when every email went out, so nothing is written at all.
+export function setPasswordMailNote(failures: string[]): string {
+  const list = (failures || []).map(String).filter(Boolean);
+  if (!list.length) return "";
+  const many = list.length !== 1;
+  return `Set-password email not sent: ${list.length} account${many ? "s were" : " was"} restored ` +
+    `but never got the link, so ${many ? "they have" : "that person has"} no way in until an Admin ` +
+    `sends a password reset — ${list.join(" · ")}`;
 }
 
 // ═════════════════════════════════════════════════════════════════════════

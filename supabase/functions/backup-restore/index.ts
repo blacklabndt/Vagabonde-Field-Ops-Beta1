@@ -47,7 +47,8 @@ import {
   partsForTable, withoutAuthEmail, chatInsertRows, chatReplyPatches,
   settingsRestorePatch, ticketsForLoad, approvedTotalPatches, activityPatches,
   contentTypeFor, typedNameMatches, tooNewRefusal, accountFailureNote,
-  withoutMissingProfiles, wantsSetPasswordMail, droppedAccountsNote, quotesThatLanded,
+  withoutMissingProfiles, wantsSetPasswordMail, droppedAccountsNote, setPasswordMailNote,
+  quotesThatLanded,
   rowsWithLiveParent,
   JOB_RESTORE_KIND, newJobRestoreCursor, reviveJobRestoreCursor, isJobRestoreCursor,
   jobRestoreCounts, addRestoreNote, rowsForChosenJobs, jobsToRestore, ticketsToRestore,
@@ -316,7 +317,7 @@ async function advance(
       }
       const r = c as RestoreCursor;
       if (c.phase === "safety") {
-        const ready = await stepSafety(db, r, runId, guard);
+        const ready = await stepSafety(db, r, runId, guard, secret);
         // The cursor was written inside stepSafety, before this returned:
         // the safety run's id has to be on the row before the slice ends or
         // the next tick raises a second one.
@@ -364,10 +365,24 @@ async function advance(
       // An address that bounced is not a reason to fail a restore, but it is
       // a reason somebody has to be told about: it is one person with no way
       // into an account that exists.
+      //
+      // And that is a different sentence from the other thing on this list.
+      // `accountsFailed` carries both outcomes — the account that could not
+      // be made, and the account that was made and never got its link — and
+      // writing "Account not restored" over all of them told an Admin that
+      // every one of their people was gone when in fact none of them were.
+      // So the ones that really are missing get a line each, named, because
+      // each is a hand's work to put right; the bounced emails get one line
+      // between them, because they are all the same piece of news.
       if (!perJob) {
-        for (const failure of (c as RestoreCursor).accountsFailed) {
+        const r = c as RestoreCursor;
+        const mailOnly = new Set(r.mailsFailed);
+        for (const failure of r.accountsFailed) {
+          if (mailOnly.has(failure)) continue;
           await logError("backup-restore", `Account not restored: ${failure}`, { runId });
         }
+        const mails = setPasswordMailNote(r.mailsFailed);
+        if (mails) await logError("backup-restore", mails, { runId });
       }
       return { ok: true, runId, complete: true, counts: countsOf(c) };
     }
@@ -432,12 +447,12 @@ async function fail(
 // ── Phase: safety ────────────────────────────────────────────────────────
 // A complete backup of what is about to be replaced, taken by exactly the
 // code that takes every other backup — a queued run of kind before_restore,
-// which backup-run's tick starts and drives. This phase does nothing but
-// raise it and wait for it, and it refuses to go on if it fails: the whole
+// which backup-run starts and drives. This phase does nothing but raise it,
+// start it and wait for it, and it refuses to go on if it fails: the whole
 // point of the copy is that it exists before anything is deleted.
 
 async function stepSafety(
-  db: SupabaseClient, c: RestoreCursor, runId: string, guard: string
+  db: SupabaseClient, c: RestoreCursor, runId: string, guard: string, secret: string
 ): Promise<boolean> {
   if (!c.safetyRunId) {
     const name = beforeRestoreName(folderStamp(Date.now()));
@@ -453,6 +468,23 @@ async function stepSafety(
     if (!await persist(db, runId, c, guard)) {
       throw new Error("This restore was taken over by another slice while its safety backup was being raised.");
     }
+    // Queued is not started. Nothing else in this function ever pokes
+    // backup-run, so without this the copy waits for the five-minute cron —
+    // an Admin who has just typed a folder name to confirm a destructive
+    // operation watches a panel that says nothing is happening, and on a
+    // project whose cron job is missing or aimed elsewhere the restore waits
+    // there for ever. So the run that raised it starts it, by name, and the
+    // cron stays the backstop it is documented to be.
+    //
+    // Deliberately NOT chained. The chain flag exists to let a slice follow
+    // its own heartbeat, and this is not that: it is a queued run being
+    // started, so there is no heartbeat to be exempt from, and the cron may
+    // be picking up the very same row in the same second. Unchained, that
+    // race is settled where it should be — backup-run's claim is conditional
+    // on the status it read, so exactly one of the two turns this run into a
+    // running one and the other is told it is busy. Chained, both would go
+    // on and the copy would be taken twice over.
+    kick("backup-run", { action: "advance", runId: c.safetyRunId }, secret);
     return false;
   }
 
@@ -566,8 +598,14 @@ async function stepAccounts(
       if (!wantsSetPasswordMail(p)) continue;
       try { await sendSetPasswordLink(db, email, name, "invite"); }
       catch (e) {
-        c.accountsFailed.push(accountFailureNote(email,
-          `the account was re-created but the set-password email did not go out (${(e as Error).message}).`));
+        // The account is here and its rows will load; only the invitation
+        // failed. It goes on the panel's list with the rest — and on
+        // `mailsFailed` as well, which is how the error log tells this
+        // outcome from an account that could not be made at all.
+        const note = accountFailureNote(email,
+          `the account was re-created but the set-password email did not go out (${(e as Error).message}).`);
+        c.accountsFailed.push(note);
+        c.mailsFailed.push(note);
       }
     } catch (e) {
       // The Auth user could not be made, so profiles.id has nothing to point

@@ -296,7 +296,18 @@ async function advanceById(
   if (!(chained && String(run.id) === runId) && sliceLooksAlive(run.heartbeat_at, Date.now())) {
     return { ok: true, runId, busy: true };
   }
-  return await advance(db, run, secret);
+  const moved = await advance(db, run, secret);
+  // The waiting restore is tended here as well as in the tick, and for the
+  // same reason it is tended there: a safety copy is somebody's restore held
+  // up, and the only thing that ever tells that restore the copy is done is
+  // whichever slice finishes it. Slices reach this function too — the copy's
+  // own chain comes through here, and so does the restore's kick that starts
+  // it — so a copy that took more than one slice used to finish with nobody
+  // to tell, and the restore sat until the cron came round. On a project
+  // whose cron is missing that is for ever, which is the whole thing this
+  // hand-off exists to prevent.
+  await tend(db, run, secret);
+  return moved;
 }
 
 async function queueRun(db: SupabaseClient, kind: string, requestedBy: string | null): Promise<Run> {
