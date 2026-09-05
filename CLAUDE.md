@@ -2,8 +2,8 @@
 
 RT weld-inspection field app for a crew in Grande Prairie, AB. React PWA
 (`vite-app/`) over Supabase (project `eielmvxzdwwprmmfamlq`), deployed as
-Cloudflare Worker `solitary-snowflake-ee22` (assets + `/approve` proxy in
-`worker/index.js`).
+Cloudflare Worker `solitary-snowflake-ee22` (assets + the `/approve` and
+`/backup/oauth/*` proxies in `worker/index.js`).
 
 ## Commands
 
@@ -25,16 +25,28 @@ Cloudflare Worker `solitary-snowflake-ee22` (assets + `/approve` proxy in
   DB fix waits as a draft under `supabase/handover/` (probes beside it) —
   a draft, not history, until it is applied and filed under migrations.
   Nothing is waiting there now. The latest is
-  `20260904135107_the_token_is_not_the_record.sql` (probes in
-  `supabase/handover/probes-20260904135107-the-token-is-not-the-record.sql`,
-  run before and after): tab_access()/user_role() read profiles instead of
-  the token claim and answer empty/null for a `deactivated_at` account,
-  profiles insert is Admin-only above Technician/Helper and delete is an
-  Admin's alone, delete_job returns its PDF keys behind an is_staff() door
-  with a coalesced admin test, guard_job_update's client gate is null-safe
-  (a null rank read as Coordinator), the equipment functions count Edmonton
-  days rather than UTC, public.dose_totals sums the ledger in the database,
-  and filing a report needs the upload tab alone.
+  `20260905105635_a_patch_is_an_update_not_an_upsert.sql` (probes in
+  `supabase/handover/probes-20260905105635-a-patch-is-an-update-not-an-upsert.sql`):
+  `restore_patch_rows(table, rows)`, the service role's alone, writes back
+  the three columns a restore has to set a second time
+  (chat_messages.reply_to, tickets.total, jobs.last_activity_at) and raises
+  on any other table. It is an UPDATE and not a partial upsert because Postgres builds
+  the proposed tuple and checks NOT NULL on it before it ever looks for the
+  conflict, so `{id, total}` fails on tickets.job_id however certainly the
+  id is already there. The automatic backup's own columns, `backup_runs`,
+  `backup_state()`, `backup_schema_version()`, `restore_chat_messages()`
+  and the five-minute cron job arrived one migration earlier in
+  `20260905080604_the_project_backs_itself_up.sql` (probes in
+  `supabase/handover/probes-20260905080604-the-project-backs-itself-up.sql`).
+  Before those, `20260904135107_the_token_is_not_the_record.sql`: tab_access()
+  /user_role() read profiles instead of the token claim and answer
+  empty/null for a `deactivated_at` account, profiles insert is Admin-only
+  above Technician/Helper and delete is an Admin's alone, delete_job returns
+  its PDF keys behind an is_staff() door with a coalesced admin test,
+  guard_job_update's client gate is null-safe (a null rank read as
+  Coordinator), the equipment functions count Edmonton days rather than UTC,
+  public.dose_totals sums the ledger in the database, and filing a report
+  needs the upload tab alone.
 - RLS changes get probed live with `set_config('request.jwt.claims', …)`
   role simulation before they ship. Permissive policies OR together — a
   new `FOR ALL` policy can silently void an older condition.
@@ -166,6 +178,116 @@ Cloudflare Worker `solitary-snowflake-ee22` (assets + `/approve` proxy in
   voice notes are audio_key in chat-media, cleaned up by delete and
   retention like pictures; job numbers in message text linkify by
   MEMBERSHIP against listJobNumbers, never by pattern — they're freeform.
+- Automatic backup lives in two places and no others: the connection, the
+  schedule and the three app registrations are columns on the one
+  `app_settings` row (Admin-only RLS), and every run is a row in
+  `backup_runs` (Admin may read, nobody may write — the writes are the
+  service role's, from inside the functions). `backup_state()` is the
+  panel's whole read and answers `has_secret_google`, never a secret: the
+  refresh token and the client secrets are never selected by the client, and
+  no new code may select them. A backup is
+  a dated folder in the drive — `2026-09-05 02-00`, Grande Prairie's clock,
+  no colon because Windows has no colon in a filename — holding
+  `manifest.json`, `tables/` (one gzipped JSON part per table,
+  `<table>.01.json.gz` and up) and `files/` (every stored object, its
+  bucket and key percent-encoded into one flat name, because all three
+  providers read a `/` as a folder). `app_settings` goes in with its
+  credentials blanked (`APP_SETTINGS_SECRETS`); `profiles` carries an extra
+  `auth_email` field that is not a column, because Auth holds the addresses
+  and a restore has nowhere to send a set-password link without them.
+- The tick is the only scheduler. pg_cron fires `backup-run` every five
+  minutes with `x-internal-secret` (chat-retention's shape, read from
+  `private.internal_config` when the job fires); `backup-run` drives kinds
+  `backup` and `before_restore` and forwards `restore_all` and
+  `restore_jobs` to `backup-restore`. Its own kinds come first, always: a
+  restore's safety backup is raised *after* the restore run, and taking the
+  restore first would leave that backup unstarted and the restore waiting
+  on it for ever. Work is done in slices of about 100 seconds (`BUDGET_MS`)
+  with the position in `backup_runs.cursor`, and a slice that got something
+  done kicks the next one itself — `{action:"advance", runId, chain:true}`,
+  never a tick, because a tick reads the heartbeat that same slice has just
+  written and calls the run busy. There is no separate kick secret; the
+  chain signs itself with the same `x-internal-secret` the cron sends. The
+  cron is the safety net, not the engine. A run whose `heartbeat_at` has
+  been quiet for `SLICE_ALIVE_MS` — three minutes — died mid-slice and is
+  reclaimed; every write a slice makes is conditional on the status it
+  believes it holds, so a superseded slice writes nothing, not even its own
+  failure. `backup_next_run_at` moves when a run STARTS, so a long night
+  does not make tomorrow late and a failure does not stop tomorrow.
+- Restoring everything is gated four times — the caller's own Admin profile,
+  a backup from a newer schema refused outright (`backup_schema_version()`),
+  the Admin typing the backup's folder name, and a complete safety backup of
+  what is about to be replaced as the restore's own first phase — and the
+  order of its phases is not the obvious one: safety → wipe → **accounts** →
+  tables → files → activity. Accounts come before the records because
+  `profiles.id` is a foreign key to `auth.users(id)` — a profile whose Auth
+  user is gone cannot be inserted at all; an account that cannot be
+  re-created is dropped from the load, counted, and named on the run rather
+  than failing it. The wipe follows `supabase/handover/wipe-seed-data.sql`'s
+  own order (a test reads that file back), keeps the Admin running the
+  restore so their session does not lose its permissions halfway, deletes
+  `rate_lines` BEFORE `rate_line_history` (the delete trigger refills
+  history), and clears `audit_log` and `function_errors` although neither is
+  backed up, because their foreign keys to profiles would abort the delete —
+  so a restored database starts with an empty error log, deliberately.
+  Triggers stay on through the load, so the three values a trigger writes
+  over go back afterwards through `restore_patch_rows`: chat quotes (a reply
+  can sit in an earlier part than the message it quotes), the totals of
+  tickets a client has signed or been billed for (every ticket loads at
+  `total: 0`, because tickets_total_balances is a deferred constraint
+  trigger and ticket_lines cannot load first; the lines' sync trigger then
+  writes the figure, and only for a signed or Approved/Invoiced ticket is the
+  backup's own figure put back over it), and `jobs.last_activity_at`, in the
+  `activity` phase. Chat history itself loads through
+  `restore_chat_messages`, which disables the push trigger around the insert
+  and re-enables it in the same call — otherwise a restore buzzes every phone
+  in the crew once per historical message. `app_settings` is
+  never wiped and is restored by a narrow UPDATE that skips every `backup_*`
+  column (`APP_SETTINGS_NEVER_RESTORED`), or the restore would replace the
+  drive connection it is running through; and a secret column that is null
+  in the backup is skipped rather than written, so a restore never takes the
+  live Resend or KLIPY key out of the building.
+- Restoring chosen jobs deletes nothing and overwrites nothing: a row
+  already present is left alone, so the same job restored twice is a no-op —
+  and a job already here still keeps its id on `jobsHere`, so a retry after a
+  half-finished restore fills in the tickets, assessments and reports that
+  never landed. A ticket's id IS its number, so an id already in use — or
+  one retired in `burned_ticket_numbers` — is a collision, and that ticket
+  goes back unrestored with its lines and crew and is named in the report;
+  the one exception is a ticket already here **on the job it came back
+  under**, which is the second press of the button and is left alone
+  unrepriced. `client_key` is checked the same way before the insert, since
+  a duplicate key is a refusal that would fail the whole batch. An
+  organisation is matched by id, then by name, then reported and left empty;
+  a contact the same way but only inside the organisation the job ended up
+  pointing at; a technician or signer that has gone is nulled; a
+  `ticket_crew` row whose person has gone is skipped and counted, because
+  `profile_id` is `not null` and those are somebody's hours.
+- `nextRunAt` lives twice — `vite-app/src/backupSchedule.js` and
+  `supabase/functions/_shared/backupSchedule.ts` — with a byte-identical
+  block between the `shared core` markers, and `backupSchedule.test.mjs`
+  reads both files off disk and compares them. Change one, change the other,
+  in the same commit. Seven shared modules — `backupSchedule.ts`,
+  `backupTables.ts`, `backupManifest.ts`, `backupRun.ts`, `backupOauth.ts`,
+  `drive.ts` and `gzip.ts` — are erasable TypeScript with no imports of
+  their own (`backupManifest.ts` may name `backupSchedule.ts`, and nothing
+  else), because the node suite imports them straight out of
+  `supabase/functions/` — an `enum`, a constructor parameter property, a
+  `Deno.env` read or a control character in any of them breaks `npm test`,
+  and `backupShared.test.mjs` asserts each of those. `backupRestore.ts` is
+  import-free and node-tested too but is outside that guard;
+  `backupCommon.ts` is deliberately outside it — it talks to supabase-js.
+- The three backup functions deploy through the CLI like every other one
+  (`npx supabase functions deploy <name> --project-ref eielmvxzdwwprmmfamlq`)
+  and all three are pinned `verify_jwt = false` in `supabase/config.toml`,
+  because a true pin would 401 the scheduler. Each guards itself before it
+  parses anything: `backup-oauth` because the provider redirects a browser
+  with no token (its callback is gated by a single-use nonce minted in
+  `app_settings`, ten minutes old at most, and spent by an UPDATE filtered
+  on the nonce actually presented — nulling it on the row's id alone let any
+  stranger's GET clear the nonce Connect had just minted); `backup-run` and
+  `backup-restore` on `x-internal-secret` OR an Admin JWT (`backupDoor` in
+  `backupCommon.ts`).
 
 ## Verification habits that caught real bugs
 
@@ -326,8 +448,9 @@ session has set `app.confirm_total_wipe = 'yes'`.
   `archive_clear_jobs(ids)` (Admin, definer): it deletes those jobs and
   everything under them, approved tickets included (delete_job refuses
   them), and the client removes the PDFs from the two buckets. Jobs are
-  chosen by created_at on local days. It is the one bulk delete in the app;
-  keep every one of those gates. The screen threads `onArchiveCleared`
+  chosen by created_at on local days. It is one of the app's two bulk
+  deletes — restore-all's wipe phase is the other, and it has its own four
+  gates; keep every one of those gates. The screen threads `onArchiveCleared`
   through to the dialog, so a clear also makes App let go of the job and
   ticket it was holding open and reload the drafts badge — the cleared job
   may be the one the drawer was pointing at.

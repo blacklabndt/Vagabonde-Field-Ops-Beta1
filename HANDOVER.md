@@ -16,10 +16,12 @@ changes hands, and what the new owner's admin does on day one.
 | Server functions | Email sending, approvals, user provisioning, chat push, nightly cleanup | `supabase/functions/`, deployed with the Supabase CLI |
 | Email | Reports and billing approval links | Resend (key entered on the in-app **Admin** screen) |
 | Chat GIFs | Team chat's GIF search | KLIPY (key on the **Admin** screen, optional) |
+| The backup drive | Where the app copies itself on a schedule, and restores from | One Google Drive / OneDrive / Dropbox account of the business's own, connected on the **Admin** screen |
 
 Everything an admin configures day-to-day lives **inside the app**:
 drawer → **Admin** (Resend key and addresses, the app's public address for
-approval links, the KLIPY key) and **Users & access**, **Rate admin**,
+approval links, the KLIPY key, the archive and the automatic backup) and
+**Users & access**, **Rate admin**,
 **Contacts**. Only two settings live in the Supabase dashboard because
 they guard sign-in itself: the **Site URL** (Authentication → URL
 Configuration — where password-reset links land) and **leaked-password
@@ -70,9 +72,9 @@ deploy the Worker. Path A avoids all of this.
 > has been applied anywhere. Anything still sitting there is not in
 > `migrations/` and will not be in the fresh project. Nothing is waiting
 > there today: the last one went live as
-> `20260904135107_the_token_is_not_the_record.sql`, and the probes it was
-> checked with stayed behind as
-> `probes-20260904135107-the-token-is-not-the-record.sql`.
+> `20260905105635_a_patch_is_an_update_not_an_upsert.sql`, and the probes
+> it was checked with stayed behind as
+> `probes-20260905105635-a-patch-is-an-update-not-an-upsert.sql`.
 
 ## The custom domain
 
@@ -84,6 +86,169 @@ widely**: the old URL keeps working alongside a new domain (nothing sent
 breaks), but installed PWAs and push subscriptions are bound to their
 address — change it later and every device reinstalls and re-allows
 notifications. Changing it early costs nothing.
+
+## Connecting a backup drive
+
+The app can copy itself — every record, every PDF — to one drive account on
+a schedule, and restore from it. The drive account is the business's own and
+stays the business's own: the app holds nothing but the access it was
+granted, which the provider's own security page can withdraw at any moment.
+The copying happens on the app's server, so nothing passes through anybody's
+browser and the machine that pressed the button can be shut afterwards.
+
+Two things follow from what is in it. A backup carries the crew's hours and
+dose readings and every client's pricing, so the drive account should belong
+to the business rather than to a person. And it deliberately does **not**
+carry the Resend key, the KLIPY key or the drive's own credentials — those
+are blanked on the way in, so a restore never overwrites the live ones and a
+backup on somebody's laptop is not a set of keys.
+
+Each provider needs a free app registration under your own account. That is
+what lets the app write to your drive without anybody holding your password.
+Do the one you intend to use and ignore the other two — only one drive is
+ever connected, and switching later means Disconnect first.
+
+**Before you start**, open the app, sign in as an Admin, go to **Admin →
+Automatic backup → App registration**, and copy the redirect URI shown
+beneath the provider you have chosen. It reads
+`https://<your app address>/backup/oauth/google` (or `/microsoft`, or
+`/dropbox`) and it has to be pasted into the registration character for
+character. Those boxes fall back to whatever address this window happens to
+be on when the **App address** field further up the Admin screen is blank —
+and Connect refuses outright until that field is filled in ("The App address
+isn't set on the Admin screen"), so fill it in first.
+
+### Google Drive
+
+1. <https://console.cloud.google.com/projectcreate> — make a project.
+2. <https://console.cloud.google.com/apis/library/drive.googleapis.com> —
+   **Enable** the Google Drive API in that project.
+3. <https://console.cloud.google.com/auth/overview> — fill in the OAuth
+   consent screen. **External**, your own email as the support and developer
+   contact. While the app is in Testing, add the Google account that will
+   hold the backups under **Audience → Test users**, or the consent screen
+   will refuse it.
+4. <https://console.cloud.google.com/apis/credentials> — **Create
+   credentials → OAuth client ID → Web application**. Under *Authorised
+   redirect URIs* paste `https://<your app address>/backup/oauth/google`.
+5. Copy the **Client ID** and **Client secret** into the app's Google boxes,
+   press **Save backup settings**, then **Connect Google Drive**.
+
+The app asks for one permission, `drive.file`. That scope only lets it see
+files it created itself: it cannot read anything else in your Drive.
+
+### OneDrive
+
+1. <https://entra.microsoft.com> → **Applications → App registrations → New
+   registration**.
+2. Supported account types: *Accounts in any organizational directory and
+   personal Microsoft accounts*.
+3. **Redirect URI**: platform **Web**, value
+   `https://<your app address>/backup/oauth/microsoft`.
+4. After it is created, **Certificates & secrets → New client secret**. Copy
+   the *Value* (not the Secret ID) immediately — it is shown once.
+5. The **Application (client) ID** is on the Overview page. Put both into the
+   app's OneDrive boxes, save, then **Connect OneDrive**.
+
+The app asks for `Files.ReadWrite` and `offline_access` — permission to work
+with your files, and permission to keep working without you signing in again.
+
+### Dropbox
+
+1. <https://www.dropbox.com/developers/apps> → **Create app** → **Scoped
+   access** → **Full Dropbox** → give it a name.
+2. On the app's **Permissions** tab tick `files.content.write`,
+   `files.content.read` and `files.metadata.read`, then **Submit**.
+3. On the **Settings** tab, under *OAuth 2 → Redirect URIs*, add
+   `https://<your app address>/backup/oauth/dropbox`.
+4. Copy the **App key** and **App secret** into the app's Dropbox boxes,
+   save, then **Connect Dropbox**.
+
+### Setting the schedule
+
+Pick how often (every day, weekdays only, once a week, once a month), at
+what hour — Grande Prairie time, always, whatever clock the person setting
+it is on — and how many backups to keep. The panel prints the schedule back
+in words and, once a drive is connected, when the next one is due. Older
+folders beyond the keep count are removed after each *successful* run;
+copies taken automatically just before a restore are never tidied away.
+
+Then press **Back up now** once and watch it through. The first backup is
+the slow one and can take an hour on a busy database; it keeps going on the
+server whether the screen is open or not, so the panel can be closed and
+reopened. A run that is going shows its phase and a running count of records
+and files.
+
+### Rehearsing a restore
+
+**This has not been done yet.** Restoring everything empties the database
+before it refills it, and no full backup-and-restore cycle has been run end
+to end, because no drive has been connected. Do it before the first backup
+is more than a week old, and do it on a **Supabase branch**, never on the
+live project:
+
+1. Connect the drive on the live app and let one backup complete.
+2. In the Supabase dashboard, create a branch off the project (Branches →
+   Create branch). A branch gets the schema and its own empty data.
+3. Stand the app up against that branch and connect the drive from it. This
+   is the fiddly step and it is worth knowing why before starting: the
+   drive's callback arrives at `/backup/oauth/<provider>`, which is a
+   *Worker* route, so a plain `npm run dev` cannot receive it. Deploy a
+   second Worker instead — a copy of `wrangler.jsonc` with a different
+   `name`, built with the branch's URL and publishable key in
+   `vite-app/.env` — deploy the three backup functions to the branch, put
+   that Worker's address into the branch app's **App address**, and add its
+   `/backup/oauth/<provider>` to the registration's redirect URIs. All three
+   providers accept several.
+4. **Restore everything** from the folder the live app wrote. Type the
+   folder name when it asks. Watch the phases go past: safety, wipe,
+   accounts, tables, files, activity.
+5. Then check the branch the way an admin would: sign in, open the board, a
+   job, one of its tickets, its invoice PDF, and the timesheet ledger.
+6. Delete the branch and the second Worker, and take the extra redirect URI
+   back out of the registration.
+
+What to expect, so none of it reads as a fault: the restore's own first
+phase writes a `before-restore …` folder into the same drive, and that one
+is kept for ever rather than tidied away by the retention count; the error
+log and the audit trail come back empty (they are not backed up, and their
+links to the staff list mean they have to be cleared before the wipe can
+finish); accounts are re-created in Auth with passwords nobody knows, and
+each active one is mailed a set-password link — so do this on a branch whose
+Resend key you are content to have send, or take the key out of the branch's
+Admin screen first; and any account that could not be re-created is named on
+the run rather than stopping it.
+
+### When a run fails
+
+The panel says so in place of the last-run line, with the reason the run
+recorded, and — this is the important half — **the next scheduled backup
+still runs**. A failure does not stop the schedule and does not have to be
+cleared by hand. Read it in this order:
+
+- **"The drive needs reconnecting."** The provider has withdrawn the app's
+  access, or the client secret has been rotated or has expired. Press
+  **Disconnect**, check the client secret in the registration, and connect
+  again. Nothing backs up while that message is showing.
+- **A run that says it could not open a folder or upload a file.** The drive
+  is full, or the provider was having a bad hour. The next run will try
+  again; **Back up now** tries immediately.
+- **A folder in the list tagged "didn't finish".** It has no index, so it is
+  not offered for restoring. A run that died partway leaves one; it is
+  harmless and retention will clear it in time.
+- **A run that stays "in progress" with nothing moving.** The five-minute
+  tick picks up a run whose slice died and carries on with it, so give it
+  ten minutes before doing anything. If it is still stuck, the reason will
+  be in `function_errors` (Supabase → Table Editor) under `backup-run` or
+  `backup-restore`.
+- **Nothing has run at all and no failure is shown.** Either no drive is
+  connected, or the `backup-tick` cron job is not there — it arrives with
+  the migration, so a project restored from `supabase db push` has it and an
+  older one may not. Check `select * from cron.job` in the SQL editor.
+
+A restore's own report is worth reading even when the run says complete: the
+panel prints the notes underneath, naming each job, ticket or crew row it
+could not put back and why.
 
 ## Wiping the seed data
 
@@ -125,6 +290,11 @@ will remove before the deletes.
    reprices anything already out.
 5. **Contacts**: the real clients, contractors, and the people at each —
    the primary contact is what jobs, report emails and approvals pre-fill.
+6. **Automatic backup**, once the app address is set: register one drive
+   app, connect it, set the schedule, and press Back up now — see
+   "Connecting a backup drive" above. It is the only step here that needs an
+   account outside Supabase and Cloudflare, and the only one that protects
+   everything the other five set up.
 
 ## When something looks wrong
 
@@ -144,6 +314,14 @@ will remove before the deletes.
   claims the device's subscription automatically.
 - **Chat history fades** — by design: unpinned messages expire after 30
   days, swept nightly.
+- **"The drive needs reconnecting"** on the Admin screen — the backup
+  provider has withdrawn the app's access or the client secret has been
+  rotated. Nothing backs up until it is reconnected; see "When a run fails"
+  above.
+- **Somebody deleted a job that should not have gone** — Admin → Automatic
+  backup → Show backups → **Restore jobs** on the last backup that still
+  had it. It puts back only what is missing and leaves everything else
+  exactly as it is.
 - **"It reloaded everything the first time I signed in"** — possible once
   per device after this release, and only on some of them. The offline
   cache now records which account it belongs to, and no existing device

@@ -52,8 +52,10 @@ Cloudflare Workers Builds runs `npm run build` from the repository root —
 the root `package.json` reaches down into `vite-app`, because Workers Builds
 has no root-directory setting the way Pages does. In Beta 1 the repo root is
 the project root, so the reach-down is one level. `wrangler.jsonc` names the
-output directory (`vite-app/dist`), routes `/approve` and `/approve-ticket`
-through `worker/index.js` before the asset server, and sets
+output directory (`vite-app/dist`), routes `/approve`, `/approve-ticket` and
+`/backup/oauth/*` through `worker/index.js` before the asset server (without
+that last one the asset cache answers the drive's redirect first and a backup
+drive can never finish connecting), and sets
 `not_found_handling` so a hard refresh on any path serves the app rather
 than a 404. A manual deploy is:
 
@@ -213,7 +215,7 @@ tables.
 | Equipment | Exposure devices, survey meters, dosimeters and tools with calibration dates; the JHA pre-fills each worker's kit from what's assigned here |
 | Timesheets | Hours, solo hours, dose and mileage per person per pay period, derived from ticket crew rows; admin approves a period, and "Export to Excel" builds a two-sheet workbook. The dose ledger beside it — milliroentgens per person per calendar quarter and year, the figures a nuclear energy worker's record needs — is added up by the database (`dose_totals`), not the browser: a "Year" view used to pull every crew row of the year, tens of thousands of them, to print one line each. It runs with the caller's own rights, so row-level security is still what keeps one technician's dose out of another's screen, and it falls back to the old row-by-row read on a database that hasn't had the function yet |
 | Users & access | Accounts, tab permissions, role presets, and a panel of recent background errors from the Edge Functions |
-| Admin | The settings that used to be function secrets — Resend key and sending addresses, the approval-link base URL, the KLIPY key — in one Admin-only row, plus a test email and the year/date-range archive. Building the archive reads every PDF and renders every ticket's invoice over the connection — minutes for a quiet month, an hour or more for a busy year, so it is a job to start at a desk. Clearing is gated twice over: the downloaded zip is checked back against the manifest the build kept, and then, immediately before the delete, every job's tickets, assessments and reports are counted again live. A job that has gained or lost anything since the build stops the clear and says so — the zip on disk cannot know about a ticket filed at 16:20 against a job archived at 16:00 |
+| Admin | The settings that used to be function secrets — Resend key and sending addresses, the approval-link base URL, the KLIPY key — in one Admin-only row, plus a test email and the year/date-range archive. Building the archive reads every PDF and renders every ticket's invoice over the connection — minutes for a quiet month, an hour or more for a busy year, so it is a job to start at a desk. Clearing is gated twice over: the downloaded zip is checked back against the manifest the build kept, and then, immediately before the delete, every job's tickets, assessments and reports are counted again live. A job that has gained or lost anything since the build stops the clear and says so — the zip on disk cannot know about a ticket filed at 16:20 against a job archived at 16:00. Below the archive sits **Automatic backup**: connect one drive account of the business's own (Google Drive, OneDrive or Dropbox), pick a frequency, an hour in Grande Prairie time and how many copies to keep, and the app writes every record and every PDF to a dated folder there on a schedule — on its own server, so nothing passes through the browser. The same panel lists what is in the drive and restores from it two ways: chosen jobs, which deletes nothing and overwrites nothing, or everything, which empties the database first and is gated four times over |
 
 ### Offline
 
@@ -298,7 +300,7 @@ to discard an item that is never going to land. Ticket numbers are minted by
 the database at save time rather than in the browser, so a ticket built
 offline at 07:00 can't collide with one raised while it was waiting.
 
-### Two things that need the Edge Functions deployed
+### Three things that need the Edge Functions deployed
 
 - **Creating a user** (Users & access → "+ New user") goes through the
   `create-user` Edge Function, which holds the service-role key. It checks
@@ -318,6 +320,61 @@ offline at 07:00 can't collide with one raised while it was waiting.
   because the foreign keys are what keep a name on the history it signed.
   The screen says which of the two happened. Deploy both functions or the
   buttons report an error; nothing in a client app should ever hold that key.
+- **Automatic backup** needs `backup-oauth`, `backup-run` and
+  `backup-restore` deployed, and needs the `backup-tick` pg_cron job — the
+  cron job arrives with its migration, the functions do not. All three are
+  pinned `verify_jwt = false` in `supabase/config.toml`, because the caller
+  is a browser coming back from a consent screen or the database's own
+  scheduler, neither of which carries a JWT; each checks its own caller
+  before it parses anything. Until an Admin connects a drive on the Admin
+  screen the tick finds nothing due and returns, five minutes at a time,
+  costing nothing.
+
+### Automatic backup
+
+The Admin screen can point the whole app at one drive account — Google
+Drive, OneDrive or Dropbox — and copy itself there on a schedule: every row
+of the twenty-three tables that hold the work, and every file in all five
+storage buckets. The error log and the audit trail are the two deliberate
+omissions — operational noise, not records.
+
+The drive belongs to the business, not to the app: the drive's refresh token
+and the three client secrets are columns on the Admin-only `app_settings`
+row, read by the functions with the service role and never selected by the
+browser — the panel's one read, `backup_state()`, answers `has_secret_google`
+rather than the secret, and the same read is what tells it whether a drive is
+connected at all.
+
+A backup is a folder named for the moment it started (`2026-09-05 02-00`,
+the crew's own clock) holding `manifest.json`, a `tables/` folder of gzipped
+JSON parts, and a `files/` folder with one flat entry per stored object. The
+work runs in slices of about a hundred seconds, driven by a pg_cron job that
+pokes `backup-run` every five minutes and by each slice kicking the next, so
+a first backup of a busy database — which can take an hour — needs nobody to
+keep a browser open. Older folders beyond the keep count are removed after
+each successful run; the copies taken automatically just before a restore
+never are.
+
+Restoring comes two ways. **Restore jobs** is the everyday one: pick jobs off
+the backup's own index and they come back with their tickets, assessments,
+reports and PDFs. It deletes nothing and overwrites nothing, so restoring
+the same job twice is a no-op and anything it could not put back — a ticket
+number since reused, a crew member's account since removed — is named in a
+written report rather than counted. **Restore everything** is the other one,
+and it is the only thing in the app that empties tables it did not fill: it
+is gated on the caller being an Admin, on the backup not coming from a newer
+schema than this database, on the Admin typing the backup's folder name, and
+on a complete safety backup of what is about to be replaced succeeding
+first. If that copy fails, nothing is deleted.
+
+Three details are worth knowing before trusting it. Each provider needs a
+free app registration under the owner's own account — `HANDOVER.md` walks
+all three consoles. The **App address** on the Admin screen has to be filled
+in before Connect will do anything, because that is what the redirect URI in
+the registration is built from. And a restored database deliberately starts
+with an empty error log and audit trail: neither is backed up, and their
+foreign keys to `profiles` mean they have to be cleared before the wipe can
+finish.
 
 ### The token hook
 
@@ -418,9 +475,18 @@ vite-app/
     archive.js              builds the year-end archive: client → month → job, with
                             a manifest the downloaded zip is checked back against
     zip.js                  a minimal ZIP writer, so the archive needs no CDN library
+    backupSchedule.js       when the automatic backup is next due — Grande Prairie's
+                            clock, DST and all; a byte-identical twin lives in
+                            supabase/functions/_shared/ and a test compares them
+    backupPanelLogic.js     the backup panel's pure parts — the provider list and
+                            labels, the redirect URI each registration needs, and
+                            reading the outcome the drive's redirect came back with
     *.test.mjs              `npm test` — node --test plus the render-name scan, no
                             browser needed (archive, chat merge, dates, numbers,
-                            offline cache and queue, paging, periods, session, zip…)
+                            offline cache and queue, paging, periods, session, zip,
+                            and four for the backup — schedule, shared modules,
+                            restore, panel — which import the Edge Functions'
+                            TypeScript straight out of supabase/functions/)
     components/
       common.jsx            Blueprint frame, Btn, TagX, Field, Dialog, Switch, ErrorBoundary…
       auth.jsx              Sign in
@@ -439,7 +505,10 @@ vite-app/
       rateAdmin.jsx         Rate schedules, rate history + job-level overrides
       billingTracker.jsx    Unsigned-money tracker
       usersAccess.jsx       Accounts, tab permissions, background-error log
-      adminSetup.jsx        Admin screen: Resend + KLIPY keys, app address, archive
+      adminSetup.jsx        Admin screen: Resend + KLIPY keys, app address, archive,
+                            automatic backup
+      backupPanel.jsx       Connect a drive, the schedule, the backups in it, and the
+                            two restores (everything, or chosen jobs)
       archiveDialog.jsx     Build the archive zip, check it, then unlock the clear
       queuePanel.jsx        The offline-queue badge and its what's-waiting panel
       flappy880.jsx         One of the two easter eggs
@@ -451,23 +520,33 @@ vite-app/
                             tag in a JSX file must resolve to something that file imports
 supabase/
   migrations/               schema, applied in filename order
-  functions/                thirteen Edge Functions — the three that send mail
+  functions/                sixteen Edge Functions — the three that send mail
                             (send-report, send-jha, send-ticket-approval), the two
                             that render PDFs (render-invoice, render-jha), the client
                             approval page (approve-ticket), account handling
                             (create-user, delete-user, password-reset), the chat's
                             push and nightly cleanup (chat-push, chat-retention),
-                            gif-search and mail-test; plus `_shared/`, which is
-                            library code, not a function
+                            the automatic backup (backup-oauth, backup-run,
+                            backup-restore), gif-search and mail-test; plus
+                            `_shared/`, which is library code, not a function —
+                            invoice/JHA rendering, mail, the approval token, and the
+                            nine modules the backup is built from (drive.ts and its
+                            three vendors, backupTables/Manifest/Schedule/Run/
+                            Restore/Oauth/Common, gzip), most of them erasable
+                            TypeScript the node suite imports directly
   handover/                 the handover runbooks — the two wipes, the probes a
                             migration was checked with, and any DB fix written but
                             not yet applied (nothing is waiting there now)
   *.sql                     one-off operator scripts (seed jobs, restore an admin),
                             each idempotent — paste into the SQL editor
-worker/index.js             the Cloudflare Worker: serves the built assets and proxies
-                            /approve to the approve-ticket function, because Supabase
-                            hands that domain's HTML back as text/plain
-wrangler.jsonc              the Worker's name, its assets binding and its routes
+worker/index.js             the Cloudflare Worker: serves the built assets, proxies
+                            /approve to the approve-ticket function (Supabase hands
+                            that domain's HTML back as text/plain) and
+                            /backup/oauth/* to backup-oauth, whose answer is a
+                            redirect rather than a page
+wrangler.jsonc              the Worker's name, its assets binding and its routes —
+                            /approve, /approve-ticket and /backup/oauth/* run the
+                            Worker before the asset server
 ```
 
 The office-facing screens (Files, Contacts, Equipment, Timesheets, Rate
