@@ -110,6 +110,24 @@ const clamp = (value, low, high, fallback) => {
   return Math.min(high, Math.max(low, n));
 };
 
+// A Google client id copied off the console page comes with company: the
+// first connection attempt saved 131 characters that began with the id and
+// ended with "view or download the client", and Google answered the consent
+// request with "OAuth client was not found". The id has one shape —
+// digits, a hyphen, a token, .apps.googleusercontent.com — so it is taken
+// out of whatever was pasted around it. Microsoft's is a GUID and Dropbox's
+// an app key, neither of which the console pads, so they are only trimmed.
+const GOOGLE_CLIENT_ID = /[0-9]+-[a-z0-9]+.apps.googleusercontent.com/i;
+export function cleanClientId(provider, raw) {
+  const text = String(raw || "").trim();
+  if (!text) return null;
+  if (provider === "google") {
+    const m = GOOGLE_CLIENT_ID.exec(text);
+    return m ? m[0] : text;
+  }
+  return text;
+}
+
 // The columns a save from this screen is allowed to write. The connection's
 // own columns — provider, refresh token, account, folder — are the
 // callback's alone and are deliberately absent: a browser that could write
@@ -127,9 +145,9 @@ export function backupSettingsPatch(form, nowMs) {
     backup_weekday: weekday,
     backup_hour: hour,
     backup_keep: keep,
-    backup_client_id_google: String(f.clientIdGoogle || "").trim() || null,
-    backup_client_id_microsoft: String(f.clientIdMicrosoft || "").trim() || null,
-    backup_client_id_dropbox: String(f.clientIdDropbox || "").trim() || null,
+    backup_client_id_google: cleanClientId("google", f.clientIdGoogle),
+    backup_client_id_microsoft: cleanClientId("microsoft", f.clientIdMicrosoft),
+    backup_client_id_dropbox: cleanClientId("dropbox", f.clientIdDropbox),
     updated_at: new Date(nowMs).toISOString()
   };
 

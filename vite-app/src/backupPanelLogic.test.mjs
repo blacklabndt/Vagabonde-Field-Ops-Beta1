@@ -11,7 +11,7 @@ import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import {
   BACKUP_PROVIDERS, PROVIDER_LABEL,
-  redirectUriFor, backupSettingsPatch, readBackupOutcome,
+  redirectUriFor, backupSettingsPatch, readBackupOutcome, cleanClientId,
   BEFORE_RESTORE_PREFIX, isBeforeRestore, restoreNameMatches, failedRunAdvice
 } from "./backupPanelLogic.js";
 
@@ -267,4 +267,20 @@ test("a per-job restore that failed touched nothing else", () => {
   assert.match(jobs, /Nothing else in the app was touched/);
   assert.match(jobs, /Press Restore on those jobs again/);
   assert.doesNotMatch(jobs, /emptied/);
+});
+
+test("a Google client id pasted with the console's helper text is reduced to the id", () => {
+  const id = "102343884541-abc123def456.apps.googleusercontent.com";
+  assert.equal(cleanClientId("google", `${id}
+
+Client ID
+view or download the client`), id);
+  assert.equal(cleanClientId("google", `  ${id}  `), id);
+  // Something that is not an id at all is kept as typed, so the consent
+  // request fails loudly with what was entered rather than silently with nothing.
+  assert.equal(cleanClientId("google", "not-an-id"), "not-an-id");
+  assert.equal(cleanClientId("google", ""), null);
+  assert.equal(cleanClientId("microsoft", " 3f2b0a1c-1111-2222-3333-444444444444 "), "3f2b0a1c-1111-2222-3333-444444444444");
+  const patch = backupSettingsPatch({ ...FORM, clientIdGoogle: `${id} view or download the client` }, 0);
+  assert.equal(patch.backup_client_id_google, id);
 });
