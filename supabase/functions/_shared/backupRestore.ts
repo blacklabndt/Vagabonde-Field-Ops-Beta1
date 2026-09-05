@@ -612,6 +612,13 @@ export interface JobRestoreCursor {
   // collided on its number has no row for its tickets to point at.
   jobsDone: string[];
   ticketIds: string[];
+  // And the chosen jobs that were already in the app. They are not on
+  // jobsDone — this run did not write them, so their place on the board and
+  // their tickets' signed totals are their own — but they are a row that
+  // exists, so their missing tickets, assessments and reports go under them.
+  // A restore that died between a job and its children left exactly that,
+  // and pressing the button again is how an office fixes it.
+  jobsHere: string[];
   // bucket/key for each PDF the restored rows point at, fetched in the
   // files phase.
   pdfKeys: string[];
@@ -645,6 +652,7 @@ export function newJobRestoreCursor(o: {
     partIndex: 0,
     jobsDone: [],
     ticketIds: [],
+    jobsHere: [],
     pdfKeys: [],
     loaded: {},
     fileIndex: null,
@@ -679,6 +687,7 @@ export function reviveJobRestoreCursor(raw: unknown): JobRestoreCursor {
     partIndex: num(c.partIndex),
     jobsDone: strs(c.jobsDone),
     ticketIds: strs(c.ticketIds),
+    jobsHere: strs(c.jobsHere),
     pdfKeys: strs(c.pdfKeys),
     loaded: (c.loaded ?? {}) as Record<string, number>,
     fileIndex: index,
@@ -764,20 +773,36 @@ export function rowsForChosenJobs(
 // same job twice a no-op. A job whose NUMBER is here under a different id is
 // something else entirely: jobs.job_number is unique, so the insert would be
 // refused anyway, and silently is the wrong way to be refused.
+//
+// Left alone is not the same as finished with, and `alreadyHere` is the
+// difference. A restore that failed between the jobs insert and the tickets
+// left the job live with nothing under it; pressing the button again skips
+// that job by id, and if the skip took its children out of the run with it
+// the retry would report itself green over a job that is still missing its
+// work. So its id comes back on this list, the children follow it, and every
+// row of theirs that is already there is skipped one at a time, by id, the
+// way every other row is.
 export function jobsToRestore(
   rows: Record<string, unknown>[],
   live: { ids: Iterable<string>; numbers: Iterable<string> }
-): { rows: Record<string, unknown>[]; skipped: string[]; collisions: string[] } {
+): {
+  rows: Record<string, unknown>[]; alreadyHere: string[];
+  skipped: string[]; collisions: string[];
+} {
   const ids = setOf(live.ids);
   const numbers = setOf(live.numbers);
   const out: Record<string, unknown>[] = [];
+  const alreadyHere: string[] = [];
   const skipped: string[] = [];
   const collisions: string[] = [];
   for (const row of rows || []) {
     const r = (row ?? {}) as Record<string, unknown>;
     const number = String(r.job_number ?? "");
     if (ids.has(String(r.id ?? ""))) {
-      addRestoreNote(skipped, `Job ${number} is already in the app, so it was left alone.`);
+      alreadyHere.push(String(r.id ?? ""));
+      addRestoreNote(skipped,
+        `Job ${number} is already in the app, so the job itself was left alone — any of its tickets, ` +
+        `assessments and reports that were missing were restored beside it.`);
       continue;
     }
     if (numbers.has(number)) {
@@ -787,31 +812,101 @@ export function jobsToRestore(
     }
     out.push(r);
   }
-  return { rows: out, skipped, collisions };
+  return { rows: out, alreadyHere, skipped, collisions };
 }
 
 // A ticket's id IS its number, so an id already in use is the collision the
 // office cares about — and a number deliberately retired is not free either.
 // Its charges and crew go with it: half a ticket is worse than none.
+//
+// With one exception, and `jobOf` is what tells it apart: a ticket already
+// here ON THE JOB IT CAME BACK UNDER is that same ticket, not a second
+// invoice bearing one number. That is the second press of Restore jobs, and
+// twenty lines calling it a collision would read as twenty invoices in
+// danger. It is left alone and said once, and its charges and crew hours
+// stay exactly as they are — this restore does not reprice a live ticket.
+// Without a `jobOf` there is nothing to tell apart, and every live id is a
+// collision as before.
 export function ticketsToRestore(
   rows: Record<string, unknown>[],
-  live: { ids: Iterable<string>; burned: Iterable<string> }
-): { rows: Record<string, unknown>[]; collisions: string[] } {
+  live: { ids: Iterable<string>; burned: Iterable<string>; jobOf?: Map<string, string> }
+): { rows: Record<string, unknown>[]; skipped: string[]; collisions: string[] } {
   const ids = setOf(live.ids);
   const burned = setOf(live.burned);
+  const jobOf = live.jobOf ?? new Map<string, string>();
   const out: Record<string, unknown>[] = [];
+  const skipped: string[] = [];
   const collisions: string[] = [];
+  let already = 0;
   for (const row of rows || []) {
     const r = (row ?? {}) as Record<string, unknown>;
     const id = String(r.id ?? "");
     if (ids.has(id)) {
+      const on = String(jobOf.get(id) ?? "");
+      if (on && on === String(r.job_id ?? "")) { already += 1; continue; }
       addRestoreNote(collisions,
-        `Ticket ${id} already exists here, so it and its charges and crew hours were not restored.`);
+        `Ticket ${id} already exists here${on ? " on a different job" : ""}, so it and its charges ` +
+        `and crew hours were not restored.`);
       continue;
     }
     if (burned.has(id)) {
       addRestoreNote(collisions,
         `Ticket number ${id} has been retired in this app, so that ticket was not restored.`);
+      continue;
+    }
+    out.push(r);
+  }
+  if (already) {
+    addRestoreNote(skipped,
+      `${already} ticket${already === 1 ? " was" : "s were"} already in the app and ${already === 1 ? "was" : "were"} ` +
+      `left alone, along with ${already === 1 ? "its" : "their"} charges and crew hours.`);
+  }
+  return { rows: out, skipped, collisions };
+}
+
+// What to call a row when a note is all an office has to go on. A ticket is
+// its number; a report is the file somebody uploaded; an assessment is the
+// day it was raised for. "A row was skipped" is not a report.
+export function rowIdentity(table: string, row: Record<string, unknown>): string {
+  const r = (row ?? {}) as Record<string, unknown>;
+  if (table === "tickets") return `Ticket ${String(r.id ?? "")}`;
+  if (table === "reports") {
+    const name = String(r.filename ?? "").trim();
+    return name ? `The report ${name}` : "A report";
+  }
+  if (table === "jhas") {
+    const day = String(r.work_date ?? "").trim();
+    return day ? `The assessment of ${day}` : "An assessment";
+  }
+  const what = table.replace(/_/g, " ").replace(/s$/, "");
+  return `A ${what} row`;
+}
+
+// tickets, reports and jhas each carry a client_key — the idempotency key the
+// app mints for a record it has not saved yet, unique across the table
+// wherever it is not null. A restored row keeps its own, so a key that is
+// live here under a DIFFERENT id is an insert Postgres refuses outright, and
+// one refused row fails the whole batch with a message naming an index.
+//
+// So it is asked about first, and answered the way a ticket number in use is
+// answered: that row is not restored, it is named, and anything that depends
+// on it goes with it — a ticket left out here never reaches c.ticketIds, so
+// its charges and crew hours are never attempted.
+export function withoutTakenClientKeys(
+  table: string, rows: Record<string, unknown>[], liveKeys: Iterable<string>
+): { rows: Record<string, unknown>[]; collisions: string[] } {
+  const taken = setOf(liveKeys);
+  const all = rows || [];
+  if (!taken.size) return { rows: all, collisions: [] };
+  const out: Record<string, unknown>[] = [];
+  const collisions: string[] = [];
+  for (const row of all) {
+    const r = (row ?? {}) as Record<string, unknown>;
+    const key = String(r.client_key ?? "").trim();
+    if (key && taken.has(key)) {
+      addRestoreNote(collisions,
+        `${rowIdentity(table, r)} was not restored: another record in the app already carries the same ` +
+        `save key, and two of them is a row the database refuses.`);
       continue;
     }
     out.push(r);
@@ -955,6 +1050,17 @@ export function onlyForIds(
 }
 
 // ── The cursor's arithmetic ──────────────────────────────────────────────
+
+// Nothing to hang a record on. Once the jobs table has been walked, a run
+// with no job written and no chosen job already here has no row for a
+// ticket, a charge, an assessment, a PDF or a patch to belong to — every
+// chosen job collided on its number, or was not in that backup at all. The
+// five remaining tables, the drive's file listing and the two patch passes
+// are all work with a known answer, so the run stops and reports what it
+// found rather than reading a year's parts to filter them all away.
+export function noRestorableJobs(c: JobRestoreCursor): boolean {
+  return !(c.jobsDone ?? []).length && !(c.jobsHere ?? []).length;
+}
 
 export function afterJobPart(c: JobRestoreCursor, done: {
   table: string; rows: number; lastPart: boolean; tableCount: number;

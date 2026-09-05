@@ -25,7 +25,8 @@ import {
   newJobRestoreCursor, reviveJobRestoreCursor, isJobRestoreCursor, jobRestoreCounts,
   addRestoreNote, rowsForChosenJobs, jobsToRestore, ticketsToRestore,
   childRowsToRestore, crewWithLiveProfiles, matchOrganisation, matchContact,
-  blankUnknown, pdfKeysFor, onlyForIds, afterJobPart, afterJobTable
+  blankUnknown, pdfKeysFor, onlyForIds, afterJobPart, afterJobTable,
+  noRestorableJobs, withoutTakenClientKeys, rowIdentity
 } from "../../supabase/functions/_shared/backupRestore.ts";
 
 import {
@@ -750,6 +751,52 @@ test("a job already here is left alone, and a number in use is a collision", () 
   assert.match(out.collisions[0], /S-200/);
 });
 
+test("a job that is already here is still a job its missing records go under", () => {
+  const rows = [
+    { id: "j1", job_number: "S-100" },   // already here, by id
+    { id: "j2", job_number: "S-200" },   // that number belongs to another job
+    { id: "j3", job_number: "S-300" }    // free
+  ];
+  const out = jobsToRestore(rows, { ids: ["j1"], numbers: ["S-100", "S-200"] });
+  // The job the restore left alone is named separately from the one it
+  // refused. A restore that died between the job and its tickets leaves the
+  // job live and its work missing, and the retry skips it by id — so the
+  // job's own id goes on the list the children follow, and the run puts back
+  // whatever is not there. A job it collided with has no row here at all and
+  // is on no list.
+  assert.deepEqual(out.alreadyHere, ["j1"]);
+  // And the note says exactly that, because "left alone" on its own reads as
+  // "nothing of yours was touched" to somebody looking for missing tickets.
+  assert.match(out.skipped[0], /restored beside it/);
+});
+
+test("a run whose chosen jobs are none of them here stops after the jobs table", () => {
+  const c = newJobRestoreCursor({ folderId: "f", folderName: "n", jobIds: ["j1"] });
+  // Nothing landed and nothing was already here: there is no row for a
+  // ticket, a charge, an assessment or a PDF to belong to, so the five
+  // remaining tables, the drive listing and the two patch passes are all
+  // work with a known answer.
+  assert.ok(noRestorableJobs(c));
+  c.jobsDone = ["j1"];
+  assert.ok(!noRestorableJobs(c));
+  c.jobsDone = [];
+  c.jobsHere = ["j1"];
+  // A job that was already here is exactly the case that must NOT stop: its
+  // missing tickets are the reason the run was started twice.
+  assert.ok(!noRestorableJobs(c));
+});
+
+test("the per-job cursor carries the jobs it found already here", () => {
+  const c = newJobRestoreCursor({ folderId: "f", folderName: "n", jobIds: ["j1"] });
+  assert.deepEqual(c.jobsHere, []);
+  c.jobsHere = ["j1"];
+  const back = reviveJobRestoreCursor(JSON.parse(JSON.stringify(c)));
+  assert.deepEqual(back.jobsHere, ["j1"]);
+  // A run raised before the field existed revives with an empty one rather
+  // than an undefined that would throw on the first spread.
+  assert.deepEqual(reviveJobRestoreCursor({ folderId: "f" }).jobsHere, []);
+});
+
 test("a ticket number already in use, or retired, is reported and skipped", () => {
   const rows = [{ id: "24-100" }, { id: "24-101" }, { id: "24-102" }];
   const out = ticketsToRestore(rows, { ids: ["24-100"], burned: ["24-101"] });
@@ -760,6 +807,55 @@ test("a ticket number already in use, or retired, is reported and skipped", () =
   assert.match(out.collisions.join(" "), /24-100/);
   assert.match(out.collisions.join(" "), /24-101/);
   assert.match(out.collisions.join(" "), /retired/);
+});
+
+test("the same ticket back on the same job is left alone, not called a collision", () => {
+  const rows = [
+    { id: "24-100", job_id: "j1" },   // here already, and it is this one
+    { id: "24-101", job_id: "j1" },   // here already, but on somebody else's job
+    { id: "24-102", job_id: "j1" }    // free
+  ];
+  const out = ticketsToRestore(rows, {
+    ids: ["24-100", "24-101"], burned: [],
+    jobOf: new Map([["24-100", "j1"], ["24-101", "j7"]])
+  });
+  assert.deepEqual(out.rows.map(r => r.id), ["24-102"]);
+  // Pressing Restore jobs twice must not read as twenty invoices in danger.
+  assert.equal(out.collisions.length, 1);
+  assert.match(out.collisions[0], /24-101/);
+  assert.equal(out.skipped.length, 1);
+  assert.match(out.skipped[0], /24-100|1 ticket/);
+  // And the note does not promise the charges came back: an already-here
+  // ticket keeps its own lines, its own crew hours and its own total.
+  assert.match(out.skipped[0], /left alone/);
+});
+
+test("a save key already in use is named, not left to a raw constraint", () => {
+  // tickets, reports and jhas each carry a unique client_key where it is not
+  // null. One row whose key is live under a different id would refuse the
+  // whole batch with a Postgres message nobody in an office can read.
+  const rows = [
+    { id: "24-100", client_key: "k1" },
+    { id: "24-101", client_key: null },
+    { id: "24-102", client_key: "k9" }
+  ];
+  const out = withoutTakenClientKeys("tickets", rows, ["k1"]);
+  assert.deepEqual(out.rows.map(r => r.id), ["24-101", "24-102"]);
+  assert.equal(out.collisions.length, 1);
+  assert.match(out.collisions[0], /24-100/);
+  // Nothing taken means nothing to say and nothing copied.
+  assert.deepEqual(withoutTakenClientKeys("tickets", rows, []).collisions, []);
+  assert.equal(withoutTakenClientKeys("tickets", rows, []).rows.length, 3);
+  // A report is its filename and an assessment is the day it was raised for:
+  // neither has a number, and "a row was skipped" is not a report.
+  assert.match(
+    withoutTakenClientKeys("reports", [{ id: "r1", filename: "Weld 12.pdf", client_key: "k1" }], ["k1"]).collisions[0],
+    /Weld 12\.pdf/);
+  assert.match(
+    withoutTakenClientKeys("jhas", [{ id: "h1", work_date: "2026-08-01", client_key: "k1" }], ["k1"]).collisions[0],
+    /2026-08-01/);
+  assert.match(rowIdentity("tickets", { id: "24-100" }), /24-100/);
+  assert.match(rowIdentity("rate_overrides", { id: "o1" }), /rate override/);
 });
 
 test("a child row already here is left alone, and said once for the table", () => {
@@ -900,4 +996,31 @@ test("a restored ticket goes in at zero and is re-priced from its lines", () => 
   assert.match(source, /stepJobActivity/);
   assert.match(source, /onlyForIds\(approvedTotalPatches/);
   assert.match(source, /onlyForIds\(activityPatches/);
+});
+
+test("a job already in the app is a parent the children still follow", () => {
+  const source = read("supabase/functions/backup-restore/index.ts");
+  // The two lists together: the jobs this run wrote and the jobs it found
+  // already here. A restore that died between a job and its tickets is
+  // retried by pressing the same button, and the retry has to reach the
+  // tickets rather than skip the job and report itself green.
+  assert.match(source, /restored: \[\.\.\.c\.jobsDone, \.\.\.c\.jobsHere\]/);
+  // But only the ones it actually wrote get their board position and their
+  // signed totals put back — a live job keeps its own.
+  assert.match(source, /onlyForIds\(activityPatches\([\s\S]{0,80}c\.jobsDone\)/);
+  assert.doesNotMatch(source, /onlyForIds\(activityPatches\([\s\S]{0,120}jobsHere/);
+  // And the run stops where there is nothing under any of them.
+  assert.match(source, /noRestorableJobs\(c\)/);
+});
+
+test("a save key already in use is checked for before the batch, not after", () => {
+  const source = read("supabase/functions/backup-restore/index.ts");
+  // The three tables that carry one. A raw unique-violation would fail the
+  // whole run with a message naming an index.
+  assert.match(source, /withoutTakenClientKeys/);
+  assert.match(source, /"client_key"/);
+  // Batched small: an "in" list is a URL, and a gateway has an opinion about
+  // how long a URL may be.
+  assert.match(source, /at \+= 100/);
+  assert.doesNotMatch(source, /at \+= 200/);
 });

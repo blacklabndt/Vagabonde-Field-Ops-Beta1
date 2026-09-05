@@ -52,7 +52,8 @@ import {
   JOB_RESTORE_KIND, newJobRestoreCursor, reviveJobRestoreCursor, isJobRestoreCursor,
   jobRestoreCounts, addRestoreNote, rowsForChosenJobs, jobsToRestore, ticketsToRestore,
   childRowsToRestore, crewWithLiveProfiles, matchOrganisation, matchContact, contactKey,
-  blankUnknown, pdfKeysFor, onlyForIds, afterJobPart, afterJobTable
+  blankUnknown, pdfKeysFor, onlyForIds, afterJobPart, afterJobTable,
+  noRestorableJobs, withoutTakenClientKeys
 } from "../_shared/backupRestore.ts";
 import type { RestoreCursor, JobRestoreCursor } from "../_shared/backupRestore.ts";
 import { gunzip } from "../_shared/gzip.ts";
@@ -876,17 +877,24 @@ async function stepJobTables(
   c: JobRestoreCursor, jobRefs: () => Promise<JobRefs>
 ): Promise<void> {
   if (c.tableIndex >= JOB_TABLES.length) { c.phase = "files"; return; }
+  // The jobs table is walked first, and once it is done a run with no job to
+  // put anything under has nothing left to do: no part of the other five
+  // tables can match, no PDF is pointed at and no patch has a row. Reading
+  // them anyway is a year of parts fetched off the drive and filtered away.
+  if (c.tableIndex > 0 && noRestorableJobs(c)) { c.phase = "done"; return; }
   const table = JOB_TABLES[c.tableIndex];
   const parts = partsForTable(allParts, table);
   if (c.partIndex >= parts.length) { afterJobTable(c, JOB_TABLES.length); return; }
 
   const all = await readPart(drive, parts[c.partIndex]);
   // Three sets, and the difference between them is the point: what was
-  // asked for, what actually went back, and which tickets actually went
+  // asked for, what has a row here now, and which tickets actually went
   // back. A job that collided on its number is in the first and not the
-  // second, so its tickets are never even read for.
+  // second, so its tickets are never even read for — while a job that was
+  // already here IS in the second, because its missing records are the whole
+  // reason somebody pressed the button a second time.
   const mine = rowsForChosenJobs(table, all, {
-    chosen: c.jobIds, restored: c.jobsDone, tickets: c.ticketIds
+    chosen: c.jobIds, restored: [...c.jobsDone, ...c.jobsHere], tickets: c.ticketIds
   });
   const written = !mine.length ? 0
     : table === "jobs"
@@ -914,6 +922,15 @@ async function putJobs(
   });
   for (const note of decided.skipped) addRestoreNote(c.skipped, note);
   for (const note of decided.collisions) addRestoreNote(c.collisions, note);
+  // A job that is already here is a parent the children still follow. It is
+  // kept apart from jobsDone on purpose: this run did not write it, so the
+  // activity phase leaves its place on the board alone — but its tickets,
+  // assessments and reports have somewhere to go, and every one of those
+  // that is already there will be skipped by its own id in its own table.
+  // Without this, a restore that died between the jobs insert and the
+  // tickets could never be finished by pressing the button again: the retry
+  // would skip the job and call itself complete over missing work.
+  c.jobsHere = [...new Set([...c.jobsHere, ...decided.alreadyHere])];
   if (!decided.rows.length) return 0;
 
   const raisedBy = await liveValues(db, "profiles", "id",
@@ -988,7 +1005,14 @@ async function putJobChildren(
   if (table === "tickets") {
     // A number deliberately retired is not free either.
     const burned = await liveValues(db, "burned_ticket_numbers", "id", rows.map(r => String(r.id ?? "")));
-    const decided = ticketsToRestore(rows, { ids: live, burned });
+    // Which job each live ticket of that number is on. A ticket already here
+    // under the job it came back under is that same ticket — the second
+    // press of the button — and saying "collision" about twenty of those
+    // would read as twenty invoices in danger.
+    const decided = ticketsToRestore(rows, {
+      ids: live, burned, jobOf: await liveTicketJobs(db, rows.map(r => String(r.id ?? "")))
+    });
+    for (const note of decided.skipped) addRestoreNote(c.skipped, note);
     for (const note of decided.collisions) addRestoreNote(c.collisions, note);
     const techs = await liveValues(db, "profiles", "id",
       decided.rows.map(r => String(r.technician_id ?? "")));
@@ -1019,6 +1043,19 @@ async function putJobChildren(
     }
   }
 
+  // Three of these tables carry client_key, the app's own idempotency key,
+  // unique wherever it is not null. A restored row keeps its own, so a key
+  // that is live here under a different id would refuse the whole batch with
+  // a message naming an index — asked about first, and named the way a
+  // ticket number in use is named.
+  if (table === "tickets" || table === "jhas" || table === "reports") {
+    const taken = await liveValues(db, table, "client_key",
+      ready.map(r => String(r.client_key ?? "")));
+    const decided = withoutTakenClientKeys(table, ready, taken);
+    for (const note of decided.collisions) addRestoreNote(c.collisions, note);
+    ready = decided.rows;
+  }
+
   if (!ready.length) return 0;
   for (let at = 0; at < ready.length; at += WRITE_BATCH) {
     const { error } = await db.from(table).insert(ready.slice(at, at + WRITE_BATCH));
@@ -1037,19 +1074,39 @@ async function putJobChildren(
 }
 
 // Which of these values are already here. Asked in batches, because "in"
-// with twenty-five thousand values is a URL no gateway will take.
+// with twenty-five thousand values is a URL no gateway will take — and a
+// hundred at a time rather than two hundred, because a uuid is thirty-six
+// characters before the commas and the escaping, and the ceiling that
+// matters is the URL's length and not the row count.
 async function liveValues(
   db: SupabaseClient, table: string, column: string, values: string[]
 ): Promise<string[]> {
   const out: string[] = [];
   const unique = [...new Set(values.filter(Boolean))];
-  for (let at = 0; at < unique.length; at += 200) {
-    const { data, error } = await db.from(table).select(column).in(column, unique.slice(at, at + 200));
+  for (let at = 0; at < unique.length; at += 100) {
+    const { data, error } = await db.from(table).select(column).in(column, unique.slice(at, at + 100));
     if (error) throw new Error(`Reading ${table} back failed: ${error.message}`);
     // The column is chosen at run time, so supabase-js cannot know the row
     // shape and types the answer as an error union; the cast is the only way
     // to read a column whose name is a variable.
     for (const r of (data ?? []) as unknown as Record<string, unknown>[]) out.push(String(r[column]));
+  }
+  return out;
+}
+
+// Which job each of these ticket numbers is on here, for the tickets that
+// are here at all. It is the difference between the second press of Restore
+// jobs — the same ticket, on the same job, already back — and a number that
+// has since been used by somebody else's invoice.
+async function liveTicketJobs(db: SupabaseClient, ids: string[]): Promise<Map<string, string>> {
+  const out = new Map<string, string>();
+  const unique = [...new Set(ids.filter(Boolean))];
+  for (let at = 0; at < unique.length; at += 100) {
+    const { data, error } = await db.from("tickets").select("id, job_id").in("id", unique.slice(at, at + 100));
+    if (error) throw new Error(`Reading the tickets back failed: ${error.message}`);
+    for (const r of (data ?? []) as unknown as Record<string, unknown>[]) {
+      out.set(String(r.id ?? ""), String(r.job_id ?? ""));
+    }
   }
   return out;
 }
