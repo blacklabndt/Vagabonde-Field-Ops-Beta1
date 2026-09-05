@@ -87,7 +87,12 @@ export default defineConfig({
         // The two policy pages are documents, not the app: Google reads them
         // when the drive registration is published, and a person with the app
         // installed may follow the link from the consent screen.
-        navigateFallbackDenylist: [/^\/approve(-ticket)?(\?|$)/, /^\/(privacy|terms)\.html$/],
+        // The drive's OAuth callback is a navigation too — Google sends the
+        // browser back to /backup/oauth/<provider>?code=… — and on a device
+        // with the app installed the service worker answered it with the
+        // app shell: the app opened, looked connected, and the code was
+        // never exchanged. It has to reach the Worker, like an approval link.
+        navigateFallbackDenylist: [/^\/approve(-ticket)?(\?|$)/, /^\/(privacy|terms)\.html$/, /^\/backup\/oauth\//],
         cleanupOutdatedCaches: true,
         // Supabase calls are deliberately absent from runtimeCaching: a stale
         // ticket or rate served from a cache would be worse than an honest
