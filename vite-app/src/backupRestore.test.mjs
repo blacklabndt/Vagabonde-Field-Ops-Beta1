@@ -20,12 +20,17 @@ import {
   settingsRestorePatch, ticketsForLoad, approvedTotalPatches, activityPatches,
   contentTypeFor, typedNameMatches, tooNewRefusal, accountFailureNote,
   withoutMissingProfiles, wantsSetPasswordMail, droppedAccountsNote, quotesThatLanded,
-  rowsWithLiveParent
+  rowsWithLiveParent,
+  JOB_RESTORE_KIND, JOB_RESTORE_PHASES, MAX_RESTORE_NOTES,
+  newJobRestoreCursor, reviveJobRestoreCursor, isJobRestoreCursor, jobRestoreCounts,
+  addRestoreNote, rowsForChosenJobs, jobsToRestore, ticketsToRestore,
+  childRowsToRestore, crewWithLiveProfiles, matchOrganisation, matchContact,
+  blankUnknown, pdfKeysFor, onlyForIds, afterJobPart, afterJobTable
 } from "../../supabase/functions/_shared/backupRestore.ts";
 
 import {
   LOAD_ORDER, WIPE_ORDER, PROFILE_REFS, LIVE_PARENT_REFS,
-  APP_SETTINGS_SECRETS, APP_SETTINGS_NEVER_RESTORED
+  APP_SETTINGS_SECRETS, APP_SETTINGS_NEVER_RESTORED, JOB_CHILD_TABLES
 } from "../../supabase/functions/_shared/backupTables.ts";
 
 const ROOT = new URL("../../", import.meta.url);
@@ -599,8 +604,10 @@ test("the three column patches go through the RPC, never an upsert", () => {
     assert.match(source, new RegExp(`restore_patch_rows[\\s\\S]{0,200}p_table:\\s*"${table}"`),
       `${table} is patched through restore_patch_rows`);
   }
-  // Three calls, and no upsert left carrying a patch.
-  assert.equal((source.match(/p_table:/g) || []).length, 3);
+  // Five calls — the three above, and the per-job restore's own two, which
+  // patch the same two columns for exactly the rows that run wrote — and no
+  // upsert anywhere carrying a patch.
+  assert.equal((source.match(/p_table:/g) || []).length, 5);
   assert.doesNotMatch(source, /upsert\(patches/);
   assert.doesNotMatch(source, /upsert\(chatReplyPatches|upsert\(approvedTotalPatches|upsert\(activityPatches/);
 });
@@ -629,4 +636,268 @@ test("an orphaned child is filtered against the rows that actually landed", () =
   // again on a slice that ran out of budget before its first batch.
   assert.match(source, /if \(!c\.partSkipCounted\)/);
   assert.doesNotMatch(source, /if \(c\.batchDone === 0\) c\.skipped/);
+});
+
+// ── Restoring a few jobs — the everyday mistake ──────────────────────────
+//
+// A second kind of restore inside the same function. It deletes nothing, so
+// it has no safety phase and no wipe; what it has instead is a set of
+// decisions about rows that are already there, which is exactly the part
+// worth settling without a drive.
+
+test("a per-job restore has no safety phase and no wipe", () => {
+  assert.deepEqual(JOB_RESTORE_PHASES, ["tables", "files", "activity", "done"]);
+  // Nothing is deleted, so there is nothing to take a copy of first.
+  assert.ok(!JOB_RESTORE_PHASES.includes("safety"));
+  assert.ok(!JOB_RESTORE_PHASES.includes("wipe"));
+  // And no accounts phase: it never creates an Auth user, it works with the
+  // people this database already has.
+  assert.ok(!JOB_RESTORE_PHASES.includes("accounts"));
+});
+
+test("the two cursors are told apart by the kind written on them", () => {
+  const job = newJobRestoreCursor({ folderId: "f", folderName: "n", jobIds: ["a", "b"] });
+  assert.equal(job.kind, JOB_RESTORE_KIND);
+  assert.equal(job.phase, "tables");
+  assert.deepEqual(job.jobIds, ["a", "b"]);
+  assert.ok(isJobRestoreCursor(job));
+  assert.ok(!isJobRestoreCursor(newRestoreCursor({ folderId: "f", folderName: "n", keepProfileId: "k" })));
+  // A cursor read back out of jsonb keeps its kind and its lists.
+  const back = reviveJobRestoreCursor(JSON.parse(JSON.stringify(job)));
+  assert.deepEqual(back, job);
+  // A run raised before a field existed still revives.
+  const thin = reviveJobRestoreCursor({ folderId: "f", jobIds: ["a"] });
+  assert.equal(thin.phase, "tables");
+  assert.deepEqual(thin.skipped, []);
+  assert.deepEqual(thin.collisions, []);
+  assert.equal(thin.fileIndex, null);
+});
+
+test("this kind's counts carry the notes themselves, not a tally", () => {
+  const c = newJobRestoreCursor({ folderId: "f", folderName: "n", jobIds: ["a"] });
+  c.loaded = { jobs: 1, tickets: 3 };
+  c.filesDone = 2;
+  c.filesBytes = 100;
+  addRestoreNote(c.skipped, "Job S-1 is already in the app.");
+  addRestoreNote(c.collisions, "Ticket 24-100 is already in use.");
+  const counts = jobRestoreCounts(c);
+  assert.deepEqual(counts.rows, { jobs: 1, tickets: 3 });
+  assert.equal(counts.files, 2);
+  assert.equal(counts.bytes, 100);
+  // Arrays, because a number cannot say which ticket number was in use.
+  assert.deepEqual(counts.skipped, ["Job S-1 is already in the app."]);
+  assert.deepEqual(counts.collisions, ["Ticket 24-100 is already in use."]);
+});
+
+test("the notes stop before the cursor stops fitting, and say so", () => {
+  const notes = [];
+  for (let i = 0; i < MAX_RESTORE_NOTES + 20; i++) addRestoreNote(notes, `note ${i}`);
+  assert.equal(notes.length, MAX_RESTORE_NOTES + 1);
+  assert.match(notes[notes.length - 1], /not listed/);
+  // The cap is on the report nobody could read, never on what is restored.
+  assert.ok(MAX_RESTORE_NOTES >= 100);
+});
+
+// ── Which rows of a part belong to this restore ──────────────────────────
+
+test("a part is filtered to the chosen jobs, and children to what landed", () => {
+  const sets = { chosen: ["j1", "j2"], restored: ["j1"], tickets: ["T-1"] };
+  // The jobs table is filtered by what the Admin picked.
+  assert.deepEqual(
+    rowsForChosenJobs("jobs", [{ id: "j1" }, { id: "j2" }, { id: "j9" }], sets).map(r => r.id),
+    ["j1", "j2"]
+  );
+  // Everything under a job is filtered by the jobs that ACTUALLY went back.
+  // j2 collided on its number and was not restored, so its tickets, its
+  // assessments and its reports have no parent and must not be attempted.
+  for (const table of ["tickets", "jhas", "reports", "rate_overrides"]) {
+    assert.deepEqual(
+      rowsForChosenJobs(table, [{ id: "x", job_id: "j1" }, { id: "y", job_id: "j2" }], sets).map(r => r.id),
+      ["x"], `${table} follows the jobs that landed`);
+  }
+  // And a ticket's own children follow the tickets that landed.
+  for (const table of ["ticket_lines", "ticket_crew"]) {
+    assert.deepEqual(
+      rowsForChosenJobs(table, [{ id: "a", ticket_id: "T-1" }, { id: "b", ticket_id: "T-2" }], sets).map(r => r.id),
+      ["a"], `${table} follows the tickets that landed`);
+  }
+});
+
+test("every table a job's records live in is one this filter has an answer for", () => {
+  for (const table of JOB_CHILD_TABLES) {
+    const kept = rowsForChosenJobs(table, [{ job_id: "j9", ticket_id: "T-9" }],
+      { chosen: ["j1"], restored: ["j1"], tickets: ["T-1"] });
+    assert.equal(kept.length, 0, `${table} is filtered, not passed through`);
+  }
+});
+
+// ── Nothing live is overwritten ──────────────────────────────────────────
+
+test("a job already here is left alone, and a number in use is a collision", () => {
+  const rows = [
+    { id: "j1", job_number: "S-100" },   // already here, by id
+    { id: "j2", job_number: "S-200" },   // that number belongs to another job
+    { id: "j3", job_number: "S-300" }    // free
+  ];
+  const out = jobsToRestore(rows, { ids: ["j1"], numbers: ["S-100", "S-200"] });
+  assert.deepEqual(out.rows.map(r => r.id), ["j3"]);
+  // Left alone is not a collision: restoring the same job twice is a no-op.
+  assert.equal(out.skipped.length, 1);
+  assert.match(out.skipped[0], /S-100/);
+  assert.match(out.skipped[0], /left alone/);
+  // A number in use by a different job is the one the office cares about.
+  assert.equal(out.collisions.length, 1);
+  assert.match(out.collisions[0], /S-200/);
+});
+
+test("a ticket number already in use, or retired, is reported and skipped", () => {
+  const rows = [{ id: "24-100" }, { id: "24-101" }, { id: "24-102" }];
+  const out = ticketsToRestore(rows, { ids: ["24-100"], burned: ["24-101"] });
+  assert.deepEqual(out.rows.map(r => r.id), ["24-102"]);
+  assert.equal(out.collisions.length, 2);
+  // Named by ticket number, because a ticket number is an invoice reference
+  // and two of them is worse than one missing.
+  assert.match(out.collisions.join(" "), /24-100/);
+  assert.match(out.collisions.join(" "), /24-101/);
+  assert.match(out.collisions.join(" "), /retired/);
+});
+
+test("a child row already here is left alone, and said once for the table", () => {
+  const rows = [{ id: "a" }, { id: "b" }, { id: "c" }];
+  const out = childRowsToRestore("ticket_lines", rows, ["a", "b"]);
+  assert.deepEqual(out.rows.map(r => r.id), ["c"]);
+  // One line per table, not one per row: a hundred of them is not a report.
+  assert.equal(out.skipped.length, 1);
+  assert.match(out.skipped[0], /2/);
+  assert.match(out.skipped[0], /ticket line/);
+  assert.deepEqual(childRowsToRestore("reports", rows, []).skipped, []);
+});
+
+test("a crew row whose person has gone is skipped and counted out loud", () => {
+  const rows = [
+    { id: "c1", profile_id: "p1", straight_hours: 8 },
+    { id: "c2", profile_id: "p9", straight_hours: 10 }
+  ];
+  const out = crewWithLiveProfiles(rows, ["p1"]);
+  // ticket_crew.profile_id is NOT NULL, so there is nothing else it could be.
+  assert.deepEqual(out.rows.map(r => r.id), ["c1"]);
+  assert.equal(out.skipped.length, 1);
+  assert.match(out.skipped[0], /hours/);
+  assert.deepEqual(crewWithLiveProfiles(rows, ["p1", "p9"]).skipped, []);
+});
+
+test("a name on a row that stands without it is blanked, not dropped", () => {
+  const rows = [{ id: "t1", technician_id: "p1" }, { id: "t2", technician_id: "p9" }, { id: "t3" }];
+  const out = blankUnknown(rows, "technician_id", ["p1"]);
+  assert.equal(out.length, 3);
+  assert.equal(out[0].technician_id, "p1");
+  assert.equal(out[1].technician_id, null);
+  assert.equal(out[2].technician_id, undefined);
+  // The caller's rows are never touched.
+  assert.equal(rows[1].technician_id, "p9");
+});
+
+// ── The organisations a job points at ────────────────────────────────────
+
+test("a client is kept by id, matched by name, or reported lost", () => {
+  const names = new Map([["c1", "Painted Pony"], ["c2", "Tourmaline"], ["c3", "Ovintiv"]]);
+  const live = { ids: new Set(["c1"]), byName: new Map([["tourmaline", "c2-new"]]) };
+  // Still here under the id the backup knows.
+  assert.deepEqual(matchOrganisation("c1", names, live), { id: "c1", how: "id", name: "Painted Pony" });
+  // Re-entered by hand after a mistake: new id, same name.
+  assert.deepEqual(matchOrganisation("c2", names, live), { id: "c2-new", how: "name", name: "Tourmaline" });
+  // Gone altogether — the job still goes back, without it.
+  assert.deepEqual(matchOrganisation("c3", names, live), { id: null, how: "lost", name: "Ovintiv" });
+  // A job that never named one is not missing anything.
+  assert.deepEqual(matchOrganisation(null, names, live), { id: null, how: "none", name: "" });
+  // Case and stray spaces are how a name gets re-typed, not a different firm.
+  assert.equal(matchOrganisation("c4", new Map([["c4", "  TOURMALINE "]]), live).id, "c2-new");
+});
+
+test("a contact is matched inside the organisation the job ended up with", () => {
+  const backup = new Map([
+    ["k1", { name: "Dave Ross", org_id: "c1" }],
+    ["k2", { name: "Jen Ho", org_id: "c2" }],
+    ["k3", { name: "Nobody", org_id: "c3" }]
+  ]);
+  const live = { ids: new Set(["k1"]), byOrgAndName: new Map([["c2-new|jen ho", "k2-new"]]) };
+  assert.equal(matchContact("k1", backup, live, "c1").id, "k1");
+  // The client was re-entered by hand, so its contacts were too.
+  assert.equal(matchContact("k2", backup, live, "c2-new").id, "k2-new");
+  assert.equal(matchContact("k2", backup, live, "c2-new").how, "name");
+  // No organisation to look inside means no match to make.
+  assert.equal(matchContact("k3", backup, live, null).id, null);
+  assert.equal(matchContact("k3", backup, live, null).how, "lost");
+  assert.equal(matchContact(null, backup, live, "c1").how, "none");
+});
+
+// ── The PDFs, and the two figures a trigger writes over ──────────────────
+
+test("only the PDFs the restored rows actually point at are fetched", () => {
+  const keys = pdfKeysFor("jhas", [{ pdf_key: "a.pdf" }, { pdf_key: null }, { pdf_key: "" }, { pdf_key: "b.pdf" }]);
+  assert.deepEqual(keys, ["jhas/a.pdf", "jhas/b.pdf"]);
+  assert.deepEqual(pdfKeysFor("reports", []), []);
+});
+
+test("the totals and dates are put back only on the rows this run wrote", () => {
+  const patches = [{ id: "t1", total: 100 }, { id: "t2", total: 200 }];
+  // A ticket that was already here keeps its own figures: this restore did
+  // not write it and must not re-price it.
+  assert.deepEqual(onlyForIds(patches, ["t1"]), [{ id: "t1", total: 100 }]);
+  assert.deepEqual(onlyForIds(patches, []), []);
+});
+
+// ── The cursor's arithmetic ──────────────────────────────────────────────
+
+test("a per-job restore walks part by part and table by table", () => {
+  let c = newJobRestoreCursor({ folderId: "f", folderName: "n", jobIds: ["j1"] });
+  c = afterJobPart(c, { table: "jobs", rows: 1, lastPart: false, tableCount: 3 });
+  assert.equal(c.partIndex, 1);
+  assert.equal(c.loaded.jobs, 1);
+  c = afterJobPart(c, { table: "jobs", rows: 2, lastPart: true, tableCount: 3 });
+  assert.equal(c.loaded.jobs, 3);
+  assert.equal(c.tableIndex, 1);
+  assert.equal(c.partIndex, 0);
+  assert.equal(c.phase, "tables");
+  c = afterJobTable(c, 3);
+  c = afterJobTable(c, 3);
+  // The last table done is the files phase, and there is no wipe behind it.
+  assert.equal(c.tableIndex, 3);
+  assert.equal(c.phase, "files");
+});
+
+// ── The second kind, read back out of the function ───────────────────────
+
+test("restoring a few jobs deletes nothing and overwrites nothing", () => {
+  const source = read("supabase/functions/backup-restore/index.ts");
+  assert.match(source, /restore_jobs/);
+  // Not one delete in the whole of the per-job path. The only deletes in the
+  // file are the wipe phase's and the price history the load itself wrote,
+  // and both belong to restore-all.
+  assert.equal((source.match(/\.delete\(\)/g) || []).length, 2);
+  assert.match(source, /function startRestoreJobs\(/);
+  assert.match(source, /function putJobs\(/);
+  assert.match(source, /function putJobChildren\(/);
+  // Inserts, never upserts: an upsert would replace a live row, which is the
+  // one thing this must not do.
+  assert.doesNotMatch(source, /putJobChildren[\s\S]{0,1600}\.upsert\(/);
+  // The chosen jobs' rows only, and the tickets that landed only.
+  assert.match(source, /rowsForChosenJobs/);
+  assert.match(source, /ticketsToRestore/);
+  assert.match(source, /crewWithLiveProfiles/);
+  // The same guard discipline as every other slice.
+  assert.match(source, /stillHoldsRun/);
+});
+
+test("a restored ticket goes in at zero and is re-priced from its lines", () => {
+  const source = read("supabase/functions/backup-restore/index.ts");
+  // Same reason as restore-all: tickets_total_balances is a deferred
+  // constraint trigger, and ticket_lines cannot load before tickets do. A
+  // ticket carrying its real total would be refused on every priced ticket.
+  assert.match(source, /ticketsForLoad/);
+  // And the signed ones get the backup's own figure back afterwards, in the
+  // activity phase, through the RPC — never an upsert.
+  assert.match(source, /stepJobActivity/);
+  assert.match(source, /onlyForIds\(approvedTotalPatches/);
+  assert.match(source, /onlyForIds\(activityPatches/);
 });

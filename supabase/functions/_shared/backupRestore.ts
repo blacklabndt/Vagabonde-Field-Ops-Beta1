@@ -562,3 +562,412 @@ export function tooNewRefusal(backupVersion: string | null, liveVersion: string 
 export function accountFailureNote(who: string, why: string): string {
   return `${who}: ${why}`;
 }
+
+// ═════════════════════════════════════════════════════════════════════════
+// Restoring a few jobs — the everyday mistake
+// ═════════════════════════════════════════════════════════════════════════
+//
+// The disaster story replaces everything; the everyday one is a job somebody
+// deleted on Tuesday. So this kind writes into tables that are NOT empty,
+// and every rule below follows from that one difference:
+//
+//   · nothing live is deleted and nothing live is overwritten — a row whose
+//     id is already here is left alone, which makes restoring the same job
+//     twice a no-op rather than a duplicate;
+//   · a ticket number already in use by a DIFFERENT ticket is a collision,
+//     and that ticket goes back unrestored with its charges and crew,
+//     because a ticket number is somebody's invoice reference;
+//   · everything a job points at that may no longer exist is resolved rather
+//     than assumed.
+//
+// And because a row this restore chose not to write is a parent some other
+// row still names, the children of a skipped row are never even read for:
+// the filter below follows the jobs and the tickets that ACTUALLY landed,
+// not the ones that were asked for.
+
+export const JOB_RESTORE_KIND = "restore_jobs";
+
+// No safety phase and no wipe: it deletes nothing, so there is nothing to
+// take a copy of first. The activity phase is here for the same reason
+// restore-all has one — a trigger writes over two figures on the way in.
+export const JOB_RESTORE_PHASES: string[] = ["tables", "files", "activity", "done"];
+
+// This kind reports by name rather than by tally, and the report lives on
+// the run's cursor, which is one jsonb column. Past this many the notes stop
+// and say so: a report nobody can read is not a report, and a cursor that
+// grows without bound is a row that stops fitting.
+export const MAX_RESTORE_NOTES = 200;
+
+export interface JobRestoreCursor {
+  kind: string;
+  phase: string;
+  folderId: string;
+  folderName: string;
+  // What the Admin picked, off the backup's own jobs index.
+  jobIds: string[];
+  tableIndex: number;
+  partIndex: number;
+  // The jobs and the tickets this run actually wrote. Everything under them
+  // is filtered by these and never by what was asked for: a job that
+  // collided on its number has no row for its tickets to point at.
+  jobsDone: string[];
+  ticketIds: string[];
+  // bucket/key for each PDF the restored rows point at, fetched in the
+  // files phase.
+  pdfKeys: string[];
+  loaded: Record<string, number>;
+  // Which drive file is which, worked out once and kept: the files folder of
+  // a year's backup is thousands of entries and listing it per slice is a
+  // round trip, but matching it per slice is not free either.
+  fileIndex: { key: string; id: string | null }[] | null;
+  fileOffset: number;
+  filesDone: number;
+  filesBytes: number;
+  totalsPart: number;
+  totalsDone: boolean;
+  activityPart: number;
+  // Sentences, not numbers. "Two records were skipped" tells an office
+  // nothing; "ticket 24-118 is already in use here" tells them what to do.
+  skipped: string[];
+  collisions: string[];
+}
+
+export function newJobRestoreCursor(o: {
+  folderId: string; folderName: string; jobIds: string[];
+}): JobRestoreCursor {
+  return {
+    kind: JOB_RESTORE_KIND,
+    phase: "tables",
+    folderId: String(o.folderId ?? ""),
+    folderName: String(o.folderName ?? ""),
+    jobIds: strs(o.jobIds),
+    tableIndex: 0,
+    partIndex: 0,
+    jobsDone: [],
+    ticketIds: [],
+    pdfKeys: [],
+    loaded: {},
+    fileIndex: null,
+    fileOffset: 0,
+    filesDone: 0,
+    filesBytes: 0,
+    totalsPart: 0,
+    totalsDone: false,
+    activityPart: 0,
+    skipped: [],
+    collisions: []
+  };
+}
+
+export function reviveJobRestoreCursor(raw: unknown): JobRestoreCursor {
+  const c = (raw ?? {}) as Record<string, unknown>;
+  const base = newJobRestoreCursor({
+    folderId: String(c.folderId ?? ""),
+    folderName: String(c.folderName ?? ""),
+    jobIds: strs(c.jobIds)
+  });
+  const index = Array.isArray(c.fileIndex)
+    ? (c.fileIndex as Record<string, unknown>[]).map(e => ({
+        key: String((e ?? {}).key ?? ""),
+        id: (e ?? {}).id ? String((e as Record<string, unknown>).id) : null
+      }))
+    : null;
+  return {
+    ...base,
+    phase: typeof c.phase === "string" && c.phase ? c.phase : base.phase,
+    tableIndex: num(c.tableIndex),
+    partIndex: num(c.partIndex),
+    jobsDone: strs(c.jobsDone),
+    ticketIds: strs(c.ticketIds),
+    pdfKeys: strs(c.pdfKeys),
+    loaded: (c.loaded ?? {}) as Record<string, number>,
+    fileIndex: index,
+    fileOffset: num(c.fileOffset),
+    filesDone: num(c.filesDone),
+    filesBytes: num(c.filesBytes),
+    totalsPart: num(c.totalsPart),
+    totalsDone: c.totalsDone === true,
+    activityPart: num(c.activityPart),
+    skipped: strs(c.skipped),
+    collisions: strs(c.collisions)
+  };
+}
+
+// Which cursor a slice is holding. The two kinds share one function, one
+// row and one set of guards, and they differ in shape — so the shape says
+// which it is, off a field the cursor carries rather than a guess at its
+// contents.
+export function isJobRestoreCursor(c: unknown): boolean {
+  return !!c && (c as Record<string, unknown>).kind === JOB_RESTORE_KIND;
+}
+
+// What the panel shows for this kind. `skipped` and `collisions` are the
+// notes themselves — a count of collisions is a count nobody can act on.
+export function jobRestoreCounts(c: JobRestoreCursor): Record<string, unknown> {
+  return {
+    rows: c.loaded ?? {},
+    files: num(c.filesDone),
+    bytes: num(c.filesBytes),
+    skipped: c.skipped ?? [],
+    collisions: c.collisions ?? []
+  };
+}
+
+// One more note, up to the cap and then one line saying there were more.
+export function addRestoreNote(notes: string[], text: string): string[] {
+  if (notes.length < MAX_RESTORE_NOTES) notes.push(text);
+  else if (notes.length === MAX_RESTORE_NOTES) {
+    notes.push("…and more were left out or already here; they are not listed.");
+  }
+  return notes;
+}
+
+const setOf = (ids: Iterable<string> | undefined): Set<string> => {
+  const out = new Set<string>();
+  for (const id of ids || []) { const s = String(id ?? ""); if (s) out.add(s); }
+  return out;
+};
+
+// ── Which rows of a part belong to this restore ──────────────────────────
+
+// The backup is read the same way it was written — part by part — and each
+// part is filtered here, so a per-job restore never holds more than one part
+// in memory however big the backup is.
+//
+// Three different sets, and the difference between them is the whole point:
+// `chosen` is what the Admin picked, `restored` is the jobs that actually
+// went back, `tickets` is the tickets that actually went back. Children
+// follow the last two, so a job that collided on its number takes its
+// tickets, assessments and reports out of the restore with it rather than
+// leaving them to be refused by a foreign key.
+export function rowsForChosenJobs(
+  table: string,
+  rows: Record<string, unknown>[],
+  sets: { chosen: Iterable<string>; restored: Iterable<string>; tickets: Iterable<string> }
+): Record<string, unknown>[] {
+  const chosen = setOf(sets.chosen);
+  const restored = setOf(sets.restored);
+  const tickets = setOf(sets.tickets);
+  return (rows || []).filter(row => {
+    const r = (row ?? {}) as Record<string, unknown>;
+    if (table === "jobs") return chosen.has(String(r.id ?? ""));
+    if (table === "ticket_lines" || table === "ticket_crew") {
+      return tickets.has(String(r.ticket_id ?? ""));
+    }
+    return restored.has(String(r.job_id ?? ""));
+  });
+}
+
+// ── Nothing live is overwritten ──────────────────────────────────────────
+
+// A job already here by id is left alone — that is what makes restoring the
+// same job twice a no-op. A job whose NUMBER is here under a different id is
+// something else entirely: jobs.job_number is unique, so the insert would be
+// refused anyway, and silently is the wrong way to be refused.
+export function jobsToRestore(
+  rows: Record<string, unknown>[],
+  live: { ids: Iterable<string>; numbers: Iterable<string> }
+): { rows: Record<string, unknown>[]; skipped: string[]; collisions: string[] } {
+  const ids = setOf(live.ids);
+  const numbers = setOf(live.numbers);
+  const out: Record<string, unknown>[] = [];
+  const skipped: string[] = [];
+  const collisions: string[] = [];
+  for (const row of rows || []) {
+    const r = (row ?? {}) as Record<string, unknown>;
+    const number = String(r.job_number ?? "");
+    if (ids.has(String(r.id ?? ""))) {
+      addRestoreNote(skipped, `Job ${number} is already in the app, so it was left alone.`);
+      continue;
+    }
+    if (numbers.has(number)) {
+      addRestoreNote(collisions,
+        `Job number ${number} is already used by a different job here, so that job was not restored.`);
+      continue;
+    }
+    out.push(r);
+  }
+  return { rows: out, skipped, collisions };
+}
+
+// A ticket's id IS its number, so an id already in use is the collision the
+// office cares about — and a number deliberately retired is not free either.
+// Its charges and crew go with it: half a ticket is worse than none.
+export function ticketsToRestore(
+  rows: Record<string, unknown>[],
+  live: { ids: Iterable<string>; burned: Iterable<string> }
+): { rows: Record<string, unknown>[]; collisions: string[] } {
+  const ids = setOf(live.ids);
+  const burned = setOf(live.burned);
+  const out: Record<string, unknown>[] = [];
+  const collisions: string[] = [];
+  for (const row of rows || []) {
+    const r = (row ?? {}) as Record<string, unknown>;
+    const id = String(r.id ?? "");
+    if (ids.has(id)) {
+      addRestoreNote(collisions,
+        `Ticket ${id} already exists here, so it and its charges and crew hours were not restored.`);
+      continue;
+    }
+    if (burned.has(id)) {
+      addRestoreNote(collisions,
+        `Ticket number ${id} has been retired in this app, so that ticket was not restored.`);
+      continue;
+    }
+    out.push(r);
+  }
+  return { rows: out, collisions };
+}
+
+// The plain children — charges, crew, assessments, reports, price overrides.
+// Already here means left alone, and it is said once for the table rather
+// than once for the row: a hundred lines saying a charge was already there
+// is not a report anybody reads.
+export function childRowsToRestore(
+  table: string, rows: Record<string, unknown>[], liveIds: Iterable<string>
+): { rows: Record<string, unknown>[]; skipped: string[] } {
+  const live = setOf(liveIds);
+  const out: Record<string, unknown>[] = [];
+  let already = 0;
+  for (const row of rows || []) {
+    const r = (row ?? {}) as Record<string, unknown>;
+    if (live.has(String(r.id ?? ""))) { already += 1; continue; }
+    out.push(r);
+  }
+  const skipped: string[] = [];
+  if (already) {
+    const what = table.replace(/_/g, " ").replace(/s$/, "");
+    addRestoreNote(skipped,
+      `${already} ${what}${already === 1 ? "" : "s"} were already in the app and were left alone.`);
+  }
+  return { rows: out, skipped };
+}
+
+// ticket_crew.profile_id is NOT NULL, so a crew row for somebody with no
+// profile cannot be written at all. There is nothing else it could be — and
+// it is hours somebody worked, so it is counted out loud rather than
+// quietly dropped.
+export function crewWithLiveProfiles(
+  rows: Record<string, unknown>[], liveProfileIds: Iterable<string>
+): { rows: Record<string, unknown>[]; skipped: string[] } {
+  const live = setOf(liveProfileIds);
+  const out: Record<string, unknown>[] = [];
+  let gone = 0;
+  for (const row of rows || []) {
+    const r = (row ?? {}) as Record<string, unknown>;
+    if (!live.has(String(r.profile_id ?? ""))) { gone += 1; continue; }
+    out.push(r);
+  }
+  const skipped: string[] = [];
+  if (gone) {
+    addRestoreNote(skipped,
+      `${gone} crew ${gone === 1 ? "row" : "rows"} could not be restored: ${gone === 1 ? "that account is" : "those accounts are"} ` +
+      `no longer in the app, so ${gone === 1 ? "its" : "their"} hours are missing from the restored tickets.`);
+  }
+  return { rows: out, skipped };
+}
+
+// A name on a row that stands perfectly well without it — a job's creator, a
+// ticket's technician, an assessment's signer. The column is blanked and the
+// row goes in; dropping the row instead would lose the work.
+export function blankUnknown(
+  rows: Record<string, unknown>[], column: string, liveIds: Iterable<string>
+): Record<string, unknown>[] {
+  const live = setOf(liveIds);
+  return (rows || []).map(row => {
+    const r = (row ?? {}) as Record<string, unknown>;
+    const v = r[column];
+    if (v === null || v === undefined || live.has(String(v))) return r;
+    return { ...r, [column]: null };
+  });
+}
+
+// ── The organisations and people a job points at ─────────────────────────
+
+// A job's client or contractor: kept by id when that organisation still
+// exists, matched by name when it does not — a client re-entered by hand
+// after a mistake has a new id and the same name — and otherwise left empty
+// and named in the report rather than blocking the job.
+export function matchOrganisation(
+  wantedId: unknown,
+  backupNames: Map<string, string>,
+  live: { ids: Set<string>; byName: Map<string, string> }
+): { id: string | null; how: string; name: string } {
+  const wanted = String(wantedId ?? "").trim();
+  if (!wanted) return { id: null, how: "none", name: "" };
+  const name = String(backupNames.get(wanted) ?? "").trim();
+  if (live.ids.has(wanted)) return { id: wanted, how: "id", name };
+  const matched = name ? live.byName.get(name.toLowerCase()) : undefined;
+  if (matched) return { id: matched, how: "name", name };
+  return { id: null, how: "lost", name };
+}
+
+// A job's client or contractor contact, the same way — except that a contact
+// name is unique only inside its organisation (contacts carry org_id, and
+// two firms may each have a Dave), so the match is made inside whichever
+// organisation the job has just ended up pointing at. With no organisation
+// there is nowhere to look, and the column is left empty.
+export function matchContact(
+  wantedId: unknown,
+  backupContacts: Map<string, { name: string; org_id: string }>,
+  live: { ids: Set<string>; byOrgAndName: Map<string, string> },
+  orgId: string | null
+): { id: string | null; how: string; name: string } {
+  const wanted = String(wantedId ?? "").trim();
+  if (!wanted) return { id: null, how: "none", name: "" };
+  const from = backupContacts.get(wanted);
+  const name = String((from ?? {}).name ?? "").trim();
+  if (live.ids.has(wanted)) return { id: wanted, how: "id", name };
+  const matched = orgId && name
+    ? live.byOrgAndName.get(`${orgId}|${name.toLowerCase()}`)
+    : undefined;
+  if (matched) return { id: matched, how: "name", name };
+  return { id: null, how: "lost", name };
+}
+
+export function contactKey(orgId: unknown, name: unknown): string {
+  return `${String(orgId ?? "")}|${String(name ?? "").trim().toLowerCase()}`;
+}
+
+// ── The PDFs, and the two figures a trigger writes over ──────────────────
+
+// bucket/key for each PDF the rows that actually went back point at, which
+// is the same shape restore-all's file entries are named in. A row with no
+// PDF is not a missing PDF.
+export function pdfKeysFor(bucket: string, rows: Record<string, unknown>[]): string[] {
+  const out: string[] = [];
+  for (const row of rows || []) {
+    const key = String(((row ?? {}) as Record<string, unknown>).pdf_key ?? "").trim();
+    if (key) out.push(`${bucket}/${key}`);
+  }
+  return out;
+}
+
+// The patches for the rows THIS run wrote and no others. A ticket that was
+// already here keeps its own total and a job that was already here keeps its
+// own place on the board: this restore did not write them, and re-pricing a
+// ticket somebody has signed is not a per-job restore's to do.
+export function onlyForIds(
+  patches: Record<string, unknown>[], ids: Iterable<string>
+): Record<string, unknown>[] {
+  const mine = setOf(ids);
+  return (patches || []).filter(p => mine.has(String(((p ?? {}) as Record<string, unknown>).id ?? "")));
+}
+
+// ── The cursor's arithmetic ──────────────────────────────────────────────
+
+export function afterJobPart(c: JobRestoreCursor, done: {
+  table: string; rows: number; lastPart: boolean; tableCount: number;
+}): JobRestoreCursor {
+  c.loaded[done.table] = num(c.loaded[done.table]) + num(done.rows);
+  if (done.lastPart) return afterJobTable(c, done.tableCount);
+  c.partIndex = num(c.partIndex) + 1;
+  return c;
+}
+
+export function afterJobTable(c: JobRestoreCursor, tableCount: number): JobRestoreCursor {
+  c.tableIndex = num(c.tableIndex) + 1;
+  c.partIndex = 0;
+  if (c.tableIndex >= tableCount) c.phase = "files";
+  return c;
+}

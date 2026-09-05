@@ -77,11 +77,25 @@ const KIND_WORDS = {
 const rowsIn = counts => Object.values((counts && counts.rows) || {}).reduce((n, v) => n + Number(v || 0), 0);
 const filesIn = counts => Number((counts && counts.files) || 0);
 const bytesIn = counts => Number((counts && counts.bytes) || 0);
-// A restore's two other figures. Both are zero for a backup and for a
-// restore that had nothing to leave out, and both are worth saying when they
-// are not: a record left out is a record that is not in the app.
-const skippedIn = counts => Number((counts && counts.skipped) || 0);
-const collisionsIn = counts => Number((counts && counts.collisions) || 0);
+// A restore's two other figures, and they arrive in two shapes on purpose.
+// A restore-all writes into tables it has just emptied, so what it left out
+// is a number; a per-job restore writes into tables that are full, so what
+// it left out is a list of sentences — "two records were skipped" tells an
+// office nothing, and "ticket 24-118 is already in use here" tells them what
+// to do. Both are read through these, so neither shape can reach the render
+// as a NaN or a spread of a number.
+const noteList = v => (Array.isArray(v) ? v.filter(Boolean).map(String) : []);
+const countOf = v => (Array.isArray(v) ? v.length : Number(v || 0));
+const skippedIn = counts => countOf(counts && counts.skipped);
+const collisionsIn = counts => countOf(counts && counts.collisions);
+// Everything a finished restore has to say, in the order it is worth
+// reading: what could not go back, what was already there, and who could
+// not be given an account again.
+const notesIn = counts => [
+  ...noteList(counts && counts.collisions),
+  ...noteList(counts && counts.skipped),
+  ...noteList(counts && counts.accountsFailed)
+];
 
 // While something is in flight the panel looks every few seconds; when
 // nothing is, it looks rarely — this screen is left open.
@@ -392,11 +406,17 @@ export function AutomaticBackupPanel() {
             <>finished {when(s.last_run.finished_at)} &middot; {s.last_run.folder_name} &middot;{" "}
               {plural(rowsIn(s.last_run.counts), "record")}, {plural(filesIn(s.last_run.counts), "file")}{" "}
               ({mb(bytesIn(s.last_run.counts))}).
-              {skippedIn(s.last_run.counts) > 0 && (
+              {/* The tallies belong to the restore that empties the app
+                  first: there, a row left out is a row that is simply not
+                  there any more. A per-job restore's figures are sentences
+                  instead, and they are in the notes below — counting them
+                  here would say "two records were skipped" over a report
+                  that already names the ticket and the job. */}
+              {s.last_run.kind !== "restore_jobs" && skippedIn(s.last_run.counts) > 0 && (
                 <> {plural(skippedIn(s.last_run.counts), "record")} could not be put back and{" "}
                   {skippedIn(s.last_run.counts) === 1 ? "was" : "were"} left out.</>
               )}
-              {collisionsIn(s.last_run.counts) > 0 && (
+              {s.last_run.kind !== "restore_jobs" && collisionsIn(s.last_run.counts) > 0 && (
                 <> {plural(collisionsIn(s.last_run.counts), "record")} {collisionsIn(s.last_run.counts) === 1
                   ? "was" : "were"} already in the app and {collisionsIn(s.last_run.counts) === 1
                   ? "was" : "were"} left alone.</>
@@ -407,6 +427,20 @@ export function AutomaticBackupPanel() {
                   showing it only on a failure was showing it never. */}
               {s.last_run.error && (
                 <div style={{ marginTop: 4, color: "var(--color-accent-700)" }}>{s.last_run.error}</div>
+              )}
+              {/* And the report itself, where the run kept one. A per-job
+                  restore's whole answer is here: which job was already in
+                  the app, which ticket number was in use, whose hours could
+                  not come back. */}
+              {notesIn(s.last_run.counts).length > 0 && (
+                <details style={{ marginTop: 6 }}>
+                  <summary style={{ fontSize: 13 }}>
+                    It left {plural(notesIn(s.last_run.counts).length, "note")} &mdash; worth reading
+                  </summary>
+                  <ul style={{ fontSize: 12, margin: "8px 0 0", paddingLeft: 18 }}>
+                    {notesIn(s.last_run.counts).slice(0, 40).map((line, i) => <li key={i}>{line}</li>)}
+                  </ul>
+                </details>
               )}
             </>
           ) : (
@@ -456,6 +490,11 @@ export function AutomaticBackupPanel() {
                     {isBeforeRestore(b.name) && <TagX variant="outline">kept</TagX>}
                     {b.incomplete && <TagX variant="outline">didn&rsquo;t finish</TagX>}
                     <span style={{ marginLeft: "auto", display: "flex", gap: 6 }}>
+                      {/* The everyday one first, because it is the one that
+                          gets pressed: a job somebody deleted on Tuesday,
+                          not the whole app replaced. */}
+                      <Btn variant="secondary" disabled={!!b.incomplete || !!run}
+                        onClick={() => setRestoring({ ...b, mode: "jobs" })}>Restore jobs</Btn>
                       <Btn variant="secondary" disabled={!!b.incomplete || !!run}
                         onClick={() => setRestoring({ ...b, mode: "all" })}>Restore everything</Btn>
                     </span>
@@ -475,6 +514,11 @@ export function AutomaticBackupPanel() {
 
       {restoring && restoring.mode === "all" && (
         <RestoreDialog backup={restoring} onClose={() => setRestoring(null)}
+          onStarted={() => { setRestoring(null); Db.currentBackupRun().then(showRun).catch(() => {}); }} />
+      )}
+
+      {restoring && restoring.mode === "jobs" && (
+        <RestoreJobsDialog backup={restoring} onClose={() => setRestoring(null)}
           onStarted={() => { setRestoring(null); Db.currentBackupRun().then(showRun).catch(() => {}); }} />
       )}
 
@@ -634,6 +678,109 @@ export function RestoreDialog({ backup, onClose, onStarted }) {
               placeholder={backup.name} autoComplete="off" disabled={starting} style={{ width: "100%" }} />
           </Field>
         )}
+      </>)}
+    </Dialog>
+  );
+}
+
+// Restore a few jobs — the everyday mistake, as opposed to the disaster.
+//
+// No typed word here, and that is the point rather than an oversight:
+// nothing is deleted and nothing live is overwritten, so the worst outcome
+// of pressing this by accident is that some old jobs come back and can be
+// deleted again the ordinary way. What it needs instead is a way to find the
+// right job among a year of them, which is the search box and the checkboxes.
+//
+// The list comes from the backup's own index — the manifest's jobs array,
+// written when the backup was taken — so picking is a read of one small file
+// rather than a walk of the whole backup.
+export function RestoreJobsDialog({ backup, onClose, onStarted }) {
+  const [manifest, setManifest] = useState(null);
+  const [loading, setLoading] = useState(true);
+  const [error, setError] = useState("");
+  const [query, setQuery] = useState("");
+  const [chosen, setChosen] = useState(() => new Set());
+  const [starting, setStarting] = useState(false);
+
+  useEffect(() => {
+    let alive = true;
+    Db.backupManifest(backup.folderId)
+      .then(m => { if (alive) { setManifest(m); setLoading(false); } })
+      .catch(e => { if (alive) { setError(e.message || "Couldn't read that backup's index."); setLoading(false); } });
+    return () => { alive = false; };
+  }, [backup.folderId]);
+
+  const jobs = (manifest && manifest.jobs) || [];
+  const needle = query.trim().toLowerCase();
+  const shown = needle
+    ? jobs.filter(j => `${j.job_number} ${j.client} ${j.project}`.toLowerCase().includes(needle))
+    : jobs;
+
+  const toggle = id => setChosen(prev => {
+    const next = new Set(prev);
+    if (next.has(id)) next.delete(id); else next.add(id);
+    return next;
+  });
+
+  const start = async () => {
+    setStarting(true);
+    setError("");
+    try {
+      await Db.restoreJobs({ folderId: backup.folderId, folderName: backup.name, jobIds: [...chosen] });
+      onStarted();
+    } catch (e) {
+      setError(e.message || "The restore couldn't be started.");
+      setStarting(false);
+    }
+  };
+
+  return (
+    <Dialog title="Restore jobs" maxWidth={640} onClose={starting ? () => {} : onClose}
+      actions={<>
+        <Btn variant="secondary" onClick={onClose} disabled={starting}>Cancel</Btn>
+        <Btn variant="primary" disabled={!chosen.size || starting} onClick={start}
+          title={!chosen.size ? "Tick at least one job" : undefined}>
+          {starting ? "Starting…" : `Restore ${plural(chosen.size, "job")}`}
+        </Btn>
+      </>}>
+      <ErrorBox>{error}</ErrorBox>
+      <div style={{ fontSize: 13, color: "color-mix(in srgb, var(--color-text) 70%, transparent)" }}>
+        From <strong>{backup.name}</strong>. The chosen jobs come back with their tickets, charges, crew hours,
+        assessments, reports and PDFs. Nothing already in the app is deleted or changed: a record that is still
+        here is left alone, and a ticket number already in use is reported rather than duplicated. If a job&rsquo;s
+        client or a crew member no longer exists, the restore says so instead of guessing.
+      </div>
+      {loading && <Loading label="Reading the backup’s index…" />}
+      {!loading && !jobs.length && !error && <div style={QUIET}>That backup&rsquo;s index lists no jobs.</div>}
+      {!loading && jobs.length > 0 && (<>
+        <Field label="Find a job">
+          <input className="input" value={query} onChange={e => setQuery(e.target.value)}
+            placeholder="job number, client or project" autoComplete="off" style={{ width: "100%" }} />
+        </Field>
+        <div style={{ maxHeight: 320, overflowY: "auto", border: "1px solid var(--color-neutral-300)" }}>
+          {shown.map(j => (
+            <label key={j.id} style={{
+              display: "flex", gap: 10, alignItems: "flex-start", padding: "8px 10px",
+              borderBottom: "1px solid var(--color-neutral-300)", cursor: "pointer"
+            }}>
+              <input type="checkbox" checked={chosen.has(j.id)} disabled={starting}
+                onChange={() => toggle(j.id)} />
+              <span style={{ fontSize: 13 }}>
+                <strong>{j.job_number}</strong> &middot; {j.client || "no client on file"} &middot; {j.project || "—"}
+                <span style={{ ...QUIET, display: "block" }}>
+                  {j.status} &middot; raised {when(j.created_at)} &middot; {plural(j.tickets, "ticket")},{" "}
+                  {plural(j.jhas, "assessment")}, {plural(j.reports, "report")}
+                </span>
+              </span>
+            </label>
+          ))}
+          {!shown.length && <div style={{ ...QUIET, padding: "10px 12px" }}>Nothing matches that.</div>}
+        </div>
+        <div style={QUIET}>
+          {plural(chosen.size, "job")} chosen of {plural(jobs.length, "job")} in this backup. It runs on the
+          server and keeps going whether this screen is open or not; what it could not put back is listed on
+          the panel when it finishes.
+        </div>
       </>)}
     </Dialog>
   );

@@ -1818,6 +1818,21 @@ export const Db = {
     return data || {};
   },
 
+  // Putting a few jobs back — the everyday mistake, as opposed to the
+  // disaster. There is no typed word here because nothing is deleted and
+  // nothing live is overwritten: a record already in the app is left alone,
+  // and a ticket number already in use comes back as a collision the panel
+  // lists by name rather than a second ticket bearing somebody's invoice
+  // reference.
+  async restoreJobs({ folderId, folderName, jobIds }) {
+    const { data, error } = await sbClient.functions.invoke("backup-restore", {
+      body: { action: "restore_jobs", folderId, folderName, jobIds }
+    });
+    if (error) throw await fnError(error);
+    if (data && data.error) throw new Error(data.error);
+    return data || {};
+  },
+
   async sendTicketApproval({ ticketId, to, cc }) {
     const { data, error } = await sbClient.functions.invoke("send-ticket-approval", {
       body: { ticketId, to, cc }
@@ -3803,6 +3818,7 @@ const SAVE_MESSAGES = {
   disconnectBackup: "Drive disconnected",
   backupNow: "Backup started",
   restoreAll: "Restore started",
+  restoreJobs: "Restoring the chosen jobs",
 
   // Rates
   setRateLine: "Rate saved",

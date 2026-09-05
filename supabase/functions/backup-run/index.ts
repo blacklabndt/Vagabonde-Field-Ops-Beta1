@@ -147,18 +147,18 @@ async function tick(db: SupabaseClient, secret: string): Promise<Record<string, 
     if (sliceLooksAlive(running.heartbeat_at, Date.now())) {
       // Another slice of this same run is still going. Two at once would
       // upload the same part twice and fight over the cursor.
-      await tendWaitingRestore(db, running, secret);
+      await tend(db, running, secret);
       return { ok: true, busy: true, runId: running.id };
     }
     const moved = await advance(db, running, secret);
-    await tendWaitingRestore(db, running, secret);
+    await tend(db, running, secret);
     return moved;
   }
 
   const queued = await openRun(db, "queued");
   if (queued) {
     const moved = await advance(db, queued, secret);
-    await tendWaitingRestore(db, queued, secret);
+    await tend(db, queued, secret);
     return moved;
   }
 
@@ -217,6 +217,17 @@ async function tick(db: SupabaseClient, secret: string): Promise<Record<string, 
 // read off the cursor here rather than asked for as a filter, because at
 // most one restore is ever in flight and the comparison is this function's
 // to make.
+// Tending the waiting restore is a courtesy the tick pays on its way past,
+// and it must never cost the tick the work it actually came to do — the
+// backup or the safety copy it has just advanced. So a failure here is
+// written down and swallowed: the restore's own five-minute forward is the
+// backstop, and a tick that threw on this would leave the run it advanced
+// unreported and its next slice unkicked.
+async function tend(db: SupabaseClient, safety: Run, secret: string): Promise<void> {
+  try { await tendWaitingRestore(db, safety, secret); }
+  catch (e) { await logError("backup-run", `Tending the waiting restore failed: ${(e as Error).message}`, { runId: safety.id }); }
+}
+
 async function tendWaitingRestore(db: SupabaseClient, safety: Run, secret: string): Promise<void> {
   if (String(safety.kind) !== "before_restore") return;
   const safetyId = String(safety.id);

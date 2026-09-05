@@ -1,6 +1,7 @@
-// backup-restore — putting it all back.
+// backup-restore — putting it back.
 //
-// The dangerous one. It is the only thing in the app that empties tables it
+// Two kinds live here, and they are not the same risk. restore_all is the
+// dangerous one. It is the only thing in the app that empties tables it
 // did not fill, so it is gated four times over: an Admin's own profile is
 // read before anything else happens; a backup from a newer schema than this
 // database is refused outright; the Admin types the backup's folder name;
@@ -8,24 +9,30 @@
 // about to be replaced, into a "before-restore" folder retention will never
 // tidy away. If that copy fails, nothing is deleted at all.
 //
-// It runs in slices for the same reason backup-run does, on the same
-// cursor-in-the-row pattern, and it is driven by the same five-minute tick:
-// backup-run handles its own two kinds and forwards a restore here.
+// restore_jobs is the everyday one — a job somebody deleted on Tuesday. It
+// has none of those gates because it needs none of them: it deletes nothing
+// and overwrites nothing, so the worst outcome of a mis-click is some old
+// jobs that can be deleted again the ordinary way. The one gate it keeps is
+// the schema check, because half a job restored is worse than none.
+//
+// Both run in slices for the same reason backup-run does, on the same
+// cursor-in-the-row pattern, and both are driven by the same five-minute
+// tick: backup-run handles its own two kinds and forwards a restore here.
 //
 //   {action:"preflight"}    an Admin, before the dialog offers anything
 //   {action:"restore_all"}  an Admin, with the typed folder name
-//   {action:"restore_jobs"} an Admin, with chosen job ids  (Task 7)
+//   {action:"restore_jobs"} an Admin, with the job ids picked off the index
 //   {action:"advance"}      the internal secret, one slice
 
 // deno-lint-ignore-file no-explicit-any
 import type { SupabaseClient } from "https://esm.sh/@supabase/supabase-js@2";
 import {
   LOAD_ORDER, WIPE_ORDER, TABLE_KEYS, PROFILE_REFS, LIVE_PARENT_REFS,
-  APP_SETTINGS_SECRETS, APP_SETTINGS_NEVER_RESTORED
+  APP_SETTINGS_SECRETS, APP_SETTINGS_NEVER_RESTORED, JOB_CHILD_TABLES
 } from "../_shared/backupTables.ts";
 import {
   TABLES_FOLDER, FILES_FOLDER, folderStamp, beforeRestoreName,
-  parseFileEntryName, schemaTooNew
+  fileEntryName, parseFileEntryName, schemaTooNew
 } from "../_shared/backupManifest.ts";
 import type { DriveClient } from "../_shared/drive.ts";
 import {
@@ -41,9 +48,13 @@ import {
   settingsRestorePatch, ticketsForLoad, approvedTotalPatches, activityPatches,
   contentTypeFor, typedNameMatches, tooNewRefusal, accountFailureNote,
   withoutMissingProfiles, wantsSetPasswordMail, droppedAccountsNote, quotesThatLanded,
-  rowsWithLiveParent
+  rowsWithLiveParent,
+  JOB_RESTORE_KIND, newJobRestoreCursor, reviveJobRestoreCursor, isJobRestoreCursor,
+  jobRestoreCounts, addRestoreNote, rowsForChosenJobs, jobsToRestore, ticketsToRestore,
+  childRowsToRestore, crewWithLiveProfiles, matchOrganisation, matchContact, contactKey,
+  blankUnknown, pdfKeysFor, onlyForIds, afterJobPart, afterJobTable
 } from "../_shared/backupRestore.ts";
-import type { RestoreCursor } from "../_shared/backupRestore.ts";
+import type { RestoreCursor, JobRestoreCursor } from "../_shared/backupRestore.ts";
 import { gunzip } from "../_shared/gzip.ts";
 import { sendSetPasswordLink } from "../_shared/setPassword.ts";
 
@@ -80,6 +91,9 @@ Deno.serve(async (req) => {
     if (action === "preflight") return json(await preflight(db, String(body.folderId ?? "")));
     if (action === "restore_all") {
       return json(await startRestoreAll(db, body, caller.userId, await internalSecret(db)));
+    }
+    if (action === "restore_jobs") {
+      return json(await startRestoreJobs(db, body, caller.userId, await internalSecret(db)));
     }
     return json({ error: `Unknown action "${action}"` }, 400);
   } catch (e) {
@@ -162,6 +176,51 @@ async function startRestoreAll(
   return { ok: true, runId: run.id };
 }
 
+// A few jobs, not the lot. There is no typed word to get past here and there
+// is no safety backup taken first, and both follow from the same fact: this
+// kind deletes nothing and overwrites nothing, so the worst outcome of a
+// mis-click is some old jobs that can be deleted again the ordinary way.
+//
+// The schema check is the same one, though: a backup from a newer app holds
+// columns this database has not got, and half a job restored is worse than
+// none.
+async function startRestoreJobs(
+  db: SupabaseClient, body: Record<string, unknown>, adminId: string, secret: string
+): Promise<Record<string, unknown>> {
+  const folderId = String(body.folderId ?? "");
+  const folderName = String(body.folderName ?? "");
+  const jobIds = Array.isArray(body.jobIds)
+    ? [...new Set((body.jobIds as unknown[]).map(String).filter(Boolean))]
+    : [];
+  if (!folderId) throw new Error("folderId is required");
+  if (!jobIds.length) throw new Error("Pick at least one job to restore.");
+
+  const check = await preflight(db, folderId);
+  if (check.tooNew) {
+    throw new Error(tooNewRefusal(
+      check.schema_version as string | null, check.live_schema_version as string | null
+    ));
+  }
+
+  const { data: open, error: openErr } = await db.from("backup_runs")
+    .select("id, kind").in("status", ["queued", "running"]).limit(1).maybeSingle();
+  if (openErr) throw openErr;
+  if (open) throw new Error("Something is already running — wait for it to finish before restoring anything.");
+
+  const now = new Date().toISOString();
+  const cursor = newJobRestoreCursor({ folderId, folderName, jobIds });
+  const { data: run, error } = await db.from("backup_runs").insert({
+    kind: JOB_RESTORE_KIND, status: "running", phase: "tables",
+    folder_id: folderId, folder_name: folderName, requested_by: adminId,
+    started_at: now, heartbeat_at: now,
+    cursor, counts: jobRestoreCounts(cursor)
+  }).select("id").single();
+  if (error) throw error;
+
+  kick("backup-restore", { action: "advance", runId: run.id, chain: true }, secret);
+  return { ok: true, runId: run.id };
+}
+
 // ── One slice of a restore ───────────────────────────────────────────────
 
 const RUN_COLUMNS = "id, kind, status, phase, cursor, counts, folder_id, folder_name, heartbeat_at";
@@ -185,7 +244,14 @@ async function advance(
   }
 
   const deadline = sliceDeadline(Date.now(), BUDGET_MS);
-  let c: RestoreCursor = reviveRestoreCursor(run.cursor);
+  // Two kinds of restore share this function, this row and these guards, and
+  // their cursors are different shapes. Which one is on the row is decided
+  // by the run's own kind — the value the start wrote — and never guessed at
+  // from the cursor's contents.
+  const perJob = String(run.kind) === JOB_RESTORE_KIND;
+  let c: RestoreCursor | JobRestoreCursor = perJob
+    ? reviveJobRestoreCursor(run.cursor)
+    : reviveRestoreCursor(run.cursor);
   // The status this slice holds the run at. Every write below is conditional
   // on it, so a slice that has been superseded writes nothing at all —
   // including its own failure. Same discipline as backup-run's, same reason:
@@ -219,10 +285,37 @@ async function advance(
       return listed;
     };
 
+    // The organisations, contacts and people a per-job restore has to
+    // resolve against. Read once per slice — the backup's own copies and the
+    // live ones — rather than once per part, and only when a per-job restore
+    // actually reaches its jobs table.
+    let refs: JobRefs | null = null;
+    const jobRefs = async (): Promise<JobRefs> => {
+      if (refs) return refs;
+      const built = await readJobRefs(db, await opened(), await partList());
+      refs = built;
+      return built;
+    };
+
     let units = 0;
     while (!outOfBudget(deadline, Date.now()) && c.phase !== "done") {
+      if (perJob) {
+        // A per-job restore has no safety phase, no wipe and no accounts: it
+        // deletes nothing, so there is nothing to take a copy of first, and
+        // it never creates an Auth user — it works with the people this
+        // database already has.
+        const j = c as JobRestoreCursor;
+        if (j.phase === "tables") await stepJobTables(db, await opened(), await partList(), j, jobRefs);
+        else if (j.phase === "files") await stepJobFiles(db, await opened(), j, deadline);
+        else if (j.phase === "activity") await stepJobActivity(db, await opened(), await partList(), j, deadline);
+        else j.phase = "done";
+        units += 1;
+        if (!await persist(db, runId, j, guard)) return { ok: true, runId, superseded: true };
+        continue;
+      }
+      const r = c as RestoreCursor;
       if (c.phase === "safety") {
-        const ready = await stepSafety(db, c, runId, guard);
+        const ready = await stepSafety(db, r, runId, guard);
         // The cursor was written inside stepSafety, before this returned:
         // the safety run's id has to be on the row before the slice ends or
         // the next tick raises a second one.
@@ -239,11 +332,11 @@ async function advance(
           return { ok: true, runId, phase: "safety", waiting: true };
         }
       }
-      else if (c.phase === "wipe") await stepWipe(db, c);
-      else if (c.phase === "accounts") c = await stepAccounts(db, await opened(), await partList(), c, deadline);
-      else if (c.phase === "tables") c = await stepLoad(db, await opened(), await partList(), c, deadline);
-      else if (c.phase === "files") c = await stepFilesBack(db, await opened(), c, deadline);
-      else if (c.phase === "activity") c = await stepActivity(db, await opened(), await partList(), c, deadline);
+      else if (c.phase === "wipe") await stepWipe(db, r);
+      else if (c.phase === "accounts") c = await stepAccounts(db, await opened(), await partList(), r, deadline);
+      else if (c.phase === "tables") c = await stepLoad(db, await opened(), await partList(), r, deadline);
+      else if (c.phase === "files") c = await stepFilesBack(db, await opened(), r, deadline);
+      else if (c.phase === "activity") c = await stepActivity(db, await opened(), await partList(), r, deadline);
       else c.phase = "done";
       units += 1;
 
@@ -255,11 +348,14 @@ async function advance(
       // A restore that had to leave people out finished — and there is still
       // something an Admin has to be told, so it is written on the run. The
       // panel shows `error` only on a run that failed, which is right: this
-      // one did not, and the note is for whoever goes looking.
-      const left = droppedAccountsNote(c.droppedProfileIds, c.accountsFailed);
+      // one did not, and the note is for whoever goes looking. A per-job
+      // restore has no such list: it never touched an account.
+      const left = perJob
+        ? ""
+        : droppedAccountsNote((c as RestoreCursor).droppedProfileIds, (c as RestoreCursor).accountsFailed);
       const { data: held, error: doneErr } = await db.from("backup_runs").update({
         status: "complete", phase: "done", finished_at: finished,
-        heartbeat_at: finished, cursor: c, counts: restoreCounts(c),
+        heartbeat_at: finished, cursor: c, counts: countsOf(c),
         error: left || null
       }).eq("id", runId).eq("status", guard).select("id");
       if (doneErr) throw doneErr;
@@ -267,10 +363,12 @@ async function advance(
       // An address that bounced is not a reason to fail a restore, but it is
       // a reason somebody has to be told about: it is one person with no way
       // into an account that exists.
-      for (const failure of c.accountsFailed) {
-        await logError("backup-restore", `Account not restored: ${failure}`, { runId });
+      if (!perJob) {
+        for (const failure of (c as RestoreCursor).accountsFailed) {
+          await logError("backup-restore", `Account not restored: ${failure}`, { runId });
+        }
       }
-      return { ok: true, runId, complete: true, counts: restoreCounts(c) };
+      return { ok: true, runId, complete: true, counts: countsOf(c) };
     }
 
     if (units > 0) kick("backup-restore", { action: "advance", runId, chain: true }, secret);
@@ -280,15 +378,26 @@ async function advance(
   }
 }
 
+// What the panel reads, whichever kind of restore wrote it. The two shapes
+// differ where they have to: restore-all counts the rows it left out, a
+// per-job restore names them, because "two records were skipped" tells an
+// office nothing and "ticket 24-118 is already in use here" tells them what
+// to do.
+function countsOf(c: RestoreCursor | JobRestoreCursor): Record<string, unknown> {
+  return isJobRestoreCursor(c)
+    ? jobRestoreCounts(c as JobRestoreCursor)
+    : restoreCounts(c as RestoreCursor);
+}
+
 // The cursor after every unit, not at the end of the slice: a slice that
 // dies here has to be resumable from what is on the row, and the heartbeat
 // is how the next tick knows it died. Zero rows matched is this slice
 // finding out it no longer holds the run.
 async function persist(
-  db: SupabaseClient, runId: string, c: RestoreCursor, guard: string
+  db: SupabaseClient, runId: string, c: RestoreCursor | JobRestoreCursor, guard: string
 ): Promise<boolean> {
   const { data: held, error } = await db.from("backup_runs").update({
-    phase: c.phase, cursor: c, heartbeat_at: new Date().toISOString(), counts: restoreCounts(c)
+    phase: c.phase, cursor: c, heartbeat_at: new Date().toISOString(), counts: countsOf(c)
   }).eq("id", runId).eq("status", guard).select("id");
   if (error) throw error;
   return stillHoldsRun(held);
@@ -739,6 +848,370 @@ async function stepActivity(
   c.activityPart = 0;
   c.phase = "done";
   return c;
+}
+
+// ═════════════════════════════════════════════════════════════════════════
+// Restoring a few jobs
+// ═════════════════════════════════════════════════════════════════════════
+//
+// The same machinery — the same door, the same cursor-in-the-row, the same
+// guard on every write, the same kick between slices — pointed at a much
+// smaller job. What is different is that it writes into tables that are NOT
+// empty, and every rule follows from that: nothing live is deleted, nothing
+// live is overwritten, and a row this restore chose not to write takes its
+// own children out of the restore with it rather than leaving them to be
+// refused by a foreign key.
+//
+// Which tables a job's records live in, in the order they have to go back:
+// the job itself, then everything that names it.
+const JOB_TABLES = ["jobs", ...JOB_CHILD_TABLES];
+
+// The chosen jobs' rows, one part at a time. The backup is read exactly the
+// way it was written and each part is filtered to the jobs asked for, so a
+// per-job restore never holds more than one part in memory however big the
+// backup is — and one part is this phase's unit of work, so the slice's
+// budget is checked between them by the loop that calls this.
+async function stepJobTables(
+  db: SupabaseClient, drive: DriveClient, allParts: Part[],
+  c: JobRestoreCursor, jobRefs: () => Promise<JobRefs>
+): Promise<void> {
+  if (c.tableIndex >= JOB_TABLES.length) { c.phase = "files"; return; }
+  const table = JOB_TABLES[c.tableIndex];
+  const parts = partsForTable(allParts, table);
+  if (c.partIndex >= parts.length) { afterJobTable(c, JOB_TABLES.length); return; }
+
+  const all = await readPart(drive, parts[c.partIndex]);
+  // Three sets, and the difference between them is the point: what was
+  // asked for, what actually went back, and which tickets actually went
+  // back. A job that collided on its number is in the first and not the
+  // second, so its tickets are never even read for.
+  const mine = rowsForChosenJobs(table, all, {
+    chosen: c.jobIds, restored: c.jobsDone, tickets: c.ticketIds
+  });
+  const written = !mine.length ? 0
+    : table === "jobs"
+      ? await putJobs(db, c, mine, await jobRefs())
+      : await putJobChildren(db, c, table, mine);
+
+  afterJobPart(c, {
+    table, rows: written, lastPart: c.partIndex >= parts.length - 1, tableCount: JOB_TABLES.length
+  });
+}
+
+// A job carries four references that may not exist here any more: its
+// client, its contractor, the two contacts on it, and the person who raised
+// it. The organisations are looked for by id and then by name — a client
+// re-entered by hand after a mistake has a new id and the same name — the
+// contacts by id and then by name inside whichever organisation the job
+// ended up with, and anything still unmatched is left empty and named in
+// the report rather than blocking the job.
+async function putJobs(
+  db: SupabaseClient, c: JobRestoreCursor, rows: Record<string, unknown>[], refs: JobRefs
+): Promise<number> {
+  const decided = jobsToRestore(rows, {
+    ids: await liveValues(db, "jobs", "id", rows.map(r => String(r.id ?? ""))),
+    numbers: await liveValues(db, "jobs", "job_number", rows.map(r => String(r.job_number ?? "")))
+  });
+  for (const note of decided.skipped) addRestoreNote(c.skipped, note);
+  for (const note of decided.collisions) addRestoreNote(c.collisions, note);
+  if (!decided.rows.length) return 0;
+
+  const raisedBy = await liveValues(db, "profiles", "id",
+    decided.rows.map(r => String(r.created_by ?? "")));
+  const ready = blankUnknown(decided.rows, "created_by", raisedBy).map(row => {
+    const job = { ...row };
+    const number = String(job.job_number ?? "");
+    const client = matchOrganisation(job.client_id, refs.clientNames, refs.liveClients);
+    const contractor = matchOrganisation(job.contractor_id, refs.contractorNames, refs.liveContractors);
+    job.client_id = client.id;
+    job.contractor_id = contractor.id;
+    noteOrganisation(c, number, "client", client);
+    noteOrganisation(c, number, "contractor", contractor);
+    // Each contact inside the organisation the job has just ended up
+    // pointing at: two firms may each have a Dave, and a contact matched
+    // across a client boundary would put one client's rep on another's job.
+    const clientRep = matchContact(job.client_contact_id, refs.contacts, refs.liveContacts, client.id);
+    const contractorRep = matchContact(job.contractor_contact_id, refs.contacts, refs.liveContacts, contractor.id);
+    job.client_contact_id = clientRep.id;
+    job.contractor_contact_id = contractorRep.id;
+    if (clientRep.how === "lost") {
+      addRestoreNote(c.skipped,
+        `Job ${number} was restored without its client contact${clientRep.name ? ` (${clientRep.name})` : ""} — ` +
+        `that contact is no longer in the app.`);
+    }
+    if (contractorRep.how === "lost") {
+      addRestoreNote(c.skipped,
+        `Job ${number} was restored without its contractor contact${contractorRep.name ? ` (${contractorRep.name})` : ""} — ` +
+        `that contact is no longer in the app.`);
+    }
+    return job;
+  });
+
+  for (let at = 0; at < ready.length; at += WRITE_BATCH) {
+    const { error } = await db.from("jobs").insert(ready.slice(at, at + WRITE_BATCH));
+    if (error) throw new Error(`Restoring the jobs failed: ${error.message}`);
+  }
+  // Only now, and only the ones that went in. Everything under a job follows
+  // this list, so a job named here that is not on the table would be a batch
+  // of children nothing will ever satisfy.
+  c.jobsDone = [...new Set([...c.jobsDone, ...ready.map(r => String(r.id ?? ""))])];
+  return ready.length;
+}
+
+function noteOrganisation(
+  c: JobRestoreCursor, jobNumber: string, what: string,
+  found: { id: string | null; how: string; name: string }
+): void {
+  if (found.how === "name") {
+    addRestoreNote(c.skipped,
+      `Job ${jobNumber} was matched to the ${what} “${found.name}” by name — that organisation has a ` +
+      `different id here than it had in the backup. Check the job is on the right one.`);
+  }
+  if (found.how === "lost") {
+    addRestoreNote(c.skipped,
+      `Job ${jobNumber} was restored without its ${what}${found.name ? ` (${found.name})` : ""} — that ` +
+      `organisation is no longer in the app. Set it on the job record.`);
+  }
+}
+
+// Tickets, charges, crew hours, assessments, reports and price overrides. A
+// ticket's id IS its number, so an id already in use is the collision the
+// office cares about, and its charges and crew go with it: half a ticket is
+// worse than none.
+async function putJobChildren(
+  db: SupabaseClient, c: JobRestoreCursor, table: string, rows: Record<string, unknown>[]
+): Promise<number> {
+  const key = "id";
+  const live = await liveValues(db, table, key, rows.map(r => String(r[key] ?? "")));
+
+  let ready: Record<string, unknown>[];
+  if (table === "tickets") {
+    // A number deliberately retired is not free either.
+    const burned = await liveValues(db, "burned_ticket_numbers", "id", rows.map(r => String(r.id ?? "")));
+    const decided = ticketsToRestore(rows, { ids: live, burned });
+    for (const note of decided.collisions) addRestoreNote(c.collisions, note);
+    const techs = await liveValues(db, "profiles", "id",
+      decided.rows.map(r => String(r.technician_id ?? "")));
+    // At zero, and put right in the activity phase. tickets_total_balances
+    // is a deferred constraint trigger that re-adds a ticket's lines at the
+    // commit of its own insert, and ticket_lines cannot load before tickets
+    // do — a ticket carrying its real total would be refused on every priced
+    // ticket in the backup.
+    ready = ticketsForLoad(blankUnknown(decided.rows, "technician_id", techs));
+  } else {
+    const decided = childRowsToRestore(table, rows, live);
+    for (const note of decided.skipped) addRestoreNote(c.skipped, note);
+    ready = decided.rows;
+    if (table === "ticket_crew") {
+      // ticket_crew.profile_id is NOT NULL, so a crew row for somebody with
+      // no profile cannot be written at all. It is hours somebody worked, so
+      // it is named rather than guessed at.
+      const crew = crewWithLiveProfiles(ready, await liveValues(db, "profiles", "id",
+        ready.map(r => String(r.profile_id ?? ""))));
+      for (const note of crew.skipped) addRestoreNote(c.skipped, note);
+      ready = crew.rows;
+    }
+    if (table === "jhas") {
+      ready = blankUnknown(ready, "signed_by", await liveValues(db, "profiles", "id",
+        ready.map(r => String(r.signed_by ?? ""))));
+      ready = blankUnknown(ready, "closed_by", await liveValues(db, "profiles", "id",
+        ready.map(r => String(r.closed_by ?? ""))));
+    }
+  }
+
+  if (!ready.length) return 0;
+  for (let at = 0; at < ready.length; at += WRITE_BATCH) {
+    const { error } = await db.from(table).insert(ready.slice(at, at + WRITE_BATCH));
+    if (error) throw new Error(`Restoring ${table.replace(/_/g, " ")} failed: ${error.message}`);
+  }
+
+  // Only the tickets that actually went back may bring charges and crew, and
+  // only the PDFs of rows that actually went back are worth fetching.
+  if (table === "tickets") {
+    c.ticketIds = [...new Set([...c.ticketIds, ...ready.map(r => String(r.id ?? ""))])];
+  }
+  if (table === "jhas" || table === "reports") {
+    c.pdfKeys = [...new Set([...c.pdfKeys, ...pdfKeysFor(table, ready)])];
+  }
+  return ready.length;
+}
+
+// Which of these values are already here. Asked in batches, because "in"
+// with twenty-five thousand values is a URL no gateway will take.
+async function liveValues(
+  db: SupabaseClient, table: string, column: string, values: string[]
+): Promise<string[]> {
+  const out: string[] = [];
+  const unique = [...new Set(values.filter(Boolean))];
+  for (let at = 0; at < unique.length; at += 200) {
+    const { data, error } = await db.from(table).select(column).in(column, unique.slice(at, at + 200));
+    if (error) throw new Error(`Reading ${table} back failed: ${error.message}`);
+    // The column is chosen at run time, so supabase-js cannot know the row
+    // shape and types the answer as an error union; the cast is the only way
+    // to read a column whose name is a variable.
+    for (const r of (data ?? []) as unknown as Record<string, unknown>[]) out.push(String(r[column]));
+  }
+  return out;
+}
+
+// The organisations and contacts, from the backup and from this database,
+// so a job's references can be resolved rather than assumed.
+interface JobRefs {
+  clientNames: Map<string, string>;
+  contractorNames: Map<string, string>;
+  contacts: Map<string, { name: string; org_id: string }>;
+  liveClients: { ids: Set<string>; byName: Map<string, string> };
+  liveContractors: { ids: Set<string>; byName: Map<string, string> };
+  liveContacts: { ids: Set<string>; byOrgAndName: Map<string, string> };
+}
+
+async function readJobRefs(
+  db: SupabaseClient, drive: DriveClient, allParts: Part[]
+): Promise<JobRefs> {
+  const namesFrom = (rows: Record<string, unknown>[]): Map<string, string> => {
+    const m = new Map<string, string>();
+    for (const r of rows) m.set(String(r.id ?? ""), String(r.name ?? ""));
+    return m;
+  };
+  const liveOrgs = async (table: string) => {
+    const rows = await readEveryRow(db, table, "id, name");
+    const ids = new Set<string>();
+    const byName = new Map<string, string>();
+    for (const r of rows) {
+      ids.add(String(r.id ?? ""));
+      byName.set(String(r.name ?? "").trim().toLowerCase(), String(r.id ?? ""));
+    }
+    return { ids, byName };
+  };
+
+  const backupContacts = new Map<string, { name: string; org_id: string }>();
+  for (const r of await readTable(drive, allParts, "contacts")) {
+    backupContacts.set(String(r.id ?? ""), {
+      name: String(r.name ?? ""), org_id: String(r.org_id ?? "")
+    });
+  }
+  const liveContactRows = await readEveryRow(db, "contacts", "id, name, org_id");
+  const contactIds = new Set<string>();
+  const byOrgAndName = new Map<string, string>();
+  for (const r of liveContactRows) {
+    contactIds.add(String(r.id ?? ""));
+    byOrgAndName.set(contactKey(r.org_id, r.name), String(r.id ?? ""));
+  }
+
+  return {
+    clientNames: namesFrom(await readTable(drive, allParts, "clients")),
+    contractorNames: namesFrom(await readTable(drive, allParts, "contractors")),
+    contacts: backupContacts,
+    liveClients: await liveOrgs("clients"),
+    liveContractors: await liveOrgs("contractors"),
+    liveContacts: { ids: contactIds, byOrgAndName }
+  };
+}
+
+// PostgREST answers at most 1,000 rows per request, silently — and "every
+// client we have" has to mean every one of them or a job comes back without
+// an organisation that was there all along.
+async function readEveryRow(
+  db: SupabaseClient, table: string, columns: string
+): Promise<Record<string, unknown>[]> {
+  const out: Record<string, unknown>[] = [];
+  for (let from = 0; ; from += 1000) {
+    const { data, error } = await db.from(table).select(columns).order("id").range(from, from + 999);
+    if (error) throw new Error(`Reading ${table} failed: ${error.message}`);
+    const page = (data ?? []) as unknown as Record<string, unknown>[];
+    out.push(...page);
+    if (page.length < 1000) return out;
+  }
+}
+
+// Only the PDFs the restored rows point at, matched by the flat name the
+// backup wrote them under. Nothing else in the files folder is touched.
+async function stepJobFiles(
+  db: SupabaseClient, drive: DriveClient, c: JobRestoreCursor, deadline: number
+): Promise<void> {
+  const wanted = [...new Set(c.pdfKeys)];
+  if (!wanted.length) { c.phase = "activity"; return; }
+  const folder = await subFolder(drive, c.folderId, FILES_FOLDER);
+  if (!folder) {
+    addRestoreNote(c.skipped, "That backup has no files folder, so the records came back without their PDFs.");
+    c.phase = "activity";
+    return;
+  }
+
+  if (!c.fileIndex) {
+    // One listing per run rather than per slice: a year's files folder is
+    // thousands of entries, and what this restore needs out of it is a few.
+    const byName = new Map((await drive.listFiles(folder)).map(e => [e.name, e.id]));
+    c.fileIndex = wanted.map(pathKey => {
+      const cut = pathKey.indexOf("/");
+      const name = fileEntryName(pathKey.slice(0, cut), pathKey.slice(cut + 1));
+      return { key: pathKey, id: byName.get(name) ?? null };
+    });
+    return;
+  }
+
+  const list = c.fileIndex;
+  for (let i = c.fileOffset; i < list.length; i++) {
+    if (outOfBudget(deadline, Date.now())) { c.fileOffset = i; return; }
+    const item = list[i];
+    if (!item.id) {
+      addRestoreNote(c.skipped, `${item.key} was not in that backup, so the record came back without its PDF.`);
+      continue;
+    }
+    const cut = item.key.indexOf("/");
+    const bucket = item.key.slice(0, cut);
+    const key = item.key.slice(cut + 1);
+    const bytes = await drive.download(item.id);
+    const { error } = await db.storage.from(bucket).upload(key, bytes, {
+      upsert: true, contentType: contentTypeFor(key)
+    });
+    if (error) throw new Error(`Putting ${item.key} back failed: ${error.message}`);
+    c.filesDone += 1;
+    c.filesBytes += bytes.byteLength;
+  }
+  c.fileOffset = 0;
+  c.phase = "activity";
+}
+
+// The two figures a trigger wrote over on the way in, put back for the rows
+// THIS run wrote and no others — a ticket that was already here keeps its
+// own total, and a job that was already here keeps its own place on the
+// board. Both are UPDATEs through restore_patch_rows for the same reason
+// restore-all's are: a two-column upsert is checked against the table's NOT
+// NULL columns before Postgres ever looks for the conflict.
+async function stepJobActivity(
+  db: SupabaseClient, drive: DriveClient, allParts: Part[], c: JobRestoreCursor, deadline: number
+): Promise<void> {
+  if (!c.totalsDone) {
+    const parts = partsForTable(allParts, "tickets");
+    for (let p = c.totalsPart; p < parts.length; p++) {
+      if (outOfBudget(deadline, Date.now())) { c.totalsPart = p; return; }
+      const patches = onlyForIds(approvedTotalPatches(await readPart(drive, parts[p])), c.ticketIds);
+      for (let at = 0; at < patches.length; at += WRITE_BATCH) {
+        const { error } = await db.rpc("restore_patch_rows", {
+          p_table: "tickets", p_rows: patches.slice(at, at + WRITE_BATCH)
+        });
+        if (error) throw new Error(`Restoring the signed tickets' totals failed: ${error.message}`);
+      }
+    }
+    c.totalsPart = 0;
+    c.totalsDone = true;
+    return;
+  }
+
+  const parts = partsForTable(allParts, "jobs");
+  for (let p = c.activityPart; p < parts.length; p++) {
+    if (outOfBudget(deadline, Date.now())) { c.activityPart = p; return; }
+    const patches = onlyForIds(activityPatches(await readPart(drive, parts[p])), c.jobsDone);
+    for (let at = 0; at < patches.length; at += WRITE_BATCH) {
+      const { error } = await db.rpc("restore_patch_rows", {
+        p_table: "jobs", p_rows: patches.slice(at, at + WRITE_BATCH)
+      });
+      if (error) throw new Error(`Restoring the jobs' activity times failed: ${error.message}`);
+    }
+  }
+  c.activityPart = 0;
+  c.phase = "done";
 }
 
 // ── Reading a backup's parts ─────────────────────────────────────────────
