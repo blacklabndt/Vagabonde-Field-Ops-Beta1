@@ -40,7 +40,7 @@ import {
   BUDGET_MS, SLICE_ALIVE_MS, RETRIES, BACKOFF_MS,
   newRunCursor, reviveCursor, sliceDeadline, budgetLeft, outOfBudget,
   sliceLooksAlive, isRetryable, shouldRetry, worthAnotherGo, retryDelayMs, stillHoldsRun,
-  afterTablePart, foldIntoIndex, forgetIndex,
+  afterTablePart, foldIntoIndex, forgetIndex, nextPhaseAfterManifest,
   startPrefixWalk, pausePage, afterFilesPage, countsOf, totalRows
 } from "../../supabase/functions/_shared/backupRun.ts";
 
@@ -368,6 +368,31 @@ test("the jobs index is what the per-job restore picks from", () => {
 });
 
 // ── Retention ────────────────────────────────────────────────────────────
+
+test("a before-restore copy stops at the manifest and never prunes the drive", () => {
+  // The safety copy is taken with a restore already in flight. Retention
+  // counts folders and cannot see which one that restore is reading from,
+  // so on a keep of 1 it would delete the backup being restored — after the
+  // wipe, before the load.
+  assert.equal(nextPhaseAfterManifest("before_restore"), "done");
+  assert.equal(nextPhaseAfterManifest("backup"), "retention");
+  assert.equal(nextPhaseAfterManifest(""), "retention");
+  assert.equal(nextPhaseAfterManifest(undefined), "retention");
+});
+
+test("retention spares the folder a restore is reading from, however old", () => {
+  const names = ["2026-09-01 02-00", "2026-09-02 02-00", "2026-09-03 02-00", "2026-09-04 02-00"];
+  // A restore is usually FROM an older backup, which is precisely the folder
+  // a keep of 1 deletes first.
+  assert.deepEqual(foldersToDelete(names, 1, ["2026-09-01 02-00"]),
+    ["2026-09-02 02-00", "2026-09-03 02-00"]);
+  assert.deepEqual(foldersToDelete(names, 1, ["2026-09-01 02-00", "2026-09-02 02-00", "2026-09-03 02-00"]), []);
+  // Nothing to spare, and a name that is not in the drive at all, both leave
+  // the count exactly as it was.
+  assert.deepEqual(foldersToDelete(names, 3), ["2026-09-01 02-00"]);
+  assert.deepEqual(foldersToDelete(names, 3, []), ["2026-09-01 02-00"]);
+  assert.deepEqual(foldersToDelete(names, 3, [null, "", "2026-08-30 02-00"]), ["2026-09-01 02-00"]);
+});
 
 test("retention keeps the newest N and throws the rest away", () => {
   const names = ["2026-09-01 02-00", "2026-09-02 02-00", "2026-09-03 02-00", "2026-09-04 02-00"];

@@ -228,6 +228,19 @@ export function forgetIndex(c: RunCursor): RunCursor {
   return c;
 }
 
+// ── Phase: manifest, and what comes after it ─────────────────────────────
+
+// A scheduled backup ends by pruning the drive to backup_keep folders. A
+// before-restore copy must not: it is taken with a restore already in
+// flight, and retention counts folders without knowing which one that
+// restore is about to read from — on the live keep of 1 the safety copy's
+// own retention step would delete the very backup being restored, after the
+// wipe and before the load, leaving an empty database and no source. So
+// that kind stops at the manifest.
+export function nextPhaseAfterManifest(kind: string): string {
+  return String(kind ?? "") === "before_restore" ? "done" : "retention";
+}
+
 // ── Phase: files ─────────────────────────────────────────────────────────
 
 // Storage lists one prefix at a time, so the walk carries a stack of

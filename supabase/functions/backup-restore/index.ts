@@ -603,8 +603,17 @@ async function stepLoad(
       (rows[0] ?? {}) as Record<string, unknown>,
       APP_SETTINGS_NEVER_RESTORED, APP_SETTINGS_SECRETS
     );
-    if (Object.keys(patch).length) {
-      const { error } = await db.from("app_settings").update(patch).eq("id", true);
+    // An UPSERT of the one enforced row rather than an UPDATE of it: the
+    // table ships with no row at all, so on a fresh project — the whole
+    // point of a restore-from-scratch — an UPDATE matches nothing and the
+    // mail addresses and the approval base URL are dropped in silence. The
+    // rules above are unchanged by it: the payload is the same narrow patch,
+    // so a backup_* column is neither inserted nor overwritten (a new row
+    // takes the table's own defaults for them), and a credential the backup
+    // blanked is not in the patch and so cannot be written over a live key.
+    if (rows.length && Object.keys(patch).length) {
+      const { error } = await db.from("app_settings")
+        .upsert({ id: true, ...patch }, { onConflict: "id" });
       if (error) throw new Error(`Restoring the settings failed: ${error.message}`);
     }
     c.loaded.app_settings = rows.length;

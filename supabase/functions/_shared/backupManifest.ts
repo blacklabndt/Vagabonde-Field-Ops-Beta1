@@ -136,10 +136,17 @@ const STAMP = /^\d{4}-\d{2}-\d{2} \d{2}-\d{2}$/;
 // the tail of a plain sort. A before-restore folder is never in the running:
 // it is the copy taken immediately before somebody replaced the database,
 // and it is the one folder nobody should lose to a retention count.
-export function foldersToDelete(names: string[], keep: number): string[] {
+//
+// `spare` is the folder a restore is reading from right now. Age is the
+// wrong question to ask about it — a restore is usually FROM an older
+// backup, which is exactly the folder a keep of 1 would delete — so it is
+// named rather than counted, and taken out after the count.
+export function foldersToDelete(names: string[], keep: number, spare: Iterable<string> = []): string[] {
   const n = Math.max(1, Math.trunc(Number(keep)) || 1);
+  const spared = new Set<string>();
+  for (const name of spare || []) if (name) spared.add(String(name));
   const backups = (names || []).filter(name => STAMP.test(String(name))).sort();
-  return backups.slice(0, Math.max(0, backups.length - n));
+  return backups.slice(0, Math.max(0, backups.length - n)).filter(name => !spared.has(name));
 }
 
 // One flat, reversible path segment for a stored object: the bucket and the

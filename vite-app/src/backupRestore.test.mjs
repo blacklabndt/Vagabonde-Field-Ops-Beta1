@@ -485,6 +485,29 @@ test("every column the backup blanks is one the restore skips or never writes", 
   assert.deepEqual(patch, {});
 });
 
+test("the settings row a fresh project has never had is created, not silently skipped", () => {
+  // app_settings ships with no row, so on a project stood up from the
+  // migrations an UPDATE ... where id matches nothing and every setting in
+  // the backup is dropped without an error. The restore upserts the one
+  // enforced row instead — this is the payload it sends, and the point is
+  // that widening the write does not widen what is written: no backup_*
+  // column and no blanked credential is in it, so an existing row's drive
+  // connection and live keys are as safe as they were under the UPDATE.
+  const patch = settingsRestorePatch({
+    id: true,
+    resend_api_key: null,
+    backup_refresh_token: null,
+    backup_keep: 1,
+    mail_from_reports: "reports@vagabonde.ca"
+  }, APP_SETTINGS_NEVER_RESTORED, APP_SETTINGS_SECRETS);
+  const row = { id: true, ...patch };
+
+  assert.equal(row.id, true, "the enforced row's own key comes from the restore, not the backup");
+  assert.equal(row.mail_from_reports, "reports@vagabonde.ca");
+  assert.deepEqual(Object.keys(row).filter(k => k.startsWith("backup_")), []);
+  assert.ok(!("resend_api_key" in row));
+});
+
 // ── Tickets and their money ──────────────────────────────────────────────
 
 test("a ticket goes back in at zero, because its lines are not there yet", () => {

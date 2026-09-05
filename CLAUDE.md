@@ -20,8 +20,15 @@ Cloudflare Worker `solitary-snowflake-ee22` (assets + the `/approve` and
   Repo files and applied migrations must reconcile 1:1. The history starts
   at `20260817040000_beta1_baseline.sql` — the whole schema squashed into
   one file, generated from the live catalogs; the 77 evolutionary
-  migrations it replaced live in the prototype archive. Never apply the
-  baseline to the live project; it is for fresh environments. An unshipped
+  migrations it replaced live in the prototype archive. It opens with
+  `set check_function_bodies = off` and closes with a `reset`, because it is
+  in catalog order and §2's sql-language helpers name tables §3 creates —
+  without that it dies on its first statement in the fresh environment it
+  exists for. Never apply the baseline to the live project; it is for fresh
+  environments. Replaying the repo into a fresh project also stands up cron
+  jobs and a chat push trigger pointed at THIS project's functions (five
+  migrations bake the URL and publishable key in), so unschedule them and
+  re-point the trigger before anything else — HANDOVER.md's Path B says how. An unshipped
   DB fix waits as a draft under `supabase/handover/` (probes beside it) —
   a draft, not history, until it is applied and filed under migrations.
   Nothing is waiting there now. The latest is
@@ -202,7 +209,12 @@ Cloudflare Worker `solitary-snowflake-ee22` (assets + the `/approve` and
   `restore_jobs` to `backup-restore`. Its own kinds come first, always: a
   restore's safety backup is raised *after* the restore run, and taking the
   restore first would leave that backup unstarted and the restore waiting
-  on it for ever. Work is done in slices of about 100 seconds (`BUDGET_MS`)
+  on it for ever. A `before_restore` run goes manifest → done and never
+  reaches `retention` (`nextPhaseAfterManifest`): retention prunes the drive
+  to `backup_keep` folders and cannot see which folder the restore behind it
+  is reading from, so at `keep = 1` the safety copy's own retention step
+  would delete the backup being restored, after the wipe. Retention also
+  spares by name the folder of every queued or running restore. Work is done in slices of about 100 seconds (`BUDGET_MS`)
   with the position in `backup_runs.cursor`, and a slice that got something
   done kicks the next one itself — `{action:"advance", runId, chain:true}`,
   never a tick, because a tick reads the heartbeat that same slice has just
@@ -242,11 +254,15 @@ Cloudflare Worker `solitary-snowflake-ee22` (assets + the `/approve` and
   `restore_chat_messages`, which disables the push trigger around the insert
   and re-enables it in the same call — otherwise a restore buzzes every phone
   in the crew once per historical message. `app_settings` is
-  never wiped and is restored by a narrow UPDATE that skips every `backup_*`
-  column (`APP_SETTINGS_NEVER_RESTORED`), or the restore would replace the
+  never wiped and is restored by a narrow UPSERT of the one enforced row
+  (`id = true`) that skips every `backup_*` column
+  (`APP_SETTINGS_NEVER_RESTORED`), or the restore would replace the
   drive connection it is running through; and a secret column that is null
   in the backup is skipped rather than written, so a restore never takes the
-  live Resend or KLIPY key out of the building.
+  live Resend or KLIPY key out of the building. It is an upsert and not an
+  update because the table ships with no row — on the fresh project a
+  disaster recovery starts from, an UPDATE matches nothing and every setting
+  in the backup is dropped in silence.
 - Restoring chosen jobs deletes nothing and overwrites nothing: a row
   already present is left alone, so the same job restored twice is a no-op —
   and a job already here still keeps its id on `jobsHere`, so a retry after a

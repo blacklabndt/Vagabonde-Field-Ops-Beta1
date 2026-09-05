@@ -75,6 +75,22 @@
 --   20260817033441 every_egg_shares_one_scoreboard
 --
 -- ═══════════════════════════════════════════════════════════════════════
+-- 0 · Deferred body checking, for the length of this file only
+-- ═══════════════════════════════════════════════════════════════════════
+--
+-- Postgres parses and validates a sql-language function's body when the
+-- function is created, so §2's private helpers — can_write_ticket,
+-- has_any_tab, has_tab, current_role_name, and public's has_tab and
+-- is_staff — die on `relation "public.tickets" does not exist`, because the
+-- tables they read are created in §3. The file is a transcript of the live
+-- catalogs in catalog order, and reordering it to suit one check would make
+-- it stop being that; the bodies themselves are sound, they are the live
+-- project's own, and every one of them is validated for real the moment it
+-- is called — the migrations that follow this file call most of them. So
+-- the check is deferred here and turned straight back on at the end.
+set check_function_bodies = off;
+
+-- ═══════════════════════════════════════════════════════════════════════
 -- 1 · Extensions and schemas
 -- ═══════════════════════════════════════════════════════════════════════
 
@@ -1592,6 +1608,10 @@ revoke execute on function public.search_jobs(text, text, text, integer, integer
 revoke execute on function public.search_org_directory(text, text, integer, integer) from public, anon;
 revoke execute on function public.tabs_for_role(text) from public, anon;
 revoke execute on function public.ticket_tracker_stats() from public, anon;
+
+-- Back on: everything after this file is written table-first and expects
+-- the check that catches a typo in a function body at creation time.
+reset check_function_bodies;
 
 -- ═══════════════════════════════════════════════════════════════════════
 -- End of baseline. New migrations continue on top of this file with later

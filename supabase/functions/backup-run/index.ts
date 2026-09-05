@@ -44,8 +44,9 @@ import {
 import type { Connection } from "../_shared/backupCommon.ts";
 import {
   BUDGET_MS, RETRIES, afterFilesPage, afterTablePart, countsOf, foldIntoIndex,
-  forgetIndex, newRunCursor, outOfBudget, pausePage, retryDelayMs, reviveCursor,
-  shouldRetry, sliceDeadline, sliceLooksAlive, startPrefixWalk, stillHoldsRun
+  forgetIndex, newRunCursor, nextPhaseAfterManifest, outOfBudget, pausePage,
+  retryDelayMs, reviveCursor, shouldRetry, sliceDeadline, sliceLooksAlive,
+  startPrefixWalk, stillHoldsRun
 } from "../_shared/backupRun.ts";
 import type { RunCursor } from "../_shared/backupRun.ts";
 import { gzip } from "../_shared/gzip.ts";
@@ -422,8 +423,8 @@ async function advance(db: SupabaseClient, run: Run, secret: string): Promise<Re
     while (!outOfBudget(deadline, Date.now()) && cursor.phase !== "done") {
       if (cursor.phase === "tables") cursor = await stepTables(db, conn.drive, tablesFolder, cursor);
       else if (cursor.phase === "files") cursor = await stepFiles(db, conn.drive, filesFolder, cursor, deadline);
-      else if (cursor.phase === "manifest") cursor = await stepManifest(db, conn.drive, folderId, cursor);
-      else if (cursor.phase === "retention") cursor = await stepRetention(conn.drive, conn.rootFolderId, conn.keep, cursor);
+      else if (cursor.phase === "manifest") cursor = await stepManifest(db, conn.drive, folderId, cursor, String(current.kind));
+      else if (cursor.phase === "retention") cursor = await stepRetention(db, conn.drive, conn.rootFolderId, conn.keep, cursor);
       else cursor.phase = "done";
       units += 1;
       // The cursor is persisted after every unit, not at the end of the
@@ -612,7 +613,7 @@ async function stepFiles(
 // ── Phase: manifest, then retention ──────────────────────────────────────
 
 async function stepManifest(
-  db: SupabaseClient, drive: DriveClient, folderId: string, c: RunCursor
+  db: SupabaseClient, drive: DriveClient, folderId: string, c: RunCursor, kind: string
 ): Promise<RunCursor> {
   // The schema version is the newest migration this database has applied —
   // the one number that says whether a backup can be loaded back into it.
@@ -638,18 +639,33 @@ async function stepManifest(
 
   // The index has done its job and is the biggest thing in the cursor.
   c = forgetIndex(c);
-  c.phase = "retention";
+  // A before-restore copy stops here: pruning the drive with a restore in
+  // flight can delete the folder that restore is about to read from.
+  c.phase = nextPhaseAfterManifest(kind);
   return c;
 }
 
+// The folder every restore that has not finished is reading from. Belt and
+// braces beside the phase skip above: that one keeps a restore's own safety
+// copy off the drive's throat, this one covers a scheduled backup that
+// happens to come round while somebody is restoring, which is a different
+// run of a different kind and would not be caught by the kind test.
+async function restoreSources(db: SupabaseClient): Promise<string[]> {
+  const { data, error } = await db.from("backup_runs").select("folder_name")
+    .in("kind", RESTORE_KINDS).in("status", ["queued", "running"]);
+  if (error) throw error;
+  return (data ?? []).map((r: Run) => String(r.folder_name ?? "")).filter(Boolean);
+}
+
 async function stepRetention(
-  drive: DriveClient, rootFolderId: string, keep: number, c: RunCursor
+  db: SupabaseClient, drive: DriveClient, rootFolderId: string, keep: number, c: RunCursor
 ): Promise<RunCursor> {
   const folders = await drive.listFolders(rootFolderId);
   // foldersToDelete only ever names a folder whose name is the stamp
   // exactly, so a before-restore copy — and anything the Admin put in the
-  // same drive themselves — is not retention's business.
-  const doomed = foldersToDelete(folders.map(f => f.name), keep);
+  // same drive themselves — is not retention's business. The folder a
+  // running restore is reading from is spared by name.
+  const doomed = foldersToDelete(folders.map(f => f.name), keep, await restoreSources(db));
   for (const name of doomed) {
     const f = folders.find(x => x.name === name);
     if (f) await withRetry(`Removing ${name}`, () => drive.delete(f.id));
