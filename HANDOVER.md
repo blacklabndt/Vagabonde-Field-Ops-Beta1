@@ -208,11 +208,29 @@ and files.
 
 ### Rehearsing a restore
 
-**This has not been done yet.** Restoring everything empties the database
-before it refills it, and no full backup-and-restore cycle has been run end
-to end, because no drive has been connected. Do it before the first backup
-is more than a week old, and do it on a **Supabase branch**, never on the
-live project:
+**Done once, on 5 September 2026**, against the first real backup
+(`2026-09-05 08-47`: 23 tables, 203,838 rows, 26 files) — a full restore
+over an empty project, a full restore over a populated one (the wipe path),
+and a restore of two chosen jobs run twice (the second a no-op). Every row,
+file, total and timestamp came back identical to live; it took four to six
+minutes each. It found four defects before they reached live, all fixed:
+the safety copy pruning the drive, a one-statement wipe that the database's
+eight-second limit refused, a retry reusing the most damaged safety copy,
+and a restore that waited on the cron instead of starting itself. Do it
+again after any change to the restore code, and never on the live project.
+
+Branching needs the Pro plan, which this project is not on. What worked
+instead — and is simpler than the second-Worker route below — was a
+throwaway free project in the same organisation: apply every migration to
+it, unschedule its cron jobs, deploy the three backup functions, copy the
+drive connection's `backup_*` columns from live's `app_settings` into
+its own row with one SQL `format()` statement run in each project's SQL
+editor (leave the Resend key out so it cannot mail), bootstrap one Admin by
+inserting an `auth.users` row with every token column set to `''`, sign
+that Admin in with the token endpoint, and call `backup-restore` directly.
+The scripted version of that is in the session notes; the shape is what
+matters. Delete the project afterwards. The original route, for a plan that
+has branches:
 
 1. Connect the drive on the live app and let one backup complete.
 2. In the Supabase dashboard, create a branch off the project (Branches →
