@@ -127,6 +127,25 @@ test("the counts always carry skipped and collisions, at zero if nothing else", 
   assert.equal(after.collisions, 1);
 });
 
+test("the counts carry the safety copy's name, because a failed restore is read from them", () => {
+  // The panel polls the run row and never sees the cursor, so the one thing
+  // a failed restore-all has to be able to say — the app was emptied, and
+  // here is the copy of what was in it — has to travel in counts.
+  const c = newRestoreCursor({ folderId: "f", folderName: "n", keepProfileId: "k" });
+  assert.ok("safety" in restoreCounts(c), "the key is there from the first slice");
+  assert.equal(restoreCounts(c).safety, null, "and it is null until the copy has completed");
+
+  // stepSafety sets it in the same breath as it moves the phase to wipe, so
+  // a name on the run means the delete was next or already under way.
+  c.safetyFolderName = "before-restore 2026-09-05 0210";
+  c.phase = "wipe";
+  assert.equal(restoreCounts(c).safety, "before-restore 2026-09-05 0210");
+
+  const source = read("supabase/functions/backup-restore/index.ts");
+  assert.match(source, /c\.safetyFolderName = safety\.folder_name/,
+    "and it is still written where the safety copy is seen to finish");
+});
+
 // ── Wipe ─────────────────────────────────────────────────────────────────
 
 test("the wipe walks its list once and then hands over to accounts", () => {

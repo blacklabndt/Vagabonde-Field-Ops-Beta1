@@ -12,7 +12,7 @@ import { readFileSync } from "node:fs";
 import {
   BACKUP_PROVIDERS, PROVIDER_LABEL,
   redirectUriFor, backupSettingsPatch, readBackupOutcome,
-  BEFORE_RESTORE_PREFIX, isBeforeRestore, restoreNameMatches
+  BEFORE_RESTORE_PREFIX, isBeforeRestore, restoreNameMatches, failedRunAdvice
 } from "./backupPanelLogic.js";
 
 // ── The redirect URI ─────────────────────────────────────────────────────
@@ -222,4 +222,49 @@ test("the restore is confirmed by the backup's own name, character for character
   assert.equal(restoreNameMatches("", "2026-09-05 02-00"), false);
   assert.equal(restoreNameMatches("", ""), false, "empty is never a confirmation");
   assert.equal(restoreNameMatches(undefined, undefined), false);
+});
+
+// ── What a failed run leaves behind ──────────────────────────────────────
+
+test("a failed backup says the schedule carries it; a failed restore says where the app is", () => {
+  // A backup that fails changes nothing, so the schedule is the whole
+  // answer.
+  assert.match(failedRunAdvice({ kind: "backup", counts: {} }), /next scheduled backup will still run/);
+  assert.match(failedRunAdvice({ kind: "before_restore", counts: {} }), /next scheduled backup will still run/);
+  assert.match(failedRunAdvice(null), /next scheduled backup will still run/);
+});
+
+test("a restore-all that failed after the wipe names both ways out", () => {
+  // counts.safety is the copy taken automatically just before the wipe. It
+  // is written the moment that copy completes, which is the moment before
+  // the first delete — so a name on the run means the app was emptied.
+  const after = failedRunAdvice({
+    kind: "restore_all",
+    counts: { safety: "before-restore 2026-09-05 0210" }
+  });
+  assert.match(after, /emptied/, "the state the app is actually in has to be said");
+  assert.match(after, /carry on from where it stopped/, "one way out: press Restore again");
+  assert.match(after, /before-restore 2026-09-05 0210/, "the other: the copy of what was here before");
+  assert.doesNotMatch(after, /next scheduled backup/,
+    "backing up an emptied app is not advice");
+});
+
+test("a restore-all that failed before the wipe says nothing has been changed", () => {
+  for (const counts of [{}, { safety: null }, { safety: "" }]) {
+    const before = failedRunAdvice({ kind: "restore_all", counts });
+    assert.match(before, /stopped before the app was emptied/);
+    assert.match(before, /nothing has been changed/);
+    // Saying the app was emptied when it was not is the worse error of the
+    // two, and it is the one that would send an Admin to restore a copy
+    // over a database that never lost anything.
+    assert.doesNotMatch(before, /was emptied before this failed/);
+    assert.doesNotMatch(before, /before-restore/);
+  }
+});
+
+test("a per-job restore that failed touched nothing else", () => {
+  const jobs = failedRunAdvice({ kind: "restore_jobs", counts: { safety: null } });
+  assert.match(jobs, /Nothing else in the app was touched/);
+  assert.match(jobs, /Press Restore on those jobs again/);
+  assert.doesNotMatch(jobs, /emptied/);
 });

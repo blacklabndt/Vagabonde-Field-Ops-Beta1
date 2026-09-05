@@ -241,6 +241,25 @@ cleared by hand. Read it in this order:
   ten minutes before doing anything. If it is still stuck, the reason will
   be in `function_errors` (Supabase → Table Editor) under `backup-run` or
   `backup-restore`.
+- **A restore that failed.** This is the one failure where the next
+  scheduled backup is not the answer, because the app itself may be
+  half-way through being replaced — so the panel says which it is, in the
+  failed-run line, and it is worth reading before anything else is pressed.
+  - *"It stopped before the app was emptied."* Nothing has been changed;
+    everything is as it was. Deal with the reason it gives — nearly always
+    the drive — and press **Restore** again.
+  - *"The app was emptied before this failed."* What is in the app now is a
+    part-restored copy, and there are two ways out. Either press **Restore**
+    on the same backup again, which carries on from where it stopped; or
+    restore the `before-restore …` folder the panel names, which is the copy
+    taken automatically just before this started and puts back exactly what
+    was here before. Both are ordinary restores from the list. The safety
+    copy is never tidied away by the retention count, so it is still there
+    however long it takes to decide.
+  - **Restoring jobs** never empties anything — it only adds — so a per-job
+    restore that fails has left the rest of the app alone. Press Restore on
+    those jobs again. Its notes are printed under the failed line too, and
+    they name each job, ticket or crew row that did not come back.
 - **Nothing has run at all and no failure is shown.** Either no drive is
   connected, or the `backup-tick` cron job is not there — it arrives with
   the migration, so a project restored from `supabase db push` has it and an

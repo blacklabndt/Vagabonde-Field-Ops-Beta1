@@ -3,7 +3,7 @@ import { Db } from "../db.js";
 import { Blueprint, Btn, Dialog, Field, ErrorBox, Loading, TagX } from "./common.jsx";
 import {
   BACKUP_PROVIDERS, PROVIDER_LABEL, redirectUriFor, readBackupOutcome,
-  isBeforeRestore, restoreNameMatches
+  isBeforeRestore, restoreNameMatches, failedRunAdvice
 } from "../backupPanelLogic.js";
 import { describeSchedule, WEEKDAY_NAMES, nextRunAt, BACKUP_ZONE } from "../backupSchedule.js";
 
@@ -319,7 +319,12 @@ export function AutomaticBackupPanel() {
           <>
             <TagX variant="outline">{PROVIDER_LABEL[s.provider] || s.provider}</TagX>
             <span style={{ fontSize: 14 }}>Connected as <strong>{s.account || "—"}</strong></span>
-            <Btn variant="secondary" style={{ marginLeft: "auto" }} onClick={disconnect}>Disconnect</Btn>
+            {/* Not while something is running. Disconnecting clears the
+                refresh token, and the slice in flight — or the very next one
+                — then fails at connectDrive, which on a restore means failing
+                somewhere between the wipe and the load. */}
+            <Btn variant="secondary" style={{ marginLeft: "auto" }} disabled={!!run} onClick={disconnect}
+              title={run ? "Not while a run is going — wait for it to finish." : undefined}>Disconnect</Btn>
           </>
         ) : (
           <>
@@ -428,26 +433,31 @@ export function AutomaticBackupPanel() {
               {s.last_run.error && (
                 <div style={{ marginTop: 4, color: "var(--color-accent-700)" }}>{s.last_run.error}</div>
               )}
-              {/* And the report itself, where the run kept one. A per-job
-                  restore's whole answer is here: which job was already in
-                  the app, which ticket number was in use, whose hours could
-                  not come back. */}
-              {notesIn(s.last_run.counts).length > 0 && (
-                <details style={{ marginTop: 6 }}>
-                  <summary style={{ fontSize: 13 }}>
-                    It left {plural(notesIn(s.last_run.counts).length, "note")} &mdash; worth reading
-                  </summary>
-                  <ul style={{ fontSize: 12, margin: "8px 0 0", paddingLeft: 18 }}>
-                    {notesIn(s.last_run.counts).slice(0, 40).map((line, i) => <li key={i}>{line}</li>)}
-                  </ul>
-                </details>
-              )}
             </>
           ) : (
             <span style={{ color: "var(--color-accent-700)" }}>
-              failed {when(s.last_run.finished_at)} &mdash; {s.last_run.error || "no reason recorded"}. The next
-              scheduled backup will still run.
+              failed {when(s.last_run.finished_at)} &mdash; {s.last_run.error || "no reason recorded"}.{" "}
+              {/* What that leaves behind, which is not the same for a backup
+                  and for a restore. A restore-all that died after the wipe
+                  used to be told the next scheduled backup would still run:
+                  true, useless, and the only two ways out of an emptied app
+                  went unsaid. */}
+              {failedRunAdvice(s.last_run)}
             </span>
+          )}
+          {/* The report itself, where the run kept one, and outside the
+              complete/failed branch on purpose: a per-job restore that fails
+              partway still names every job it could not put back, and those
+              notes are exactly what the office has to act on. */}
+          {notesIn(s.last_run.counts).length > 0 && (
+            <details style={{ marginTop: 6 }}>
+              <summary style={{ fontSize: 13 }}>
+                It left {plural(notesIn(s.last_run.counts).length, "note")} &mdash; worth reading
+              </summary>
+              <ul style={{ fontSize: 12, margin: "8px 0 0", paddingLeft: 18 }}>
+                {notesIn(s.last_run.counts).slice(0, 40).map((line, i) => <li key={i}>{line}</li>)}
+              </ul>
+            </details>
           )}
         </div>
       )}

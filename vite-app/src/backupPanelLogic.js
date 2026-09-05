@@ -47,6 +47,44 @@ export function restoreNameMatches(typed, folderName) {
   return !!b && a === b;
 }
 
+// What to do about a run that failed, which is not the same sentence for
+// all four kinds. A backup that fails leaves the app exactly as it was and
+// the schedule carries it — "the next one will still run" is the whole
+// answer. A restore that fails is a different situation entirely, and the
+// panel used to give it the backup's sentence: a restore-all that died
+// after the wipe left an emptied database on screen and told the Admin that
+// the next scheduled backup would still run, which is true, useless, and
+// would have backed up the emptiness.
+//
+// The gate is `counts.safety` — the name of the copy taken automatically
+// just before the wipe, written on the run the moment that copy completes
+// and null until then. A name means the app was emptied and names the way
+// back; a null means the run stopped before anything was deleted.
+export function failedRunAdvice(run) {
+  const r = run || {};
+  const kind = String(r.kind || "");
+  const safety = String((r.counts && r.counts.safety) || "").trim();
+
+  if (kind === "restore_jobs") {
+    // A per-job restore deletes nothing: it adds the jobs it was given and
+    // leaves everything else alone, so the app is whole either way.
+    return "Nothing else in the app was touched — restoring jobs only adds. " +
+      "Press Restore on those jobs again to have another go at what did not come back.";
+  }
+
+  if (kind === "restore_all") {
+    if (!safety) {
+      return "It stopped before the app was emptied, so nothing has been changed. " +
+        "Everything is as it was; press Restore again when the reason above is dealt with.";
+    }
+    return "The app was emptied before this failed, so what is in it now is a part-restored copy. " +
+      `Press Restore on the same backup to carry on from where it stopped, or restore “${safety}” — ` +
+      "the copy taken automatically just before this started — to put back what was here before.";
+  }
+
+  return "The next scheduled backup will still run.";
+}
+
 // The address the app is served from is the address a drive sends the Admin
 // back to. It is stored (Admin screen → App address) rather than guessed,
 // because the drive's registration has to hold the same string — but this

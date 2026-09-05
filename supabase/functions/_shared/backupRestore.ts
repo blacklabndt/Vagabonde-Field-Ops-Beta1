@@ -169,6 +169,12 @@ export function reviveRestoreCursor(raw: unknown): RestoreCursor {
 // restore, at zero, rather than appearing halfway through a per-job run: a
 // count that only exists once it is non-zero is a count nobody can read as
 // "none".
+// `safety` is the cursor's safetyFolderName said out loud, because the panel
+// reads `counts` and does not read the cursor. It is the name of the copy
+// taken automatically just before the wipe, and it is null until that copy
+// has completed — so it is also the answer to the only question a failed
+// restore-all raises: was the app emptied? A name means yes and names the
+// way back; a null means the run stopped before anything was deleted.
 export function restoreCounts(c: RestoreCursor): Record<string, unknown> {
   return {
     rows: c.loaded ?? {},
@@ -178,7 +184,8 @@ export function restoreCounts(c: RestoreCursor): Record<string, unknown> {
     accountsFailed: c.accountsFailed ?? [],
     accountsDropped: (c.droppedProfileIds ?? []).length,
     skipped: num(c.skipped),
-    collisions: num(c.collisions)
+    collisions: num(c.collisions),
+    safety: c.safetyFolderName ?? null
   };
 }
 
