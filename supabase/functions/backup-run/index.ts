@@ -43,7 +43,7 @@ import type { Connection } from "../_shared/backupCommon.ts";
 import {
   BUDGET_MS, RETRIES, afterFilesPage, afterTablePart, countsOf, foldIntoIndex,
   forgetIndex, newRunCursor, outOfBudget, pausePage, retryDelayMs, reviveCursor,
-  shouldRetry, sliceDeadline, sliceLooksAlive, startPrefixWalk
+  shouldRetry, sliceDeadline, sliceLooksAlive, startPrefixWalk, stillHoldsRun
 } from "../_shared/backupRun.ts";
 import type { RunCursor } from "../_shared/backupRun.ts";
 import { gzip } from "../_shared/gzip.ts";
@@ -202,6 +202,13 @@ async function backUpNow(db: SupabaseClient, requestedBy: string, secret: string
 // the schedule for ever with a run nobody could pick up — which is far worse
 // than the thing it would prevent, two slices repeating a unit that replaces
 // rather than appends.
+//
+// The cost of that is paid at the other end instead: every write the
+// superseded slice goes on to make is conditional on `status = running`, and
+// a write that matches no row stops it dead (stillHoldsRun). Repeating a
+// unit is cheap; a slice that hung inside one unit past SLICE_ALIVE_MS,
+// woke after the run it lost had already finished, and then wrote its stale
+// cursor over a complete run — or threw and marked it failed — is not.
 async function claim(db: SupabaseClient, run: Run): Promise<Run | null> {
   const now = new Date().toISOString();
   const patch: Record<string, unknown> = { heartbeat_at: now };
@@ -229,7 +236,8 @@ async function ensureRunFolder(db: SupabaseClient, conn: Connection, run: Run): 
   const folderId = await withRetry("Making the backup folder",
     () => ensureFolder(conn.drive, conn.rootFolderId, name));
   const { error } = await db.from("backup_runs")
-    .update({ folder_id: folderId, folder_name: name }).eq("id", run.id);
+    .update({ folder_id: folderId, folder_name: name })
+    .eq("id", run.id).eq("status", "running");
   if (error) throw error;
   return folderId;
 }
@@ -240,6 +248,12 @@ async function advance(db: SupabaseClient, run: Run, secret: string): Promise<Re
   const deadline = sliceDeadline(Date.now(), BUDGET_MS);
   const runId = String(run.id);
 
+  // The status this slice believes it holds the run at. Until the claim goes
+  // through that is whatever the row was read at; after it, running. Every
+  // write below is conditional on it, so a slice that has been superseded
+  // writes nothing at all — including its own failure.
+  let guard = String(run.status);
+
   // The drive first: with none connected there is nothing to do but say so
   // on the run itself, so the panel has a written reason rather than a run
   // that sits queued for ever and a tick that complains every five minutes.
@@ -247,13 +261,14 @@ async function advance(db: SupabaseClient, run: Run, secret: string): Promise<Re
   try {
     conn = await connectDrive(db);
   } catch (e) {
-    return await fail(db, runId, (e as Error).message);
+    return await fail(db, runId, (e as Error).message, guard);
   }
 
   let cursor: RunCursor;
   try {
     const current = await claim(db, run);
     if (!current) return { ok: true, runId, busy: true };
+    guard = "running";
     cursor = reviveCursor(current.cursor, String(current.started_at ?? new Date().toISOString()));
 
     const folderId = await ensureRunFolder(db, conn, current);
@@ -273,35 +288,53 @@ async function advance(db: SupabaseClient, run: Run, secret: string): Promise<Re
       // The cursor is persisted after every unit, not at the end of the
       // slice: a slice that dies here has to be resumable from what is on
       // the row, and the heartbeat is how the next tick knows it died.
-      const { error } = await db.from("backup_runs").update({
+      //
+      // And it is the point at which a superseded slice finds out. A slice
+      // that hung inside one unit past SLICE_ALIVE_MS was reclaimed while it
+      // hung; the run may since have been finished by somebody else. Zero
+      // rows matched means exactly that, and the answer is to stop — not to
+      // write a stale cursor over a complete run.
+      const { data: held, error } = await db.from("backup_runs").update({
         phase: cursor.phase, cursor, heartbeat_at: new Date().toISOString(), counts: countsOf(cursor)
-      }).eq("id", runId);
+      }).eq("id", runId).eq("status", "running").select("id");
       if (error) throw error;
+      if (!stillHoldsRun(held)) return { ok: true, runId, superseded: true };
     }
 
     if (cursor.phase === "done") {
       const finished = new Date().toISOString();
-      const { error } = await db.from("backup_runs").update({
+      const { data: held, error } = await db.from("backup_runs").update({
         status: "complete", phase: "done", finished_at: finished,
         heartbeat_at: finished, counts: countsOf(cursor)
-      }).eq("id", runId);
+      }).eq("id", runId).eq("status", "running").select("id");
       if (error) throw error;
+      if (!stillHoldsRun(held)) return { ok: true, runId, superseded: true };
       return { ok: true, runId, complete: true, counts: countsOf(cursor) };
     }
 
     if (units > 0) kick("backup-run", { action: "tick" }, secret);
     return { ok: true, runId, phase: cursor.phase, continuing: true };
   } catch (e) {
-    return await fail(db, runId, (e as Error).message);
+    return await fail(db, runId, (e as Error).message, guard);
   }
 }
 
-async function fail(db: SupabaseClient, runId: string, message: string): Promise<Record<string, unknown>> {
-  await db.from("backup_runs").update({
+// The run failed, as far as this slice knows. Conditional on the status the
+// slice holds for the same reason every other write is: a slice reclaimed
+// out from under itself, throwing its way out an hour later, must not turn
+// somebody else's complete run into a failed one. The reason is still logged
+// either way — the error happened, whoever owns the run now.
+async function fail(
+  db: SupabaseClient, runId: string, message: string, guard: string
+): Promise<Record<string, unknown>> {
+  const { data: held } = await db.from("backup_runs").update({
     status: "failed", error: message, finished_at: new Date().toISOString()
-  }).eq("id", runId);
-  await logError("backup-run", message, { runId });
-  return { ok: false, runId, error: message };
+  }).eq("id", runId).eq("status", guard).select("id");
+  const superseded = !stillHoldsRun(held);
+  await logError("backup-run", message, superseded ? { runId, superseded } : { runId });
+  return superseded
+    ? { ok: false, runId, error: message, superseded: true }
+    : { ok: false, runId, error: message };
 }
 
 // ── Phase: tables ────────────────────────────────────────────────────────
@@ -387,7 +420,7 @@ async function stepFiles(
   // An empty prefix stack means this bucket has not been started: the stack
   // and the bucket index are advanced together at the end of a bucket, so
   // an empty stack here is never a finished one.
-  const top = startPrefixWalk(c, bucket);
+  const top = startPrefixWalk(c);
 
   const { data: entries, error } = await db.storage.from(bucket).list(top.prefix, {
     limit: PAGE_ROWS, offset: top.offset, sortBy: { column: "name", order: "asc" }

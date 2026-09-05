@@ -39,7 +39,7 @@ import {
 import {
   BUDGET_MS, SLICE_ALIVE_MS, RETRIES, BACKOFF_MS,
   newRunCursor, reviveCursor, sliceDeadline, budgetLeft, outOfBudget,
-  sliceLooksAlive, isRetryable, shouldRetry, retryDelayMs,
+  sliceLooksAlive, isRetryable, shouldRetry, retryDelayMs, stillHoldsRun,
   afterTablePart, foldIntoIndex, forgetIndex,
   startPrefixWalk, pausePage, afterFilesPage, countsOf, totalRows
 } from "../../supabase/functions/_shared/backupRun.ts";
@@ -831,7 +831,8 @@ test("the shared modules read nothing from the world around them", () => {
   // They are imported by the node suite AND by Deno Edge Functions. An
   // import of supabase-js or a read of Deno.env in any of the three breaks
   // this file outright; the assertion is here so the reason is named.
-  for (const f of ["backupTables.ts", "backupManifest.ts", "drive.ts", "backupOauth.ts", "backupRun.ts", "gzip.ts"]) {
+  for (const f of ["backupTables.ts", "backupManifest.ts", "drive.ts", "backupOauth.ts",
+    "backupRun.ts", "backupSchedule.ts", "gzip.ts"]) {
     const src = read(`supabase/functions/_shared/${f}`);
     const imports = [...src.matchAll(/^import .*?from ["'](.+?)["']/gm)].map(m => m[1]);
     const allowed = f === "backupManifest.ts" ? ["./backupSchedule.ts"] : [];
@@ -889,6 +890,61 @@ test("a heartbeat older than a slice can live is a run to reclaim", () => {
   assert.equal(sliceLooksAlive(null, now), false);
   assert.equal(sliceLooksAlive("", now), false);
   assert.equal(sliceLooksAlive("not a date", now), false);
+});
+
+test("a slice that matched no row has lost the run and must stop writing", () => {
+  // PostgREST answers a conditional update with the rows it matched, and the
+  // shape of that answer is what says whether this slice still holds the run:
+  // a `.select("id")` on an update that matched nothing comes back as an
+  // empty array, and the slice reading it was superseded while it hung.
+  assert.equal(stillHoldsRun([{ id: "r1" }]), true);
+  assert.equal(stillHoldsRun({ id: "r1" }), true, "maybeSingle answers with the row itself");
+  assert.equal(stillHoldsRun([]), false, "no row matched: another slice owns this run now");
+  assert.equal(stillHoldsRun(null), false);
+  assert.equal(stillHoldsRun(undefined), false, "a client that returned no data is not a match");
+});
+
+test("every write a slice makes to its own run is conditional on still holding it", () => {
+  // Reclaiming a run whose heartbeat went quiet has no compare-and-swap on
+  // purpose — a CAS on a timestamptz that failed to match would wedge the
+  // schedule for ever — so the slice that was superseded is the one that has
+  // to notice. It notices by writing conditionally: a slice hung inside one
+  // unit past SLICE_ALIVE_MS, reclaimed and then waking after the run had
+  // finished, would otherwise write its stale cursor over a complete run, and
+  // its throw on the way out would mark that run failed. A filter on an
+  // update is not something a pure function can hold, so the function itself
+  // is read back.
+  const src = read("supabase/functions/backup-run/index.ts");
+  const updates = src.split('.from("backup_runs")').slice(1)
+    .filter(rest => rest.trimStart().startsWith(".update("))
+    .map(rest => rest.slice(0, rest.indexOf(";")));
+  assert.equal(updates.length, 5,
+    "claim, the folder, the cursor after every unit, the completion, and the failure");
+  for (const statement of updates) {
+    assert.match(statement, /\.eq\("status",/,
+      `a write to backup_runs with no status guard: ${statement.replace(/\s+/g, " ").slice(0, 140)}`);
+  }
+  // The guard is only half of it: the three writes that carry on afterwards
+  // have to read the match back and stop when there is none.
+  assert.equal((src.match(/stillHoldsRun\(/g) ?? []).length, 3,
+    "the cursor write, the completion and the failure each check what they matched");
+  assert.match(src, /if \(!stillHoldsRun\(held\)\) return \{ ok: true, runId, superseded: true \};/,
+    "a superseded slice returns rather than carrying on round the loop");
+});
+
+test("the kick is held open by the runtime rather than left to be reaped", () => {
+  // kick() fires a request and the handler returns; an isolate with nothing
+  // left to answer can be torn down before that request has gone anywhere.
+  // Deno's edge runtime keeps the isolate alive for a promise handed to
+  // EdgeRuntime.waitUntil, and the fallback where there is no such global is
+  // the fire-and-forget it always was. backupCommon.ts imports supabase-js
+  // and reads the environment, so it cannot be imported here — it is read.
+  const src = read("supabase/functions/_shared/backupCommon.ts");
+  assert.match(src, /const sent = fetch\(/, "the kick's promise has to be held to be handed over");
+  assert.match(src, /edge\.waitUntil\(sent\)/);
+  assert.match(src, /typeof edge\.waitUntil === "function"/,
+    "a runtime without waitUntil falls back rather than throwing");
+  assert.match(src, /cron is the backstop/i, "why a lost kick is survivable has to stay written down");
 });
 
 test("only the flag on a drive's refusal earns a retry", () => {
@@ -999,9 +1055,8 @@ test("a bucket is walked depth first and the stack says where it got to", () => 
   let c = newRunCursor("2026-09-05T02:00:00.000Z");
   c.phase = "files";
 
-  const top = startPrefixWalk(c, "reports");
+  const top = startPrefixWalk(c);
   assert.deepEqual(top, { prefix: "", offset: 0 });
-  assert.equal(c.prefixStarted, "reports");
 
   // A short page at the root, with two sub-folders on it: the root is
   // finished and its folders go on the stack.
@@ -1026,13 +1081,11 @@ test("a bucket is walked depth first and the stack says where it got to", () => 
   c = afterFilesPage(c, { bucketCount: 2, pageLength: 1, pageRows: 1000, folderNames: [], files: 1, bytes: 10 });
   assert.deepEqual(c.prefixes, []);
   assert.equal(c.bucketIndex, 1);
-  assert.equal(c.prefixStarted, null);
   assert.equal(c.phase, "files", "there is another bucket to do");
 
   // The next bucket starts its own walk at its own root.
-  const next = startPrefixWalk(c, "jhas");
+  const next = startPrefixWalk(c);
   assert.deepEqual(next, { prefix: "", offset: 0 });
-  assert.equal(c.prefixStarted, "jhas");
   c = afterFilesPage(c, { bucketCount: 2, pageLength: 0, pageRows: 1000, folderNames: [], files: 0, bytes: 0 });
   assert.equal(c.bucketIndex, 2);
   assert.equal(c.phase, "manifest", "the last bucket hands the run to the manifest");
@@ -1041,7 +1094,7 @@ test("a bucket is walked depth first and the stack says where it got to", () => 
 test("a page cut short by the budget resumes where it stopped", () => {
   let c = newRunCursor("2026-09-05T02:00:00.000Z");
   c.phase = "files";
-  startPrefixWalk(c, "reports");
+  startPrefixWalk(c);
 
   c = pausePage(c, 7, 7, 700);
   assert.equal(c.pageDone, 7);

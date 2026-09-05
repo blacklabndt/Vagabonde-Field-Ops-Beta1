@@ -2,7 +2,7 @@ import React, { useState, useEffect, useCallback, useRef } from "react";
 import { Db } from "../db.js";
 import { Blueprint, Btn, Field, ErrorBox, Loading, TagX } from "./common.jsx";
 import { BACKUP_PROVIDERS, PROVIDER_LABEL, redirectUriFor, readBackupOutcome } from "../backupPanelLogic.js";
-import { describeSchedule, WEEKDAY_NAMES, nextRunAt } from "../backupSchedule.js";
+import { describeSchedule, WEEKDAY_NAMES, nextRunAt, BACKUP_ZONE } from "../backupSchedule.js";
 
 // Automatic backup — the Admin screen's Archive block, below the year-end
 // dropdown, because they are the same question asked two ways: what happens
@@ -38,8 +38,15 @@ const capitalise = p => `${p[0].toUpperCase()}${p.slice(1)}`;
 
 const mb = bytes => `${(bytes / 1048576).toFixed(bytes < 10 * 1048576 ? 1 : 0)} MB`;
 const plural = (n, one, many = one + "s") => `${n} ${n === 1 ? one : many}`;
+// Every other time in this feature is Grande Prairie's — the schedule the
+// Admin sets, the folder each backup is stamped with, the hour the cron
+// fires. A last-run line drawn on the browser's own clock would disagree
+// with the folder name sitting beside it the moment anybody opened the panel
+// from anywhere else.
 const when = iso => iso
-  ? new Date(iso).toLocaleString("en-CA", { day: "2-digit", month: "short", hour: "numeric", minute: "2-digit" })
+  ? new Date(iso).toLocaleString("en-CA", {
+      timeZone: BACKUP_ZONE, day: "2-digit", month: "short", hour: "numeric", minute: "2-digit"
+    })
   : "—";
 
 // A run's phase, said the way somebody who has not read the code would say

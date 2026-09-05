@@ -31,7 +31,6 @@ export interface RunCursor {
   index: Record<string, Record<string, unknown>[]>;
   bucketIndex: number;
   prefixes: PrefixFrame[];
-  prefixStarted: string | null;
   pageDone: number;
   files: number;
   bytes: number;
@@ -75,7 +74,6 @@ export function newRunCursor(startedAt: string): RunCursor {
     index: { jobs: [], clients: [], tickets: [], jhas: [], reports: [] },
     bucketIndex: 0,
     prefixes: [],
-    prefixStarted: null,
     pageDone: 0,
     files: 0,
     bytes: 0,
@@ -108,7 +106,6 @@ export function reviveCursor(raw: unknown, startedAt: string): RunCursor {
     prefixes: Array.isArray(c.prefixes)
       ? (c.prefixes as PrefixFrame[]).map(p => ({ prefix: String(p?.prefix ?? ""), offset: num(p?.offset) }))
       : [],
-    prefixStarted: c.prefixStarted ? String(c.prefixStarted) : null,
     pageDone: num(c.pageDone),
     files: num(c.files),
     bytes: num(c.bytes)
@@ -223,10 +220,9 @@ export function forgetIndex(c: RunCursor): RunCursor {
 // prefixes still to visit. An empty stack means this bucket has not been
 // started yet — the stack is emptied and the bucket advanced together at
 // the end of a bucket, so the two cannot be confused.
-export function startPrefixWalk(c: RunCursor, bucket: string): PrefixFrame {
+export function startPrefixWalk(c: RunCursor): PrefixFrame {
   if (!Array.isArray(c.prefixes) || !c.prefixes.length) {
     c.prefixes = [{ prefix: "", offset: 0 }];
-    c.prefixStarted = bucket;
     c.pageDone = 0;
   }
   return c.prefixes[c.prefixes.length - 1];
@@ -264,10 +260,27 @@ export function afterFilesPage(c: RunCursor, done: {
 
   if (!c.prefixes.length) {
     c.bucketIndex += 1;
-    c.prefixStarted = null;
     if (c.bucketIndex >= done.bucketCount) c.phase = "manifest";
   }
   return c;
+}
+
+// ── Whether this slice still holds the run ───────────────────────────────
+
+// Every write a slice makes to its own run is conditional on the run still
+// being `running` — the status it was claimed at — and PostgREST answers a
+// conditional update with the rows it matched, so zero rows back is the
+// whole answer: another slice reclaimed this run after its heartbeat went
+// quiet and has since written an outcome of its own. Reclaiming deliberately
+// has no compare-and-swap on the heartbeat (a CAS on a timestamptz across
+// PostgREST that failed to match would wedge the schedule for ever), which
+// is exactly why the superseded slice has to be the one that notices: it
+// stops where it is rather than overwriting a finished run's cursor, or
+// flipping a complete run to failed on its way out.
+export function stillHoldsRun(matched: unknown): boolean {
+  if (matched === null || matched === undefined) return false;
+  if (Array.isArray(matched)) return matched.length > 0;
+  return true;
 }
 
 // ── What the panel counts ────────────────────────────────────────────────

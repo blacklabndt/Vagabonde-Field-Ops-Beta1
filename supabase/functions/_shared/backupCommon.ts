@@ -99,9 +99,19 @@ export async function backupDoor(
 // left the moment the timeout fires; the callee runs its own budget
 // regardless. Failures are ignored on purpose — the five-minute cron is the
 // safety net, and a run whose chain breaks here still finishes, only slower.
+//
+// The handler returns as soon as this is fired, and an isolate with nothing
+// left to answer can be reaped before the request has actually gone out.
+// Deno's edge runtime holds the isolate open for a promise handed to
+// EdgeRuntime.waitUntil, so the kick is handed over where that global
+// exists; anywhere it does not, the promise is abandoned exactly as before.
+// Either way the five-minute cron is the backstop — a kick that never left
+// costs the chain a link, not the run.
+interface EdgeRuntimeLike { waitUntil?: (promise: Promise<unknown>) => void }
+
 export function kick(functionName: string, body: unknown, secret: string): void {
   if (!secret) return;
-  fetch(`${Deno.env.get("SUPABASE_URL")}/functions/v1/${functionName}`, {
+  const sent = fetch(`${Deno.env.get("SUPABASE_URL")}/functions/v1/${functionName}`, {
     method: "POST",
     headers: {
       "Content-Type": "application/json",
@@ -111,6 +121,9 @@ export function kick(functionName: string, body: unknown, secret: string): void 
     body: JSON.stringify(body),
     signal: AbortSignal.timeout(1500)
   }).then(r => r.body?.cancel()).catch(() => { /* the cron will pick it up */ });
+
+  const edge = (globalThis as unknown as { EdgeRuntime?: EdgeRuntimeLike }).EdgeRuntime;
+  if (edge && typeof edge.waitUntil === "function") edge.waitUntil(sent);
 }
 
 // ── The connected drive ──────────────────────────────────────────────────
