@@ -171,14 +171,16 @@ test("a retry reuses the last attempt's safety copy rather than copying the dama
       { folderId: "src", now }),
     { folderName: "before-restore 2026-09-05 15-00", runId: "r1" });
 
-  // Newest of the failures, because that is the one taken closest to the
-  // state the app is actually in now.
+  // EARLIEST of the failures: the first attempt copied the app whole, and
+  // every attempt after it copied a database its wipe had already started
+  // on. The rehearsal's second attempt was 46,080 crew rows short of its
+  // first, and "newest" once handed that one to the Admin as the way back.
   assert.equal(
     safetyToReuse([
       attempt({ at: "2026-09-05T20:00:00Z", name: "before-restore 2026-09-05 14-00", runId: "r1" }),
       attempt({ at: "2026-09-05T21:10:00Z", name: "before-restore 2026-09-05 15-00", runId: "r2" })
     ], { folderId: "src", now }).folderName,
-    "before-restore 2026-09-05 15-00");
+    "before-restore 2026-09-05 14-00");
 
   // An attempt whose copy never completed carries no folder name — the name
   // is written the moment the copy finishes, so its absence is the proof —

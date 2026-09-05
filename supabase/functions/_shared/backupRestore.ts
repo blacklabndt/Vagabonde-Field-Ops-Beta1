@@ -245,7 +245,10 @@ export const SAFETY_REUSE_MS = 24 * 60 * 60 * 1000;
 // first. Only a run of this kind, only a failed one, only the same source
 // folder, and only one whose cursor carries a safetyFolderName — that name
 // is written when the copy COMPLETES, so its presence is the proof the copy
-// is whole. Newest wins.
+// is whole. EARLIEST wins: every attempt after the first copied a database
+// the wipe had already started on, so the newest folder is by construction
+// the most damaged — the fourth rehearsal reused a copy 46,080 rows short
+// because this once said "newest".
 export function safetyToReuse(
   runs: Record<string, unknown>[],
   o: { folderId: string; now: number }
@@ -263,7 +266,7 @@ export function safetyToReuse(
     if (!folderName) continue;
     const at = Date.parse(String(r.finished_at ?? r.started_at ?? ""));
     if (!Number.isFinite(at) || now - at > SAFETY_REUSE_MS) continue;
-    if (!best || at > best.at) {
+    if (!best || at < best.at) {
       best = { at, folderName, runId: c.safetyRunId ? String(c.safetyRunId) : null };
     }
   }
