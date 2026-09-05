@@ -93,19 +93,25 @@ export function AdminSetupScreen({ currentUser, onArchiveCleared }) {
       <div style={{ marginBottom: 6 }}>
         <h2 style={{ fontSize: 34, margin: 0 }}>Admin</h2>
       </div>
-      <p style={{ maxWidth: 640, marginTop: 0, fontSize: 14, color: "color-mix(in srgb, var(--color-text) 70%, transparent)" }}>
+      <p style={{ maxWidth: 760, marginTop: 0, fontSize: 14, color: "color-mix(in srgb, var(--color-text) 70%, transparent)" }}>
         The keys and addresses the app needs to be fully working, and where each one comes from.
         Everything here is Admin-only; save applies immediately, no restart needed.
       </p>
 
-      <div style={{ display: "flex", flexDirection: "column", gap: 16, maxWidth: 640 }}>
-        <ErrorBox>{error}</ErrorBox>
+      {/* The sections flow into as many columns as the page allows — two on
+          a desktop, one on a phone — so the screen is not a 640px strip down
+          the middle of a wide monitor. min(…, 100%) keeps a card narrower
+          than a phone from forcing the page to scroll sideways, and minWidth
+          0 on each card lets a long, unbroken error message wrap inside it
+          instead of widening the grid. */}
+      <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(min(460px, 100%), 1fr))", gap: 16, alignItems: "start" }}>
+        <div style={{ gridColumn: "1 / -1" }}><ErrorBox>{error}</ErrorBox></div>
 
         {/* Year-end. It lives here, not on Home, because its last step is
             the one bulk delete in the app: the archive dialog only offers
             the clear once the downloaded zip has been checked file by
             file, and then only behind a typed word. */}
-        <Blueprint style={{ padding: "18px 20px", borderColor: "var(--color-accent-700)" }}>
+        <Blueprint style={{ padding: "18px 20px", borderColor: "var(--color-accent-700)", minWidth: 0 }}>
           <div style={SECTION_TITLE}>Archive</div>
           <div style={SECTION_HELP}>
             Every job raised in a year or a date range, as one zip filed client → month → job: the job's details
@@ -127,7 +133,7 @@ export function AdminSetupScreen({ currentUser, onArchiveCleared }) {
           <AutomaticBackupPanel />
         </Blueprint>
 
-        <Blueprint style={{ padding: "18px 20px" }}>
+        <Blueprint style={{ padding: "18px 20px", minWidth: 0 }}>
           <div style={SECTION_TITLE}>Email — reports &amp; billing approvals</div>
           <div style={SECTION_HELP}>
             Sent through <a href="https://resend.com" target="_blank" rel="noreferrer">Resend</a>.
@@ -174,7 +180,7 @@ export function AdminSetupScreen({ currentUser, onArchiveCleared }) {
           </div>
         </Blueprint>
 
-        <Blueprint style={{ padding: "18px 20px" }}>
+        <Blueprint style={{ padding: "18px 20px", minWidth: 0 }}>
           <div style={SECTION_TITLE}>Approval links — the app&rsquo;s public address</div>
           <div style={SECTION_HELP}>
             A billing approval email carries a link the client&rsquo;s rep taps to sign. That link
@@ -194,7 +200,7 @@ export function AdminSetupScreen({ currentUser, onArchiveCleared }) {
           </div>
         </Blueprint>
 
-        <Blueprint style={{ padding: "18px 20px" }}>
+        <Blueprint style={{ padding: "18px 20px", minWidth: 0 }}>
           <div style={SECTION_TITLE}>Team chat GIFs</div>
           <div style={SECTION_HELP}>
             The chat&rsquo;s GIF picker searches <a href="https://klipy.com" target="_blank" rel="noreferrer">KLIPY</a>.
@@ -213,7 +219,7 @@ export function AdminSetupScreen({ currentUser, onArchiveCleared }) {
           <Btn variant="primary" disabled={saving || loadState !== "ready"} onClick={save}>{saving ? "Saving…" : "Save settings"}</Btn>
         </div>
 
-        <Blueprint style={{ padding: "18px 20px" }}>
+        <Blueprint style={{ padding: "18px 20px", minWidth: 0 }}>
           <div style={SECTION_TITLE}>Send a test email</div>
           <div style={SECTION_HELP}>
             Goes through the same path as a real report, so a delivered test means the email setup is
@@ -235,7 +241,7 @@ export function AdminSetupScreen({ currentUser, onArchiveCleared }) {
           )}
         </Blueprint>
 
-        <Blueprint style={{ padding: "18px 20px" }}>
+        <Blueprint style={{ padding: "18px 20px", minWidth: 0 }}>
           <div style={SECTION_TITLE}>Push notifications — nothing to do here</div>
           <div style={{ ...SECTION_HELP, marginBottom: 0 }}>
             Chat notifications are already configured: their signing keys are built into the app
@@ -283,7 +289,7 @@ function RecentErrorsPanel() {
   useEffect(() => { load(); }, []);
 
   return (
-    <Blueprint style={{ padding: "18px 20px" }}>
+    <Blueprint style={{ padding: "18px 20px", minWidth: 0 }}>
       <div style={{ display: "flex", alignItems: "center", gap: 10, marginBottom: 4 }}>
         <div style={{ ...SECTION_TITLE, marginBottom: 0 }}>Recent background errors</div>
         <Btn variant="secondary" style={{ marginLeft: "auto" }} onClick={load} disabled={loading}>{loading ? "Loading…" : "Refresh"}</Btn>
@@ -305,7 +311,7 @@ function RecentErrorsPanel() {
                   {new Date(e.created_at).toLocaleString("en-CA", { day: "2-digit", month: "short", hour: "numeric", minute: "2-digit" })}
                 </span>
               </div>
-              <div style={{ marginTop: 4 }}>{e.message}</div>
+              <div style={{ marginTop: 4, whiteSpace: "pre-wrap", overflowWrap: "anywhere" }}>{e.message}</div>
             </div>
           ))}
         </div>

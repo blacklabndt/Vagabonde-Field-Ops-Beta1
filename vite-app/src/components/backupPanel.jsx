@@ -109,7 +109,7 @@ const NUDGE_EVERY_MS = 15000;
 // The panel sits inside the Archive block's own box: a rule above it, not a
 // second box — the two are one subject, keeping the work and keeping the
 // app.
-const SECTION_STYLE = { marginTop: 18, paddingTop: 16, borderTop: "1px solid var(--color-divider)" };
+const SECTION_STYLE = { marginTop: 18, paddingTop: 16, borderTop: "1px solid var(--color-divider)", minWidth: 0, overflowWrap: "anywhere" };
 
 export function AutomaticBackupPanel() {
   const [state, setState] = useState(null);
