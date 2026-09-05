@@ -204,6 +204,40 @@ export const CURSOR_COLUMN: Record<string, string | null> = {
   app_settings: "id"
 };
 
+// Every foreign key to public.profiles, table by table, split by whether
+// the column may be null. It is here because a restore can find itself with
+// a person it cannot put back: profiles.id is a foreign key to auth.users,
+// and an Auth account that refuses to be re-created (an address already
+// taken by somebody else, a backup with no address in it at all) leaves a
+// profile row that cannot be inserted either. Every row that names that
+// person then has to be dealt with, or the whole table's load fails on a
+// foreign key nobody will ever satisfy.
+//
+// `required` is a column the row cannot exist without: those rows are left
+// out and counted as skipped. `optional` is a column the row can stand
+// without: the name is blanked and the row goes in, because a job whose
+// creator could not be re-created is still the job. Read off the live
+// catalogs (pg_constraint, contype 'f', confrelid public.profiles); the
+// tables that are never loaded — audit_log, function_errors, backup_runs —
+// are deliberately not in it.
+export const PROFILE_REFS: Record<string, { required: string[]; optional: string[] }> = {
+  // Its own id: an account that could not be created is a profile row that
+  // cannot be inserted at all.
+  profiles: { required: ["id"], optional: [] },
+  jobs: { required: [], optional: ["created_by"] },
+  rate_line_history: { required: [], optional: ["changed_by"] },
+  tickets: { required: [], optional: ["technician_id"] },
+  ticket_crew: { required: ["profile_id"], optional: [] },
+  jhas: { required: [], optional: ["signed_by"] },
+  equipment: { required: [], optional: ["assigned_to"] },
+  timesheet_approvals: { required: ["profile_id"], optional: ["approved_by"] },
+  chat_messages: { required: ["profile_id"], optional: ["pinned_by"] },
+  chat_reactions: { required: ["profile_id"], optional: [] },
+  chat_reads: { required: ["profile_id"], optional: [] },
+  push_subscriptions: { required: ["profile_id"], optional: [] },
+  arcade_scores: { required: ["profile_id"], optional: [] }
+};
+
 // What "restore these jobs" reaches for, in the order it inserts them.
 export const JOB_CHILD_TABLES: string[] = [
   "tickets", "ticket_lines", "ticket_crew", "jhas", "reports", "rate_overrides"

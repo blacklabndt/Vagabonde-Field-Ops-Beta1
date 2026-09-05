@@ -18,11 +18,13 @@ import {
   afterWipeStep, wipeKeepsCaller, afterPartLoaded, afterTableLoaded,
   partsForTable, withoutAuthEmail, chatInsertRows, chatReplyPatches,
   settingsRestorePatch, ticketsForLoad, approvedTotalPatches, activityPatches,
-  contentTypeFor, typedNameMatches, tooNewRefusal, accountFailureNote
+  contentTypeFor, typedNameMatches, tooNewRefusal, accountFailureNote,
+  withoutMissingProfiles, wantsSetPasswordMail, droppedAccountsNote, quotesThatLanded
 } from "../../supabase/functions/_shared/backupRestore.ts";
 
 import {
-  LOAD_ORDER, WIPE_ORDER, APP_SETTINGS_SECRETS, APP_SETTINGS_NEVER_RESTORED
+  LOAD_ORDER, WIPE_ORDER, PROFILE_REFS,
+  APP_SETTINGS_SECRETS, APP_SETTINGS_NEVER_RESTORED
 } from "../../supabase/functions/_shared/backupTables.ts";
 
 const ROOT = new URL("../../", import.meta.url);
@@ -215,6 +217,84 @@ test("auth_email comes off before a profile row is written", () => {
   assert.equal(rows[0].auth_email, "kyle@example.ca");
 });
 
+// ── The people who could not be put back ─────────────────────────────────
+
+test("a profile row whose account could not be made is left out of the load", () => {
+  const rows = [{ id: "kyle" }, { id: "gone" }, { id: "sam" }];
+  const { rows: out, skipped } = withoutMissingProfiles(rows, "profiles", ["gone"], PROFILE_REFS);
+  assert.deepEqual(out.map(r => r.id), ["kyle", "sam"]);
+  assert.equal(skipped, 1);
+  // Nobody dropped is nothing to filter, and the caller's array comes back
+  // as it was.
+  const none = withoutMissingProfiles(rows, "profiles", [], PROFILE_REFS);
+  assert.equal(none.skipped, 0);
+  assert.equal(none.rows.length, 3);
+});
+
+test("a row that cannot stand without that person goes; a row that can is blanked", () => {
+  // NOT NULL foreign key: the row has nowhere to go.
+  const crew = withoutMissingProfiles(
+    [{ id: "c1", profile_id: "gone", hours: 8 }, { id: "c2", profile_id: "sam", hours: 6 }],
+    "ticket_crew", ["gone"], PROFILE_REFS
+  );
+  assert.deepEqual(crew.rows.map(r => r.id), ["c2"]);
+  assert.equal(crew.skipped, 1);
+
+  // Nullable: a job whose creator could not be re-created is still the job.
+  const jobs = [{ id: "j1", job_number: "S-1", created_by: "gone" }, { id: "j2", job_number: "S-2", created_by: "sam" }];
+  const kept = withoutMissingProfiles(jobs, "jobs", ["gone"], PROFILE_REFS);
+  assert.equal(kept.skipped, 0);
+  assert.deepEqual(kept.rows.map(r => r.id), ["j1", "j2"]);
+  assert.equal(kept.rows[0].created_by, null);
+  assert.equal(kept.rows[0].job_number, "S-1", "the rest of the row is untouched");
+  assert.equal(jobs[0].created_by, "gone", "the caller's rows are untouched");
+
+  // Both at once: the message goes, the pin on somebody else's message is
+  // only forgotten.
+  const chat = withoutMissingProfiles([
+    { id: "m1", profile_id: "gone", body: "hi" },
+    { id: "m2", profile_id: "sam", body: "hi", pinned_by: "gone" }
+  ], "chat_messages", ["gone"], PROFILE_REFS);
+  assert.equal(chat.skipped, 1);
+  assert.deepEqual(chat.rows.map(r => r.id), ["m2"]);
+  assert.equal(chat.rows[0].pinned_by, null);
+});
+
+test("a table that never names a profile is not filtered at all", () => {
+  const lines = [{ id: "l1", ticket_id: "t1" }];
+  const out = withoutMissingProfiles(lines, "ticket_lines", ["gone"], PROFILE_REFS);
+  assert.equal(out.skipped, 0);
+  assert.equal(out.rows, lines, "the same array, not a copy");
+  // Every table PROFILE_REFS names is a table the restore actually loads.
+  for (const table of Object.keys(PROFILE_REFS)) {
+    assert.ok(LOAD_ORDER.includes(table), `${table} is loaded`);
+  }
+  // And the one that matters most is profiles' own id.
+  assert.deepEqual(PROFILE_REFS.profiles.required, ["id"]);
+});
+
+test("a deactivated account is re-created but is not invited back in", () => {
+  assert.equal(wantsSetPasswordMail({ name: "Sam" }), true);
+  assert.equal(wantsSetPasswordMail({ name: "Sam", deactivated_at: null }), true);
+  assert.equal(wantsSetPasswordMail({ name: "Sam", deactivated_at: "" }), true);
+  // Locked out on purpose: the profiles load puts deactivated_at back and
+  // RLS locks them out again, so the mail would be an invitation to nothing.
+  assert.equal(wantsSetPasswordMail({ name: "Sam", deactivated_at: "2026-01-02T00:00:00Z" }), false);
+  assert.equal(wantsSetPasswordMail({}), true);
+});
+
+test("the people left out are named on the run itself", () => {
+  assert.equal(droppedAccountsNote([], []), "", "nothing left out leaves the column null");
+  assert.equal(droppedAccountsNote(null, null), "");
+  const one = droppedAccountsNote(["p1"], ["sam@example.ca: address already registered"]);
+  assert.match(one, /1 account could not be re-created/);
+  assert.match(one, /sam@example\.ca/);
+  assert.match(one, /profile id: p1/);
+  const two = droppedAccountsNote(["p1", "p2"], ["a: x", "b: y"]);
+  assert.match(two, /2 accounts could not be re-created/);
+  assert.match(two, /profile ids: p1, p2/);
+});
+
 // ── Chat history's two passes ────────────────────────────────────────────
 
 test("pass one empties every quote and drops the ids already on the table", () => {
@@ -248,6 +328,20 @@ test("pass two writes only the quotes, and only where there is one", () => {
   assert.deepEqual(chatReplyPatches(rows), [{ id: "m2", reply_to: "m1" }]);
   assert.deepEqual(chatReplyPatches([]), []);
   assert.deepEqual(chatReplyPatches(null), []);
+});
+
+test("a reply whose quoted message was left out keeps its own words", () => {
+  const patches = [
+    { id: "m2", reply_to: "m1" },
+    { id: "m4", reply_to: "gone" }
+  ];
+  const { rows, dropped } = quotesThatLanded(patches, ["m1", "m2", "m4"]);
+  assert.deepEqual(rows, [{ id: "m2", reply_to: "m1" }]);
+  assert.equal(dropped, 1);
+  // Everything on the table is everything patched.
+  assert.equal(quotesThatLanded(patches, ["m1", "gone"]).dropped, 0);
+  assert.deepEqual(quotesThatLanded([], ["m1"]).rows, []);
+  assert.deepEqual(quotesThatLanded(null, null).rows, []);
 });
 
 // ── The settings row ─────────────────────────────────────────────────────
@@ -420,4 +514,29 @@ test("the restore keeps the gates it is supposed to keep", () => {
   // A restore never mints a new id for an account: the whole backup names
   // the old one.
   assert.match(source, /sendSetPasswordLink/);
+});
+
+test("the three column patches go through the RPC, never an upsert", () => {
+  const source = read("supabase/functions/backup-restore/index.ts");
+  // A partial upsert of {id, reply_to}, {id, total} or {id, last_activity_at}
+  // is refused by Postgres before it ever reaches ON CONFLICT: NOT NULL runs
+  // on the proposed tuple, and chat_messages.profile_id, tickets.job_id and
+  // jobs.job_number are all NOT NULL with no default. Every one of them is
+  // an UPDATE, and restore_patch_rows is the only door.
+  for (const table of ["chat_messages", "tickets", "jobs"]) {
+    assert.match(source, new RegExp(`restore_patch_rows[\\s\\S]{0,200}p_table:\\s*"${table}"`),
+      `${table} is patched through restore_patch_rows`);
+  }
+  // Three calls, and no upsert left carrying a patch.
+  assert.equal((source.match(/p_table:/g) || []).length, 3);
+  assert.doesNotMatch(source, /upsert\(patches/);
+  assert.doesNotMatch(source, /upsert\(chatReplyPatches|upsert\(approvedTotalPatches|upsert\(activityPatches/);
+});
+
+test("a restore waiting on its safety backup still says it is alive", () => {
+  const source = read("supabase/functions/backup-restore/index.ts");
+  // The wait writes a heartbeat and nothing else. Without it the panel
+  // reads a run that is behaving exactly as designed as a run that died.
+  assert.match(source, /async function beat\(/);
+  assert.match(source, /await beat\(db, runId, guard\)/);
 });

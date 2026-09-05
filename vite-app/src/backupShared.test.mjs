@@ -892,6 +892,22 @@ test("a heartbeat older than a slice can live is a run to reclaim", () => {
   assert.equal(sliceLooksAlive("not a date", now), false);
 });
 
+test("the chain that drives a backup asks for the run it just moved", () => {
+  const source = read("supabase/functions/backup-run/index.ts");
+  // The self-kick used to say {action:"tick"} straight after writing a
+  // fresh heartbeat, so the invocation it woke read its own heartbeat as
+  // "another slice is alive" and returned busy without advancing anything:
+  // every backup crawled at one slice per five-minute cron tick. The chain
+  // now names the run and says it is the chain, and only that exemption
+  // skips the aliveness gate.
+  assert.match(source, /kick\("backup-run",\s*\{\s*action:\s*"advance",\s*runId,\s*chain:\s*true\s*\}/);
+  assert.doesNotMatch(source, /kick\("backup-run",\s*\{\s*action:\s*"tick"\s*\}\s*,\s*secret\s*\)\s*;\s*\n\s*return \{ ok: true, runId, phase/);
+  // The door: an advance is the machinery's, never an Admin's.
+  assert.match(source, /if \(action === "advance"\)[\s\S]{0,200}caller\.internal/);
+  // And the exemption is addressed at that run, not at whatever is running.
+  assert.match(source, /!\(chained && String\(run\.id\) === runId\) && sliceLooksAlive/);
+});
+
 test("a slice that matched no row has lost the run and must stop writing", () => {
   // PostgREST answers a conditional update with the rows it matched, and the
   // shape of that answer is what says whether this slice still holds the run:

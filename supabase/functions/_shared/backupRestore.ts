@@ -47,6 +47,12 @@ export interface RestoreCursor {
   accountIndex: number;
   accountsMade: string[];
   accountsFailed: string[];
+  // The people the accounts phase could not put back. Their profile rows
+  // cannot be inserted — profiles.id is a foreign key to auth.users — so
+  // the load has to leave them, and every row in every later table that
+  // names them, out. Kept as ids because that is what the rest of the
+  // backup calls them.
+  droppedProfileIds: string[];
   tableIndex: number;
   partIndex: number;
   batchDone: number;
@@ -83,6 +89,7 @@ export function newRestoreCursor(o: {
     accountIndex: 0,
     accountsMade: [],
     accountsFailed: [],
+    droppedProfileIds: [],
     tableIndex: 0,
     partIndex: 0,
     batchDone: 0,
@@ -128,6 +135,7 @@ export function reviveRestoreCursor(raw: unknown): RestoreCursor {
     accountIndex: num(c.accountIndex),
     accountsMade: strs(c.accountsMade),
     accountsFailed: strs(c.accountsFailed),
+    droppedProfileIds: strs(c.droppedProfileIds),
     tableIndex: num(c.tableIndex),
     partIndex: num(c.partIndex),
     batchDone: num(c.batchDone),
@@ -157,6 +165,7 @@ export function restoreCounts(c: RestoreCursor): Record<string, unknown> {
     bytes: num(c.filesBytes),
     accounts: (c.accountsMade ?? []).length,
     accountsFailed: c.accountsFailed ?? [],
+    accountsDropped: (c.droppedProfileIds ?? []).length,
     skipped: num(c.skipped),
     collisions: num(c.collisions)
   };
@@ -241,6 +250,83 @@ export function withoutAuthEmail(rows: Record<string, unknown>[]): Record<string
   });
 }
 
+// ── The people who could not be put back ─────────────────────────────────
+
+// An Auth account the restore could not re-create is a profile row it
+// cannot insert: profiles.id is a foreign key to auth.users, and the row
+// would be refused however many times the load retried it. So the row is
+// left out — and so is every later row that cannot stand without it.
+//
+// Which is which comes off the live catalogs (PROFILE_REFS). A NOT NULL
+// foreign key is a row that has nowhere to go: a ticket_crew line, a chat
+// message, somebody's high score. Those are dropped and counted as skipped,
+// because a skipped row is a thing to say out loud. A nullable one is a
+// name on a row that stands perfectly well without it: a job whose creator
+// could not be re-created is still the job, so the column is blanked and
+// the row goes in. Dropping the job instead would lose the work of everyone
+// who was never missing in the first place.
+export function withoutMissingProfiles(
+  rows: Record<string, unknown>[],
+  table: string,
+  droppedIds: string[],
+  refs: Record<string, { required: string[]; optional: string[] }>
+): { rows: Record<string, unknown>[]; skipped: number } {
+  const all = rows || [];
+  const gone = new Set<string>();
+  for (const id of droppedIds || []) { const s = String(id ?? ""); if (s) gone.add(s); }
+  const ref = (refs || {})[table];
+  if (!gone.size || !ref) return { rows: all, skipped: 0 };
+
+  const required = ref.required || [];
+  const optional = ref.optional || [];
+  const out: Record<string, unknown>[] = [];
+  let skipped = 0;
+  for (const row of all) {
+    const r = (row ?? {}) as Record<string, unknown>;
+    let orphaned = false;
+    for (const column of required) {
+      const v = r[column];
+      if (v !== null && v !== undefined && gone.has(String(v))) { orphaned = true; break; }
+    }
+    if (orphaned) { skipped += 1; continue; }
+    let blanked: Record<string, unknown> | null = null;
+    for (const column of optional) {
+      const v = r[column];
+      if (v === null || v === undefined || !gone.has(String(v))) continue;
+      blanked = blanked ?? { ...r };
+      blanked[column] = null;
+    }
+    out.push(blanked ?? r);
+  }
+  return { rows: out, skipped };
+}
+
+// A re-created account gets a set-password link, because a password is the
+// one thing a backup never holds. A deactivated one does not: the row says
+// this person was locked out on purpose, RLS locks them out again the
+// moment the profiles load puts deactivated_at back, and mailing them an
+// invitation to set a password would be the app asking somebody who was
+// let go to come back in.
+export function wantsSetPasswordMail(profile: Record<string, unknown>): boolean {
+  const off = (profile ?? {}).deactivated_at;
+  return off === null || off === undefined || off === "";
+}
+
+// What a restore that had to leave people out writes on the run itself. It
+// is put in `error` on a run that completed on purpose: the restore worked,
+// and there is still something an Admin has to be told — these ids are the
+// rows that are not in the restored database and never will be without a
+// hand. Empty when nobody was left out, so the column stays null.
+export function droppedAccountsNote(droppedIds: string[], failures: string[]): string {
+  const ids = (droppedIds || []).map(String).filter(Boolean);
+  if (!ids.length) return "";
+  const many = ids.length !== 1;
+  return `The restore finished, but ${ids.length} account${many ? "s" : ""} could not be re-created, ` +
+    `so ${many ? "their profile rows" : "that profile row"} and the rows that cannot stand without ` +
+    `${many ? "them" : "it"} were left out: ${(failures || []).join(" · ")} ` +
+    `(profile ${many ? "ids" : "id"}: ${ids.join(", ")}).`;
+}
+
 // ── Chat history, in two passes ──────────────────────────────────────────
 
 // Pass one. Two things happen here, and both are the shape of the RPC that
@@ -276,6 +362,26 @@ export function chatReplyPatches(rows: Record<string, unknown>[]): Record<string
     out.push({ id, reply_to: reply });
   }
   return out;
+}
+
+// Pass two, when somebody was left out. A message written by an account
+// that could not be re-created is not on the table, and a reply that quotes
+// it would name a row that is not there — the foreign key would refuse the
+// whole batch. The reply keeps its own words and loses the quote, which is
+// exactly what chat already does when a quoted message is deleted.
+export function quotesThatLanded(
+  patches: Record<string, unknown>[], presentIds: Iterable<string>
+): { rows: Record<string, unknown>[]; dropped: number } {
+  const present = new Set<string>();
+  for (const id of presentIds || []) present.add(String(id));
+  const rows: Record<string, unknown>[] = [];
+  let dropped = 0;
+  for (const patch of patches || []) {
+    const target = String((patch as Record<string, unknown>).reply_to ?? "");
+    if (target && !present.has(target)) { dropped += 1; continue; }
+    rows.push(patch);
+  }
+  return { rows, dropped };
 }
 
 // ── The settings row ─────────────────────────────────────────────────────

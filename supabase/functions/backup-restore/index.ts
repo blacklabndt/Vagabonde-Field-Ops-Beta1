@@ -20,7 +20,7 @@
 // deno-lint-ignore-file no-explicit-any
 import type { SupabaseClient } from "https://esm.sh/@supabase/supabase-js@2";
 import {
-  LOAD_ORDER, WIPE_ORDER, TABLE_KEYS,
+  LOAD_ORDER, WIPE_ORDER, TABLE_KEYS, PROFILE_REFS,
   APP_SETTINGS_SECRETS, APP_SETTINGS_NEVER_RESTORED
 } from "../_shared/backupTables.ts";
 import {
@@ -39,7 +39,8 @@ import {
   afterWipeStep, wipeKeepsCaller, afterPartLoaded, afterTableLoaded,
   partsForTable, withoutAuthEmail, chatInsertRows, chatReplyPatches,
   settingsRestorePatch, ticketsForLoad, approvedTotalPatches, activityPatches,
-  contentTypeFor, typedNameMatches, tooNewRefusal, accountFailureNote
+  contentTypeFor, typedNameMatches, tooNewRefusal, accountFailureNote,
+  withoutMissingProfiles, wantsSetPasswordMail, droppedAccountsNote, quotesThatLanded
 } from "../_shared/backupRestore.ts";
 import type { RestoreCursor } from "../_shared/backupRestore.ts";
 import { gunzip } from "../_shared/gzip.ts";
@@ -224,7 +225,18 @@ async function advance(
         // The cursor was written inside stepSafety, before this returned:
         // the safety run's id has to be on the row before the slice ends or
         // the next tick raises a second one.
-        if (!ready) return { ok: true, runId, phase: "safety", waiting: true };
+        if (!ready) {
+          // A restore waiting on its safety copy is doing exactly what it
+          // was told to, and it can wait an hour while a big backup runs.
+          // Without a heartbeat here the row would look like a slice that
+          // died the moment the second poll returned, so the wait writes one
+          // and changes nothing else. It does not wedge the machinery: the
+          // heartbeat is stale again inside SLICE_ALIVE_MS, which is shorter
+          // than the gap between cron ticks, so the very tick that has to
+          // poll this restore still finds it quiet and forwards to it.
+          if (!await beat(db, runId, guard)) return { ok: true, runId, superseded: true };
+          return { ok: true, runId, phase: "safety", waiting: true };
+        }
       }
       else if (c.phase === "wipe") await stepWipe(db, c);
       else if (c.phase === "accounts") c = await stepAccounts(db, await opened(), await partList(), c, deadline);
@@ -239,9 +251,15 @@ async function advance(
 
     if (c.phase === "done") {
       const finished = new Date().toISOString();
+      // A restore that had to leave people out finished — and there is still
+      // something an Admin has to be told, so it is written on the run. The
+      // panel shows `error` only on a run that failed, which is right: this
+      // one did not, and the note is for whoever goes looking.
+      const left = droppedAccountsNote(c.droppedProfileIds, c.accountsFailed);
       const { data: held, error: doneErr } = await db.from("backup_runs").update({
         status: "complete", phase: "done", finished_at: finished,
-        heartbeat_at: finished, cursor: c, counts: restoreCounts(c)
+        heartbeat_at: finished, cursor: c, counts: restoreCounts(c),
+        error: left || null
       }).eq("id", runId).eq("status", guard).select("id");
       if (doneErr) throw doneErr;
       if (!stillHoldsRun(held)) return { ok: true, runId, superseded: true };
@@ -271,6 +289,18 @@ async function persist(
   const { data: held, error } = await db.from("backup_runs").update({
     phase: c.phase, cursor: c, heartbeat_at: new Date().toISOString(), counts: restoreCounts(c)
   }).eq("id", runId).eq("status", guard).select("id");
+  if (error) throw error;
+  return stillHoldsRun(held);
+}
+
+// The heartbeat on its own, for the one place a slice ends without having
+// moved anything: waiting for the safety backup. Same condition as every
+// other write, so a superseded slice does not keep a run it no longer holds
+// looking alive.
+async function beat(db: SupabaseClient, runId: string, guard: string): Promise<boolean> {
+  const { data: held, error } = await db.from("backup_runs")
+    .update({ heartbeat_at: new Date().toISOString() })
+    .eq("id", runId).eq("status", guard).select("id");
   if (error) throw error;
   return stillHoldsRun(held);
 }
@@ -403,6 +433,7 @@ async function stepAccounts(
     if (!email) {
       c.accountsFailed.push(accountFailureNote(name || id,
         "the backup has no email address for this account, so it could not be re-created."));
+      c.droppedProfileIds.push(id);
       continue;
     }
     try {
@@ -413,13 +444,23 @@ async function stepAccounts(
       });
       if (error) throw error;
       c.accountsMade.push(email);
+      // A deactivated account is put back deactivated — the profiles load
+      // writes deactivated_at over the stub in a moment and RLS locks it
+      // again — so it gets no invitation to come and set a password.
+      if (!wantsSetPasswordMail(p)) continue;
       try { await sendSetPasswordLink(db, email, name, "invite"); }
       catch (e) {
         c.accountsFailed.push(accountFailureNote(email,
           `the account was re-created but the set-password email did not go out (${(e as Error).message}).`));
       }
     } catch (e) {
+      // The Auth user could not be made, so profiles.id has nothing to point
+      // at: the profile row is refused however often it is retried, and so is
+      // every row in every later table that cannot stand without this person.
+      // Say who, drop them, and carry on — the rest of the company's records
+      // are not this one account's to hold up.
       c.accountsFailed.push(accountFailureNote(email, (e as Error).message));
+      c.droppedProfileIds.push(id);
     }
   }
   c.accountIndex = 0;
@@ -479,9 +520,18 @@ async function stepLoad(
   //     insert that names it is one PostgREST refuses;
   //   · tickets — the deferred balance trigger re-adds a ticket's lines at
   //     the commit of its own insert, and ticket_lines cannot load first.
-  const rows = table === "profiles" ? withoutAuthEmail(raw)
+  const shaped = table === "profiles" ? withoutAuthEmail(raw)
     : table === "tickets" ? ticketsForLoad(raw)
     : raw;
+  // And anyone the accounts phase could not put back is taken out here: a
+  // row naming a profile that is not going in is a foreign key nothing will
+  // ever satisfy, and one of them would fail the whole table's load.
+  const missing = withoutMissingProfiles(shaped, table, c.droppedProfileIds, PROFILE_REFS);
+  // Counted once per part. A slice cut short comes back to the same part and
+  // filters it to the same rows, and a count added twice is a count that
+  // tells whoever reads it the wrong thing.
+  if (c.batchDone === 0) c.skipped += missing.skipped;
+  const rows = missing.rows;
   const conflict = (TABLE_KEYS[table] ?? ["id"]).join(",");
 
   for (let at = c.batchDone; at < rows.length; at += WRITE_BATCH) {
@@ -513,18 +563,26 @@ async function stepLoad(
 // reply_to points back at chat_messages and a reply can sit in an earlier
 // part than the message it quotes.
 //
-// Pass two walks the same parts again and puts the quotes back. By then
-// every message they point at is on the table, so the upsert can only ever
-// take its update arm — nothing is inserted here and the push trigger is
-// never reached.
+// Pass two walks the same parts again and puts the quotes back, through
+// restore_patch_rows — an UPDATE and nothing else. It cannot be an upsert:
+// a two-column row {id, reply_to} is checked against chat_messages' NOT NULL
+// columns before Postgres ever looks for the conflict, so profile_id and
+// body being absent refuses the write outright. An UPDATE also means the
+// push trigger (AFTER INSERT) is never reached.
 async function loadChatPart(
   db: SupabaseClient, c: RestoreCursor, raw: Record<string, unknown>[],
   lastPart: boolean, deadline: number
 ): Promise<RestoreCursor> {
   if (c.chatPass === CHAT_INSERT_PASS) {
-    for (let at = c.batchDone; at < raw.length; at += WRITE_BATCH) {
+    // A message written by somebody the accounts phase could not put back
+    // has nowhere to go: chat_messages.profile_id is NOT NULL. A pin by one
+    // of them is only a pin forgotten.
+    const missing = withoutMissingProfiles(raw, "chat_messages", c.droppedProfileIds, PROFILE_REFS);
+    if (c.batchDone === 0) c.skipped += missing.skipped;
+    const kept = missing.rows;
+    for (let at = c.batchDone; at < kept.length; at += WRITE_BATCH) {
       if (outOfBudget(deadline, Date.now())) { c.batchDone = at; return c; }
-      const batch = raw.slice(at, at + WRITE_BATCH);
+      const batch = kept.slice(at, at + WRITE_BATCH);
       const ids = batch.map(r => String(r.id ?? "")).filter(Boolean);
       const { data: live, error: liveErr } = await db.from("chat_messages").select("id").in("id", ids);
       if (liveErr) throw new Error(`Reading the chat back failed: ${liveErr.message}`);
@@ -532,19 +590,32 @@ async function loadChatPart(
       c.collisions += collisions;
       if (rows.length) {
         const { error } = await db.rpc("restore_chat_messages", { p_rows: rows });
-        if (error) throw new Error(`Restoring the chat failed at row ${at + 1} of ${raw.length}: ${error.message}`);
+        if (error) throw new Error(`Restoring the chat failed at row ${at + 1} of ${kept.length}: ${error.message}`);
       }
     }
     return afterPartLoaded(c, {
-      table: "chat_messages", rows: raw.length, lastPart, tableCount: LOAD_ORDER.length
+      table: "chat_messages", rows: kept.length, lastPart, tableCount: LOAD_ORDER.length
     });
   }
 
   const patches = chatReplyPatches(raw);
   for (let at = c.batchDone; at < patches.length; at += WRITE_BATCH) {
     if (outOfBudget(deadline, Date.now())) { c.batchDone = at; return c; }
-    const { error } = await db.from("chat_messages")
-      .upsert(patches.slice(at, at + WRITE_BATCH), { onConflict: "id" });
+    let batch = patches.slice(at, at + WRITE_BATCH);
+    // Only when somebody was left out. With nobody dropped every message in
+    // the backup is on the table and the quotes cannot name a row that is
+    // not; with somebody dropped, theirs are gone and a reply quoting one of
+    // them would be refused by the foreign key and take the batch with it.
+    if (c.droppedProfileIds.length) {
+      const targets = batch.map(p => String(p.reply_to ?? "")).filter(Boolean);
+      const { data: there, error: thereErr } = await db.from("chat_messages").select("id").in("id", targets);
+      if (thereErr) throw new Error(`Reading the quoted messages back failed: ${thereErr.message}`);
+      const landed = quotesThatLanded(batch, (there ?? []).map(r => String(r.id)));
+      batch = landed.rows;
+      c.skipped += landed.dropped;
+    }
+    if (!batch.length) continue;
+    const { error } = await db.rpc("restore_patch_rows", { p_table: "chat_messages", p_rows: batch });
     if (error) throw new Error(`Restoring the chat's replies failed: ${error.message}`);
   }
   c.batchDone = 0;
@@ -597,6 +668,12 @@ async function stepFilesBack(
 //   · jobs.last_activity_at, which orders the board and which the definer
 //     triggers on tickets, JHAs and reports have just stamped with today for
 //     every job the load touched.
+//
+// Both are UPDATEs through restore_patch_rows, not upserts. A row of two
+// columns is checked against the table's NOT NULL columns before Postgres
+// looks for a conflict — tickets.job_id, jobs.job_number — so an upsert of
+// {id, total} or {id, last_activity_at} is refused outright, on every row,
+// however certainly the id is already there.
 
 async function stepActivity(
   db: SupabaseClient, drive: DriveClient, allParts: Part[], c: RestoreCursor, deadline: number
@@ -607,8 +684,9 @@ async function stepActivity(
       if (outOfBudget(deadline, Date.now())) { c.totalsPart = p; return c; }
       const patches = approvedTotalPatches(await readPart(drive, parts[p]));
       for (let at = 0; at < patches.length; at += WRITE_BATCH) {
-        const { error } = await db.from("tickets")
-          .upsert(patches.slice(at, at + WRITE_BATCH), { onConflict: "id" });
+        const { error } = await db.rpc("restore_patch_rows", {
+          p_table: "tickets", p_rows: patches.slice(at, at + WRITE_BATCH)
+        });
         if (error) throw new Error(`Restoring the signed tickets' totals failed: ${error.message}`);
       }
     }
@@ -622,8 +700,9 @@ async function stepActivity(
     if (outOfBudget(deadline, Date.now())) { c.activityPart = p; return c; }
     const patches = activityPatches(await readPart(drive, parts[p]));
     for (let at = 0; at < patches.length; at += WRITE_BATCH) {
-      const { error } = await db.from("jobs")
-        .upsert(patches.slice(at, at + WRITE_BATCH), { onConflict: "id" });
+      const { error } = await db.rpc("restore_patch_rows", {
+        p_table: "jobs", p_rows: patches.slice(at, at + WRITE_BATCH)
+      });
       if (error) throw new Error(`Restoring the jobs' activity times failed: ${error.message}`);
     }
   }

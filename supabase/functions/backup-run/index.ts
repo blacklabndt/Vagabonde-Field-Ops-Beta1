@@ -6,6 +6,8 @@
 //   {action:"tick"}      the pg_cron job, on x-internal-secret (the database
 //                        holds no user JWT), or an Admin keeping a run they
 //                        are watching moving between cron ticks
+//   {action:"advance"}   the internal secret, one slice of one named run —
+//                        the chain's own next link
 //   {action:"now"}       an Admin pressing "Back up now"
 //   {action:"list"}      the backups in the drive, newest first
 //   {action:"manifest"}  one backup's manifest, for the per-job restore
@@ -94,6 +96,13 @@ Deno.serve(async (req) => {
     if (action === "tick") {
       return json(await tick(db, caller.secret || await internalSecret(db)));
     }
+    if (action === "advance") {
+      // The next link of a chain this function started. Not an Admin's to
+      // call — an Admin's nudge is a tick, which decides for itself what is
+      // worth advancing.
+      if (!caller.internal) return json({ error: "Not authorized" }, 401);
+      return json(await advanceById(db, String(body.runId ?? ""), caller.secret, body.chain === true));
+    }
     if (action === "now") {
       return json(await backUpNow(db, caller.userId, caller.secret || await internalSecret(db)));
     }
@@ -180,6 +189,37 @@ async function tick(db: SupabaseClient, secret: string): Promise<Record<string, 
 
   const created = await queueRun(db, "backup", null);
   return await advance(db, created, secret);
+}
+
+// One slice of one named run: the link the last slice asked for.
+//
+// This exists because the chain used to say {action:"tick"}, and a tick
+// reads the running run and finds the heartbeat the slice that kicked it
+// wrote a moment earlier — always alive, by definition. Every kicked
+// invocation answered "busy" and advanced nothing, so a backup only ever
+// moved on the five-minute cron: an hour's work took all night.
+//
+// The exemption is addressed at this run and no other. A slice the chain
+// did not start — the cron picking up what the chain dropped — still waits
+// for the heartbeat to go quiet, because two slices of one run would upload
+// the same part twice and fight over the cursor. `advance` claims the run
+// conditionally on the status it was read at, so even the exempt path
+// cannot end up with two.
+async function advanceById(
+  db: SupabaseClient, runId: string, secret: string, chained: boolean
+): Promise<Record<string, unknown>> {
+  if (!runId) throw new Error("runId is required");
+  const { data, error } = await db.from("backup_runs")
+    .select(RUN_COLUMNS).eq("id", runId).maybeSingle();
+  if (error) throw error;
+  const run = (data ?? null) as Run | null;
+  // Finished, failed, or a restore — none of them this chain's to move.
+  if (!run || !MY_KINDS.includes(String(run.kind))) return { ok: true, runId, idle: true };
+  if (run.status !== "running" && run.status !== "queued") return { ok: true, runId, idle: true };
+  if (!(chained && String(run.id) === runId) && sliceLooksAlive(run.heartbeat_at, Date.now())) {
+    return { ok: true, runId, busy: true };
+  }
+  return await advance(db, run, secret);
 }
 
 async function queueRun(db: SupabaseClient, kind: string, requestedBy: string | null): Promise<Run> {
@@ -337,7 +377,9 @@ async function advance(db: SupabaseClient, run: Run, secret: string): Promise<Re
       return { ok: true, runId, complete: true, counts: countsOf(cursor) };
     }
 
-    if (units > 0) kick("backup-run", { action: "tick" }, secret);
+    // The next link, named. Not a tick: a tick would read the heartbeat this
+    // slice has just written, call the run alive and advance nothing.
+    if (units > 0) kick("backup-run", { action: "advance", runId, chain: true }, secret);
     return { ok: true, runId, phase: cursor.phase, continuing: true };
   } catch (e) {
     return await fail(db, runId, (e as Error).message, guard);
