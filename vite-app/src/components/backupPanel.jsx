@@ -539,10 +539,21 @@ export function AutomaticBackupPanel() {
       )}
 
       {/* App registration — collapsed, because it is done once and never
-          again, and it is the fiddliest thing on this screen. */}
-      <Btn variant="secondary" onClick={() => setShowRegistration(v => !v)}>
-        {showRegistration ? "Hide app registration" : "App registration"}
-      </Btn>
+          again, and it is the fiddliest thing on this screen. It shares a
+          row with Save: the one thing left to do down here on the left, the
+          one thing that commits it on the right. The registration's own
+          fields open underneath the row. */}
+      <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", gap: 8, marginTop: 14, flexWrap: "wrap" }}>
+        <Btn variant="secondary" onClick={() => setShowRegistration(v => !v)}>
+          {showRegistration ? "Hide app registration" : "App registration"}
+        </Btn>
+        <span style={{ display: "flex", gap: 8, marginLeft: "auto" }}>
+          {loadState === "failed" && <Btn variant="secondary" onClick={load}>Try loading again</Btn>}
+          <Btn variant="primary" disabled={saving || loadState !== "ready"} onClick={save}>
+            {saving ? "Saving…" : "Save backup settings"}
+          </Btn>
+        </span>
+      </div>
 
       {showRegistration && (
         <div style={{ marginTop: 12, display: "flex", flexDirection: "column", gap: 16 }}>
@@ -587,13 +598,6 @@ export function AutomaticBackupPanel() {
           })}
         </div>
       )}
-
-      <div style={{ display: "flex", justifyContent: "flex-end", gap: 8, marginTop: 14 }}>
-        {loadState === "failed" && <Btn variant="secondary" onClick={load}>Try loading again</Btn>}
-        <Btn variant="primary" disabled={saving || loadState !== "ready"} onClick={save}>
-          {saving ? "Saving…" : "Save backup settings"}
-        </Btn>
-      </div>
     </div>
   );
 }
