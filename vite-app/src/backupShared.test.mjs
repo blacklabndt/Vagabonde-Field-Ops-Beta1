@@ -39,7 +39,7 @@ import {
 import {
   BUDGET_MS, SLICE_ALIVE_MS, RETRIES, BACKOFF_MS,
   newRunCursor, reviveCursor, sliceDeadline, budgetLeft, outOfBudget,
-  sliceLooksAlive, isRetryable, shouldRetry, retryDelayMs, stillHoldsRun,
+  sliceLooksAlive, isRetryable, shouldRetry, worthAnotherGo, retryDelayMs, stillHoldsRun,
   afterTablePart, foldIntoIndex, forgetIndex,
   startPrefixWalk, pausePage, afterFilesPage, countsOf, totalRows
 } from "../../supabase/functions/_shared/backupRun.ts";
@@ -597,6 +597,74 @@ test("Google creates the folder when the lookup finds none", async () => {
   assert.equal(made, "folder-new");
 });
 
+test("OneDrive resumes where nextExpectedRanges says it got to, not where the sender hoped", async () => {
+  // Graph accepts a chunk in part exactly the way Google does, and says so
+  // in the 202's nextExpectedRanges rather than in a Range header. Sending
+  // the next chunk from `end` regardless leaves a hole in the middle of the
+  // part file that nothing downstream notices.
+  const size = 6 * 1024 * 1024;          // one 5 MiB chunk, then 1 MiB…
+  const chunk = 5 * 1024 * 1024;
+  const kept = 2 * 1024 * 1024;          // …of which Graph keeps 2 MiB.
+  const ranges = [];
+  const drive = new OneDrive("tok");
+
+  const id = await withFetch(async (url, init) => {
+    if (url.includes("createUploadSession")) return json({ uploadUrl: "https://upload.example/graph-1" });
+    ranges.push(init.headers["Content-Range"]);
+    if (ranges.length === 1) return json({ nextExpectedRanges: [`${kept}-${size - 1}`] }, 202);
+    return json({ id: "item-1" });
+  }, () => drive.upload("folder-1", "tickets.01.json.gz", new Uint8Array(size), "application/gzip"));
+
+  assert.equal(id, "item-1");
+  assert.deepEqual(ranges, [
+    `bytes 0-${chunk - 1}/${size}`,
+    `bytes ${kept}-${size - 1}/${size}`
+  ]);
+});
+
+test("a 202 with no ranges on it is OneDrive saying it took the whole chunk", async () => {
+  const size = 6 * 1024 * 1024;
+  const chunk = 5 * 1024 * 1024;
+  const ranges = [];
+  const drive = new OneDrive("tok");
+
+  const id = await withFetch(async (url, init) => {
+    if (url.includes("createUploadSession")) return json({ uploadUrl: "https://upload.example/graph-2" });
+    ranges.push(init.headers["Content-Range"]);
+    if (ranges.length === 1) return new Response(null, { status: 202 });
+    return json({ id: "item-2" });
+  }, () => drive.upload("folder-1", "ticket_lines.01.json.gz", new Uint8Array(size), "application/gzip"));
+
+  assert.equal(id, "item-2");
+  assert.deepEqual(ranges, [
+    `bytes 0-${chunk - 1}/${size}`,
+    `bytes ${chunk}-${size - 1}/${size}`
+  ]);
+});
+
+test("OneDrive gives up on a session that keeps none of two identical chunks", async () => {
+  // An open-ended range back at the start is Graph asking for the same
+  // bytes again. Once is the protocol; twice is a wedged session, and a
+  // loop that never ends is worse than a failure the retry can see.
+  const size = 6 * 1024 * 1024;
+  const ranges = [];
+  const drive = new OneDrive("tok");
+
+  await assert.rejects(
+    withFetch(async (url, init) => {
+      if (url.includes("createUploadSession")) return json({ uploadUrl: "https://upload.example/graph-3" });
+      ranges.push(init.headers["Content-Range"]);
+      return json({ nextExpectedRanges: ["0-"] }, 202);
+    }, () => drive.upload("folder-1", "jobs.01.json.gz", new Uint8Array(size), "application/gzip")),
+    e => {
+      assert.match(e.message, /upload session is stuck/);
+      assert.equal(e.retryable, true, "the run's own retry has to be allowed to try the whole upload again");
+      return true;
+    }
+  );
+  assert.equal(ranges.length, 2, "the same chunk twice, and then it stops");
+});
+
 test("OneDrive creates a folder fail-on-conflict, and looks it up rather than replacing it", async () => {
   const drive = new OneDrive("tok");
   const lookups = [];
@@ -892,6 +960,28 @@ test("a heartbeat older than a slice can live is a run to reclaim", () => {
   assert.equal(sliceLooksAlive("not a date", now), false);
 });
 
+test("the wipe empties tickets before the list their numbers are burned into", () => {
+  // tickets_burn_issued_number is BEFORE DELETE on tickets and inserts a
+  // burned_ticket_numbers row for every ticket carrying approval_sent_at,
+  // so clearing the burn list first leaves exactly as many rows behind as
+  // there were sent tickets deleted after it.
+  assert.ok(WIPE_ORDER.indexOf("tickets") < WIPE_ORDER.indexOf("burned_ticket_numbers"));
+  const src = read("supabase/functions/_shared/backupTables.ts");
+  assert.match(src, /tickets_burn_issued_number/, "and the reason has to stay written down beside the order");
+});
+
+test("the walk of the account list stops on an empty page, not a short one", () => {
+  // perPage is a request, not a promise: a gateway that caps below 1,000
+  // answers the first page short, and a walk that stops there drops every
+  // account after the cap — silently, in the two places it matters most.
+  for (const file of ["supabase/functions/backup-run/index.ts", "supabase/functions/backup-restore/index.ts"]) {
+    const src = read(file);
+    assert.match(src, /listUsers\(\{ page, perPage: 1000 \}\)/, file);
+    assert.match(src, /if \(!users\.length\) break;/, file);
+    assert.doesNotMatch(src, /if \(users\.length < 1000\) break;/, file);
+  }
+});
+
 test("the chain that drives a backup asks for the run it just moved", () => {
   const source = read("supabase/functions/backup-run/index.ts");
   // The self-kick used to say {action:"tick"} straight after writing a
@@ -1006,6 +1096,37 @@ test("only the flag on a drive's refusal earns a retry", () => {
   assert.deepEqual([0, 1, 2, 9].map(retryDelayMs), [BACKOFF_MS[0], BACKOFF_MS[1], BACKOFF_MS[2], BACKOFF_MS[2]]);
   // Every retry of a unit has to fit inside a slice with room to spare.
   assert.ok(BACKOFF_MS.reduce((a, b) => a + b, 0) < BUDGET_MS / 2);
+});
+
+test("the token endpoint gets one more kind of second chance than a drive does", () => {
+  // connectDrive's refresh is the first call of every slice, so a token
+  // endpoint having a bad second used to fail a restore between the wipe
+  // and the load. It retries on the drive's own flag, and on a reply that
+  // never arrived at all — fetch throws a TypeError with no status on it.
+  const busy = Object.assign(new Error("token refresh failed (503): busy"), { status: 503, retryable: true });
+  const dropped = new TypeError("error sending request for url");
+  const badGrant = Object.assign(new Error("token refresh failed (400): invalid_grant"),
+    { status: 400, retryable: false });
+
+  assert.equal(worthAnotherGo(busy), true);
+  assert.equal(worthAnotherGo(dropped), true);
+  // An invalid_grant is an answer: the Admin has to reconnect, and three
+  // goes at it only delay saying so.
+  assert.equal(worthAnotherGo(badGrant), false);
+  // And a refusal the module raised itself — "sent no refresh token" — is
+  // not a network failure just because it has no status on it.
+  assert.equal(worthAnotherGo(new Error("dropbox refused to refresh the connection.")), false);
+  assert.equal(worthAnotherGo(null), false);
+});
+
+test("connectDrive's refresh is under the same three goes as everything else", () => {
+  // backupCommon.ts is Deno-only, so this is read rather than imported.
+  const src = read("supabase/functions/_shared/backupCommon.ts");
+  assert.match(src, /refreshWithRetry\(provider, clientId, clientSecret, refresh\)/,
+    "the refresh has to go through the retry, not straight at the network");
+  assert.match(src, /worthAnotherGo\(e\)/, "and it asks the same question the run's own retry asks");
+  assert.match(src, /attempt <= RETRIES/, "the same three goes");
+  assert.match(src, /retryDelayMs\(attempt\)/, "with the same widening gaps");
 });
 
 // ── The cursor: tables ───────────────────────────────────────────────────

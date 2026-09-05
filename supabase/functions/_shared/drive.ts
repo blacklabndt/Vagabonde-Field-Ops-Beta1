@@ -439,6 +439,7 @@ export class OneDrive implements DriveClient {
 
     let at = 0;
     let id = "";
+    let stalled = false;
     while (at < body.byteLength) {
       const end = Math.min(at + GRAPH_CHUNK, body.byteLength);
       // The upload URL carries its own credential; an Authorization header
@@ -450,9 +451,36 @@ export class OneDrive implements DriveClient {
       }), "OneDrive upload");
       // 202 between chunks carries only the ranges still wanted; the final
       // 200/201 carries the item.
-      if (res.status === 202) { await res.body?.cancel(); }
-      else { id = String((await res.json() as { id: string }).id); }
-      at = end;
+      if (res.status !== 202) {
+        id = String((await res.json() as { id: string }).id);
+        at = end;
+        continue;
+      }
+      // Graph, like Google, may keep less of a chunk than was sent, and it
+      // says so in nextExpectedRanges — "12345-67890" or "12345-", the
+      // first byte it still wants. Carrying on from `end` regardless would
+      // leave a hole in the middle of the part file that nothing downstream
+      // ever notices: the upload succeeds, the manifest counts the rows,
+      // and the gzip is corrupt. Only a 202 with no ranges on it at all is
+      // a reason to assume the whole chunk landed.
+      const j = await res.json().catch(() => ({})) as { nextExpectedRanges?: string[] };
+      const want = /^(\d+)/.exec(String(j.nextExpectedRanges?.[0] ?? ""));
+      const next = want ? Math.min(Number(want[1]), body.byteLength) : end;
+      if (next > at) {
+        stalled = false;
+      } else {
+        // None of that chunk was kept. Sending it again is the protocol's
+        // own answer, but twice over with nothing stored is a wedged
+        // session, and a loop that never ends is worse than a failure.
+        if (stalled) {
+          const e = new Error("OneDrive kept none of two identical chunks; the upload session is stuck.") as DriveError;
+          e.status = 202;
+          e.retryable = true;
+          throw e;
+        }
+        stalled = true;
+      }
+      at = next;
     }
     return id;
   }

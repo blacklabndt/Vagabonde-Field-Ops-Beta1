@@ -12,6 +12,7 @@ import { createClient, SupabaseClient } from "https://esm.sh/@supabase/supabase-
 import { makeDrive, refreshAccessToken } from "./drive.ts";
 import type { DriveClient } from "./drive.ts";
 import { BACKUP_ROOT_NAME, MANIFEST_NAME } from "./backupManifest.ts";
+import { RETRIES, retryDelayMs, worthAnotherGo } from "./backupRun.ts";
 
 export const corsHeaders = {
   "Access-Control-Allow-Origin": "*",
@@ -136,6 +137,31 @@ export interface Connection {
   keep: number;
 }
 
+// Every other network call in a slice goes through backup-run's withRetry;
+// this one is the exception that used to be, and it is the first call of
+// every slice — so a token endpoint having a bad second failed a restore
+// between the wipe and the load, which is the worst moment in the feature
+// to fail at. Same three goes, same widening gaps, and the same discipline
+// about what is worth repeating: a 5xx or a reply that never came, never an
+// invalid_grant. A refusal still ends up in backup_connection_error, only
+// after the drive has had its three chances instead of one.
+const pause = (ms: number) => new Promise(r => setTimeout(r, ms));
+
+async function refreshWithRetry(
+  provider: string, clientId: string, clientSecret: string, refresh: string
+): Promise<string> {
+  let last: unknown = null;
+  for (let attempt = 0; attempt <= RETRIES; attempt++) {
+    try { return await refreshAccessToken(provider, clientId, clientSecret, refresh); }
+    catch (e) {
+      last = e;
+      if (!worthAnotherGo(e) || attempt >= RETRIES) break;
+      await pause(retryDelayMs(attempt));
+    }
+  }
+  throw last;
+}
+
 // The refresh token is long-lived and the access token is not, so every
 // function that touches the drive starts here: read the connection out of
 // app_settings with the service role, trade the refresh token for an access
@@ -162,7 +188,7 @@ export async function connectDrive(db: SupabaseClient): Promise<Connection> {
 
   let token: string;
   try {
-    token = await refreshAccessToken(provider, clientId, clientSecret, refresh);
+    token = await refreshWithRetry(provider, clientId, clientSecret, refresh);
   } catch (e) {
     const why = (e as Error).message;
     await db.from("app_settings").update({ backup_connection_error: why }).eq("id", true);

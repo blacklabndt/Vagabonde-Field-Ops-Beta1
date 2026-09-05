@@ -55,6 +55,12 @@ export const BACKUP_TABLES: string[] = LOAD_ORDER;
 export const WIPE_ORDER: string[] = [
   "ticket_crew",
   "ticket_lines",
+  // tickets before burned_ticket_numbers, not after: tickets_burn_issued_number
+  // is BEFORE DELETE on tickets (baseline line 1184) and inserts a row into
+  // burned_ticket_numbers for every ticket carrying approval_sent_at, so
+  // clearing the burn list first leaves exactly as many rows behind as there
+  // were sent tickets deleted after it — and the restore would then load the
+  // backup's list on top of a table that is not empty.
   "tickets",
   "burned_ticket_numbers",
   "timesheet_approvals",

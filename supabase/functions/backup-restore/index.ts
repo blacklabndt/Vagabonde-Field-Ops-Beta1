@@ -528,7 +528,12 @@ async function stepAccounts(
     if (error) throw error;
     const users = data?.users ?? [];
     for (const u of users) existing.add(String(u.id));
-    if (users.length < 1000) break;
+    // An empty page is the end of the list. Stopping on a short one instead
+    // would trust the server to honour perPage, and a gateway that caps at
+    // 100 would leave every account past the hundredth out of `existing` —
+    // which here means trying to create an Auth user that is already there,
+    // for every one of them.
+    if (!users.length) break;
   }
 
   for (let i = c.accountIndex; i < profiles.length; i++) {

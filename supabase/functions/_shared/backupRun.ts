@@ -154,6 +154,20 @@ export function shouldRetry(e: unknown, attempt: number, retries = RETRIES): boo
   return isRetryable(e) && attempt < retries;
 }
 
+// The same question asked of the token endpoint, which answers in two ways
+// the drive's own API does not. A 5xx or a 429 carries `retryable` and is
+// covered by the flag; a refusal that never arrived at all — the socket
+// dropped, DNS blinked — throws a TypeError out of fetch with no status on
+// it, and that is worth another go too. An invalid_grant is a 400 with the
+// flag clear, and three tries at it only delay telling the Admin to
+// reconnect; so is a plain Error raised by the module itself, which is why
+// the absence of a status is not on its own enough.
+export function worthAnotherGo(e: unknown): boolean {
+  if (isRetryable(e)) return true;
+  const err = (e ?? {}) as { status?: number; name?: string };
+  return err.status === undefined && err.name === "TypeError";
+}
+
 export function retryDelayMs(attempt: number): number {
   const i = Math.max(0, Math.min(attempt, BACKOFF_MS.length - 1));
   return BACKOFF_MS[i];

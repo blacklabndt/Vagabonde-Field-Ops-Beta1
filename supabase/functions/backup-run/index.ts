@@ -547,7 +547,12 @@ async function addAuthEmails(db: SupabaseClient, rows: Record<string, unknown>[]
     if (error) throw error;
     const users = data?.users ?? [];
     for (const u of users) email.set(u.id, u.email ?? "");
-    if (users.length < 1000) break;
+    // An empty page is the end of the list. Stopping on a short one instead
+    // would trust the server to honour perPage: a gateway that caps at 100
+    // answers the first page short and every account after the hundredth
+    // would quietly lose its address, and a profile with no auth_email is a
+    // person a restore cannot mail a way back in to.
+    if (!users.length) break;
   }
   for (const r of rows) r.auth_email = email.get(String(r.id)) ?? null;
 }
