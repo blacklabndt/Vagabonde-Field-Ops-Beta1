@@ -320,16 +320,20 @@ export function AutomaticBackupPanel() {
       {/* The provider row. Only one drive is ever connected, so while one is
           there the other two are not offered: switching means Disconnect
           first, which is also what clears the old drive's token. */}
-      <div style={{ display: "flex", gap: 10, alignItems: "center", flexWrap: "wrap", marginBottom: 10 }}>
+      {/* Connected: one line, whatever the column's width — the account
+          shrinks and ellipsises before Disconnect is allowed to drop under
+          it. Not connected: the three Connect buttons may wrap. */}
+      <div style={{ display: "flex", gap: 10, alignItems: "center", flexWrap: connected ? "nowrap" : "wrap", marginBottom: 10 }}>
         {connected ? (
           <>
             <TagX variant="outline">{PROVIDER_LABEL[s.provider] || s.provider}</TagX>
-            <span style={{ fontSize: 14 }}>Connected as <strong>{s.account || "—"}</strong></span>
+            <span style={{ fontSize: 14, flex: 1, minWidth: 0, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}
+              title={s.account || undefined}>Connected as <strong>{s.account || "—"}</strong></span>
             {/* Not while something is running. Disconnecting clears the
                 refresh token, and the slice in flight — or the very next one
                 — then fails at connectDrive, which on a restore means failing
                 somewhere between the wipe and the load. */}
-            <Btn variant="secondary" style={{ marginLeft: "auto" }} disabled={!!run} onClick={disconnect}
+            <Btn variant="secondary" style={{ marginLeft: "auto", flex: "none" }} disabled={!!run} onClick={disconnect}
               title={run ? "Not while a run is going — wait for it to finish." : undefined}>Disconnect</Btn>
           </>
         ) : (
