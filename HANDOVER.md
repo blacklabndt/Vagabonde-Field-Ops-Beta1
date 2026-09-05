@@ -125,13 +125,21 @@ isn't set on the Admin screen"), so fill it in first.
    **Enable** the Google Drive API in that project.
 3. <https://console.cloud.google.com/auth/overview> — fill in the OAuth
    consent screen. **External**, your own email as the support and developer
-   contact. While the app is in Testing, add the Google account that will
-   hold the backups under **Audience → Test users**, or the consent screen
-   will refuse it.
+   contact. Then, on the same **Audience** page, set the publishing status
+   to **In production**. An app left in Testing refuses every account not
+   listed under Test users with "Access blocked: … has not completed the
+   Google verification process", and even a listed one is signed out after
+   seven days, because Google expires a Testing app's refresh tokens. The
+   only permission asked for, `drive.file`, is one Google does not review,
+   so publishing needs no verification; the first sign-in may show an
+   "unverified app" page — Advanced → continue. The app name on that page
+   is whatever you typed as the consent screen's name.
 4. <https://console.cloud.google.com/apis/credentials> — **Create
    credentials → OAuth client ID → Web application**. Under *Authorised
    redirect URIs* paste `https://<your app address>/backup/oauth/google`.
-5. Copy the **Client ID** and **Client secret** into the app's Google boxes,
+5. Copy the **Client ID** (the string ending `.apps.googleusercontent.com`
+   — the console's copy sometimes brings its helper text along; the app
+   keeps only the id) and **Client secret** into the app's Google boxes,
    press **Save backup settings**, then **Connect Google Drive**.
 
 The app asks for one permission, `drive.file`. That scope only lets it see
