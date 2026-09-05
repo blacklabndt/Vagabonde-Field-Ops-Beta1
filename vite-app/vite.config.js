@@ -84,7 +84,10 @@ export default defineConfig({
         // installed followed an approval link and landed on the sign-in
         // screen. A fetch() of the identical URL returned the invoice, which
         // is what made it look like the route was fine.
-        navigateFallbackDenylist: [/^\/approve(-ticket)?(\?|$)/],
+        // The two policy pages are documents, not the app: Google reads them
+        // when the drive registration is published, and a person with the app
+        // installed may follow the link from the consent screen.
+        navigateFallbackDenylist: [/^\/approve(-ticket)?(\?|$)/, /^\/(privacy|terms)\.html$/],
         cleanupOutdatedCaches: true,
         // Supabase calls are deliberately absent from runtimeCaching: a stale
         // ticket or rate served from a cache would be worse than an honest

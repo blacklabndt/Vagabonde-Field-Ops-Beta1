@@ -1,0 +1,84 @@
+<!doctype html>
+<html lang="en-CA">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Privacy Policy · VagaboNDE Field Ops</title>
+<meta name="robots" content="noindex">
+<style>
+  :root { color-scheme: light dark; --ink: #1d1f20; --mute: #66696b; --paper: #f7f7f8; --rule: rgba(29,31,32,.18); --accent: #3f6188; }
+  @media (prefers-color-scheme: dark) { :root { --ink: #e6e7e8; --mute: #a4a7aa; --paper: #17191b; --rule: rgba(230,231,232,.18); --accent: #8fb0d3; } }
+  body { margin: 0; background: var(--paper); color: var(--ink); font: 16px/1.55 -apple-system, "Segoe UI", Roboto, sans-serif; }
+  main { max-width: 42rem; margin: 0 auto; padding: 40px 24px 72px; }
+  h1 { font-size: 1.6rem; margin: 0 0 4px; }
+  h2 { font-size: 1.05rem; margin: 32px 0 8px; border-top: 1px solid var(--rule); padding-top: 16px; }
+  p, li { max-width: 65ch; }
+  .meta { color: var(--mute); font-size: .9rem; margin: 0 0 24px; }
+  a { color: var(--accent); }
+  code { font: .92em ui-monospace, "SF Mono", Menlo, Consolas, monospace; }
+</style>
+</head>
+<body>
+<main>
+  <h1>Privacy Policy</h1>
+  <p class="meta">VagaboNDE Field Ops · last updated 5 September 2026</p>
+
+  <p>VagaboNDE Field Ops is an internal application used by the staff of
+  VagaboNDE (Grande Prairie, Alberta) to record radiographic weld
+  inspection work: jobs, field tickets, hazard assessments, reports, crew
+  hours and radiation dose. It is not offered to the public. This page
+  explains what the application stores, where, and how it uses a connected
+  cloud drive.</p>
+
+  <h2>What the application stores</h2>
+  <ul>
+    <li>Staff accounts: name, work email, role, and the screens an account may open.</li>
+    <li>Work records: jobs, field tickets and their charges, hazard assessments, inspection reports and the PDFs filed with them.</li>
+    <li>Crew records: hours worked, mileage and radiation dose per person per ticket. These are visible only to the person they belong to, the office, and crewmates on the same ticket.</li>
+    <li>Client and contractor contacts: organisation names and the names, phone numbers and email addresses of the representatives we invoice and send approvals to.</li>
+    <li>Team chat messages, pictures and voice notes, which expire after 30 days unless pinned.</li>
+  </ul>
+  <p>Records live in a Supabase project (PostgreSQL and object storage)
+  and the application is served by Cloudflare. Email leaves through
+  Resend. Nothing is sold, shared with advertisers, or used for any purpose
+  other than running the business.</p>
+
+  <h2>Cloud drive backups</h2>
+  <p>An administrator may connect one cloud drive account — Google Drive,
+  OneDrive or Dropbox — so the application can write a scheduled backup of
+  its own records to a folder in that drive, and read those backups back
+  to restore them. That is the only use the connection is put to.</p>
+  <ul>
+    <li>With Google Drive the application requests the <code>drive.file</code> permission only. That permission lets it see and manage files it created itself, and nothing else in the Drive.</li>
+    <li>The sign-in token the drive issues is stored encrypted at rest in the application's own database, readable only by the server-side backup functions, never by a browser.</li>
+    <li>Backups are written to a folder named <code>VagaboNDE backups</code> in the connected drive. Each backup contains the records above and the filed PDFs. Older backups are removed on the schedule the administrator sets.</li>
+    <li>Disconnecting from the application's Admin screen removes the stored token. Access can also be revoked from the drive provider's own account settings (for Google, <a href="https://myaccount.google.com/permissions">myaccount.google.com/permissions</a>), which stops backups at once.</li>
+  </ul>
+  <p>The application's use of information received from Google APIs
+  adheres to the
+  <a href="https://developers.google.com/terms/api-services-user-data-policy">Google API Services User Data Policy</a>,
+  including the Limited Use requirements. Data obtained through Google
+  APIs is used only to write and read the application's own backup files
+  and is never transferred to anyone else.</p>
+
+  <h2>Client representatives</h2>
+  <p>When a field ticket is sent for approval, the client's representative
+  receives an email with a private link to the ticket. Signing records the
+  name and email address they enter, the time, and the network address
+  the signature came from, so the approval can be relied on. The link is
+  theirs to keep as a copy of what they signed.</p>
+
+  <h2>Retention and deletion</h2>
+  <p>Work records are kept as long as the business needs them for billing
+  and safety compliance. An administrator can archive and remove a year's
+  jobs from the application, and can remove a staff account; an account
+  with work filed against it is locked rather than deleted so that the
+  names on past records remain accurate.</p>
+
+  <h2>Contact</h2>
+  <p>Questions about this policy, or requests about information held about
+  you, go to VagaboNDE at
+  <a href="mailto:blacklabndt@gmail.com">blacklabndt@gmail.com</a>.</p>
+</main>
+</body>
+</html>
