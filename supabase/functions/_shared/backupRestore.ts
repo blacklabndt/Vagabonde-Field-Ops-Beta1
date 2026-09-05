@@ -44,6 +44,15 @@ export interface RestoreCursor {
   safetyRunId: string | null;
   safetyFolderName: string | null;
   wipeIndex: number;
+  // How many rows one delete takes, and how many each table has lost so far.
+  // The size is on the cursor rather than a constant because a batch the
+  // database kills on its statement cap is halved and tried again, and the
+  // size that worked has to survive the slice that found it. The counts are
+  // the only account a failed wipe gives of itself: it has deleted real rows
+  // and put nothing back, and "ticket_crew: 46080" is the difference between
+  // an Admin who knows what is gone and one who does not.
+  wipeBatch: number;
+  wiped: Record<string, number>;
   accountIndex: number;
   accountsMade: string[];
   accountsFailed: string[];
@@ -87,6 +96,10 @@ export interface RestoreCursor {
   // emptied — and both are the per-job restore's to fill.
   skipped: number;
   collisions: number;
+  // Sentences for the panel that belong to no other field. Today there is
+  // one of them: the restore that reused an earlier attempt's safety copy
+  // rather than taking a fresh one of a half-emptied database.
+  notes: string[];
 }
 
 export function newRestoreCursor(o: {
@@ -100,6 +113,8 @@ export function newRestoreCursor(o: {
     safetyRunId: null,
     safetyFolderName: null,
     wipeIndex: 0,
+    wipeBatch: WIPE_BATCH,
+    wiped: {},
     accountIndex: 0,
     accountsMade: [],
     accountsFailed: [],
@@ -120,7 +135,8 @@ export function newRestoreCursor(o: {
     totalsDone: false,
     activityPart: 0,
     skipped: 0,
-    collisions: 0
+    collisions: 0,
+    notes: []
   };
 }
 
@@ -149,6 +165,10 @@ export function reviveRestoreCursor(raw: unknown): RestoreCursor {
     safetyRunId: c.safetyRunId ? String(c.safetyRunId) : null,
     safetyFolderName: c.safetyFolderName ? String(c.safetyFolderName) : null,
     wipeIndex: num(c.wipeIndex),
+    // A run raised before the batch existed has none on it, and a zero read
+    // back out of jsonb would be a delete of no rows for ever.
+    wipeBatch: num(c.wipeBatch) || WIPE_BATCH,
+    wiped: (c.wiped ?? {}) as Record<string, number>,
     accountIndex: num(c.accountIndex),
     accountsMade: strs(c.accountsMade),
     accountsFailed: strs(c.accountsFailed),
@@ -169,7 +189,8 @@ export function reviveRestoreCursor(raw: unknown): RestoreCursor {
     totalsDone: c.totalsDone === true,
     activityPart: num(c.activityPart),
     skipped: num(c.skipped),
-    collisions: num(c.collisions)
+    collisions: num(c.collisions),
+    notes: strs(c.notes)
   };
 }
 
@@ -194,11 +215,113 @@ export function restoreCounts(c: RestoreCursor): Record<string, unknown> {
     accountsDropped: (c.droppedProfileIds ?? []).length,
     skipped: num(c.skipped),
     collisions: num(c.collisions),
-    safety: c.safetyFolderName ?? null
+    safety: c.safetyFolderName ?? null,
+    // What the wipe has already deleted, table by table. On a run that
+    // finished it is arithmetic nobody needs; on one that failed in the
+    // middle of the phase it is the only statement of what the app has lost.
+    wiped: c.wiped ?? {},
+    notes: c.notes ?? []
   };
 }
 
+// ── Phase: safety ────────────────────────────────────────────────────────
+
+// How old an earlier attempt's safety copy may be and still be this
+// attempt's copy. A day is long enough for an Admin to sleep on a failed
+// restore and short enough that the app has not moved on underneath it.
+export const SAFETY_REUSE_MS = 24 * 60 * 60 * 1000;
+
+// The safety copy a previous attempt on this same backup already finished,
+// if there is one worth having.
+//
+// Pressing Restore again after a failure is the first thing anybody does,
+// and taking a fresh copy each time is worse than useless: the first attempt
+// emptied part of the database before it died, so the second copy is a copy
+// of the damage — and it is the newest folder in the drive, the one an Admin
+// reaches for. The rehearsal watched exactly that happen: attempt two's
+// safety folder was 46,080 crew rows short of attempt one's.
+//
+// So a restore about to raise its own copy looks for the last attempt's
+// first. Only a run of this kind, only a failed one, only the same source
+// folder, and only one whose cursor carries a safetyFolderName — that name
+// is written when the copy COMPLETES, so its presence is the proof the copy
+// is whole. Newest wins.
+export function safetyToReuse(
+  runs: Record<string, unknown>[],
+  o: { folderId: string; now: number }
+): { folderName: string; runId: string | null } | null {
+  const folderId = String(o.folderId ?? "");
+  const now = num(o.now);
+  let best: { at: number; folderName: string; runId: string | null } | null = null;
+  for (const raw of runs || []) {
+    const r = (raw ?? {}) as Record<string, unknown>;
+    if (String(r.kind ?? "") !== "restore_all") continue;
+    if (String(r.status ?? "") !== "failed") continue;
+    if (String(r.folder_id ?? "") !== folderId) continue;
+    const c = (r.cursor ?? {}) as Record<string, unknown>;
+    const folderName = String(c.safetyFolderName ?? "").trim();
+    if (!folderName) continue;
+    const at = Date.parse(String(r.finished_at ?? r.started_at ?? ""));
+    if (!Number.isFinite(at) || now - at > SAFETY_REUSE_MS) continue;
+    if (!best || at > best.at) {
+      best = { at, folderName, runId: c.safetyRunId ? String(c.safetyRunId) : null };
+    }
+  }
+  return best ? { folderName: best.folderName, runId: best.runId } : null;
+}
+
+// Said on the run, because a restore that skipped a phase has to account for
+// it — and because this is the sentence an Admin needs if this attempt fails
+// as well.
+export function reusedSafetyNote(folderName: string): string {
+  return `The safety copy from “${folderName}” is the way back. This restore reused the copy the ` +
+    `last attempt on the same backup finished, rather than taking a second one of a database that ` +
+    `attempt had already part-emptied.`;
+}
+
 // ── Phase: wipe ──────────────────────────────────────────────────────────
+
+// The wipe deletes in bounded batches, because the role these functions
+// reach the database through carries an eight-second statement timeout that
+// nothing here can raise — it is Supabase's platform default on the
+// authenticator, and the service key inherits it. One DELETE over 111,777
+// ticket_lines, every row of them firing the ticket-total trigger, is
+// cancelled and rolled back whole, so the table stayed at 111,777 however
+// often the restore was retried and restore-everything could not finish on
+// real data at all. Two thousand rows is well inside the cap even with that
+// trigger; the floor is how small a batch is halved to before a timeout
+// stops being a question of size.
+export const WIPE_BATCH = 2000;
+export const MIN_WIPE_BATCH = 125;
+
+// A batch too big for the cap is a batch to halve, not a wipe that cannot
+// happen: the cancelled delete rolled back whole, so nothing is half done
+// and trying again smaller costs only the seconds it already spent. Null at
+// the floor — a hundred-odd rows that still will not go in eight seconds is
+// something other than size, and that is a failure to report rather than
+// shrink away from.
+export function smallerWipeBatch(size: number): number | null {
+  const smaller = Math.floor((num(size) || WIPE_BATCH) / 2);
+  return smaller >= MIN_WIPE_BATCH ? smaller : null;
+}
+
+// Postgres cancels a statement that runs past the cap with 57014. The
+// gateway hands that code back on the error, but not every one of them
+// does, so the words are read too — and only those two things, because no
+// other failure may be answered by quietly trying again with less.
+export function wipeTimedOut(error: unknown): boolean {
+  const e = (error ?? {}) as { code?: unknown; message?: unknown };
+  if (String(e.code ?? "") === "57014") return true;
+  return /statement timeout/i.test(String(e.message ?? ""));
+}
+
+// One batch gone, added to what that table has already lost.
+export function afterWipeBatch(c: RestoreCursor, table: string, deleted: number): number {
+  const n = num(deleted);
+  if (!c.wiped) c.wiped = {};
+  c.wiped[table] = num(c.wiped[table]) + n;
+  return n;
+}
 
 // One table emptied. The order is WIPE_ORDER's, children before parents, and
 // the phase ends when the list does.
@@ -963,11 +1086,31 @@ export function childRowsToRestore(
   }
   const skipped: string[] = [];
   if (already) {
-    const what = table.replace(/_/g, " ").replace(/s$/, "");
     addRestoreNote(skipped,
-      `${already} ${what}${already === 1 ? "" : "s"} were already in the app and were left alone.`);
+      `${already} ${rowWords(table, already)} ${already === 1 ? "was" : "were"} already in the app and ` +
+      `${already === 1 ? "was" : "were"} left alone.`);
   }
   return { rows: out, skipped };
+}
+
+// What to call one of these rows, and several of them, in a sentence an
+// Admin reads.
+//
+// A table name is not English and cannot be made into it by rule: dropping a
+// trailing "s" leaves "jha", which is the database's word for an assessment
+// and nobody else's, and "ticket_crew" has no plural at all — it is somebody's
+// hours, counted in rows. So the words that matter are written down, and the
+// derivation is only the fallback for a table nobody has named yet.
+const ROW_WORDS: Record<string, string[]> = {
+  jhas: ["assessment", "assessments"],
+  ticket_crew: ["crew row", "crew rows"]
+};
+
+export function rowWords(table: string, count: number): string {
+  const said = ROW_WORDS[String(table ?? "")];
+  if (said) return num(count) === 1 ? said[0] : said[1];
+  const one = String(table ?? "").replace(/_/g, " ").replace(/s$/, "");
+  return num(count) === 1 ? one : `${one}s`;
 }
 
 // ticket_crew.profile_id is NOT NULL, so a crew row for somebody with no

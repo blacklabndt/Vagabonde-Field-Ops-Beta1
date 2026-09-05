@@ -16,6 +16,8 @@ import {
   RESTORE_PHASES, WRITE_BATCH, CHAT_INSERT_PASS, CHAT_REPLY_PASS,
   newRestoreCursor, reviveRestoreCursor, restoreCounts,
   afterWipeStep, wipeKeepsCaller, afterPartLoaded, afterTableLoaded,
+  WIPE_BATCH, MIN_WIPE_BATCH, afterWipeBatch, smallerWipeBatch, wipeTimedOut,
+  SAFETY_REUSE_MS, safetyToReuse, reusedSafetyNote, rowWords,
   partsForTable, withoutAuthEmail, chatInsertRows, chatReplyPatches,
   settingsRestorePatch, ticketsForLoad, approvedTotalPatches, activityPatches,
   contentTypeFor, typedNameMatches, tooNewRefusal, accountFailureNote,
@@ -150,7 +152,149 @@ test("the counts carry the safety copy's name, because a failed restore is read 
     "and it is still written where the safety copy is seen to finish");
 });
 
+// ── Safety ───────────────────────────────────────────────────────────────
+
+test("a retry reuses the last attempt's safety copy rather than copying the damage", () => {
+  const now = Date.parse("2026-09-05T22:10:00Z");
+  const attempt = o => ({
+    kind: "restore_all", status: o.status ?? "failed", folder_id: o.folder ?? "src",
+    started_at: o.at, finished_at: o.at,
+    cursor: { safetyFolderName: o.name ?? "", safetyRunId: o.runId ?? null }
+  });
+
+  // The ordinary case. The first attempt emptied ticket_crew and died in the
+  // wipe; its safety copy is a copy of the app as it stood BEFORE that, and
+  // taking a fresh one now would copy a database already 46,080 rows short.
+  assert.deepEqual(
+    safetyToReuse(
+      [attempt({ at: "2026-09-05T21:10:00Z", name: "before-restore 2026-09-05 15-00", runId: "r1" })],
+      { folderId: "src", now }),
+    { folderName: "before-restore 2026-09-05 15-00", runId: "r1" });
+
+  // Newest of the failures, because that is the one taken closest to the
+  // state the app is actually in now.
+  assert.equal(
+    safetyToReuse([
+      attempt({ at: "2026-09-05T20:00:00Z", name: "before-restore 2026-09-05 14-00", runId: "r1" }),
+      attempt({ at: "2026-09-05T21:10:00Z", name: "before-restore 2026-09-05 15-00", runId: "r2" })
+    ], { folderId: "src", now }).folderName,
+    "before-restore 2026-09-05 15-00");
+
+  // An attempt whose copy never completed carries no folder name — the name
+  // is written the moment the copy finishes, so its absence is the proof —
+  // and there is nothing there to stand on.
+  assert.equal(
+    safetyToReuse([attempt({ at: "2026-09-05T21:10:00Z", name: "" })], { folderId: "src", now }),
+    null);
+
+  // A different backup's attempt copied the app before a different restore.
+  assert.equal(
+    safetyToReuse([attempt({ at: "2026-09-05T21:10:00Z", name: "before-restore x", folder: "other" })],
+      { folderId: "src", now }),
+    null);
+
+  // Yesterday's is stale: the app has had a day's work put into it since,
+  // and a copy that old is no longer what this restore is about to replace.
+  assert.equal(
+    safetyToReuse([attempt({ at: new Date(now - SAFETY_REUSE_MS - 1000).toISOString(), name: "old" })],
+      { folderId: "src", now }),
+    null);
+
+  // And only a failure. A complete restore's copy describes an app that was
+  // replaced on purpose; a running one is somebody else's business.
+  for (const status of ["complete", "running", "queued"]) {
+    assert.equal(
+      safetyToReuse([attempt({ at: "2026-09-05T21:10:00Z", name: "n", status })], { folderId: "src", now }),
+      null, `${status} is not a retry's to reuse`);
+  }
+});
+
+test("the reused copy is named on the run, and the panel reads that list", () => {
+  const note = reusedSafetyNote("before-restore 2026-09-05 16-00");
+  assert.match(note, /before-restore 2026-09-05 16-00/);
+  assert.match(note, /way back/);
+
+  const c = newRestoreCursor({ folderId: "f", folderName: "n", keepProfileId: "k" });
+  c.notes.push(note);
+  assert.deepEqual(restoreCounts(c).notes, [note]);
+  // A note nothing renders is a note nobody reads.
+  assert.match(read("vite-app/src/components/backupPanel.jsx"), /noteList\(counts && counts\.notes\)/);
+
+  const source = read("supabase/functions/backup-restore/index.ts");
+  assert.match(source, /reusableSafety\(db, c\)/,
+    "and the safety phase asks before it raises a second copy");
+});
+
 // ── Wipe ─────────────────────────────────────────────────────────────────
+
+test("the wipe deletes in batches, and remembers the size and what it took", () => {
+  const c = newRestoreCursor({ folderId: "f", folderName: "n", keepProfileId: "k" });
+  assert.equal(c.wipeBatch, WIPE_BATCH);
+  assert.deepEqual(c.wiped, {});
+
+  assert.equal(afterWipeBatch(c, "ticket_lines", 2000), 2000);
+  afterWipeBatch(c, "ticket_lines", 2000);
+  afterWipeBatch(c, "ticket_lines", 111);
+  assert.equal(c.wiped.ticket_lines, 4111);
+  // On a run that finishes this is arithmetic nobody needs; on one that dies
+  // in the wipe it is the only statement of what the app has lost.
+  assert.equal(restoreCounts(c).wiped.ticket_lines, 4111);
+
+  const back = reviveRestoreCursor(JSON.parse(JSON.stringify(c)));
+  assert.equal(back.wiped.ticket_lines, 4111);
+  assert.equal(back.wipeBatch, WIPE_BATCH);
+  // A run raised before the size existed reads as the default. A zero here
+  // would be a delete of no rows, asked for ever.
+  assert.equal(reviveRestoreCursor({ phase: "wipe" }).wipeBatch, WIPE_BATCH);
+});
+
+test("a batch the cap cancels is halved, and only the floor is a failure", () => {
+  assert.equal(smallerWipeBatch(2000), 1000);
+  assert.equal(smallerWipeBatch(1000), 500);
+  assert.equal(smallerWipeBatch(500), 250);
+  assert.equal(smallerWipeBatch(250), MIN_WIPE_BATCH);
+  // At the floor the answer is no. A hundred-odd rows that still will not go
+  // in eight seconds are not failing on size, and shrinking further would
+  // turn a real fault into a very slow one.
+  assert.equal(smallerWipeBatch(MIN_WIPE_BATCH), null);
+  assert.equal(smallerWipeBatch(0), WIPE_BATCH / 2, "no size on the cursor starts from the default");
+});
+
+test("only a statement timeout is answered by trying again with less", () => {
+  assert.equal(wipeTimedOut({ code: "57014", message: "canceling statement due to statement timeout" }), true);
+  // Not every gateway hands the code back; some only say it in words.
+  assert.equal(wipeTimedOut({ message: "canceling statement due to statement timeout" }), true);
+  // Everything else is itself. A permission refusal met by halving the batch
+  // would be retried four times over and then reported as the wrong thing.
+  assert.equal(wipeTimedOut({ code: "42501", message: "permission denied for table tickets" }), false);
+  assert.equal(wipeTimedOut({ code: "23503", message: "violates foreign key constraint" }), false);
+  assert.equal(wipeTimedOut(null), false);
+});
+
+test("the wipe's delete is bounded, and goes through the definer RPC", () => {
+  const source = read("supabase/functions/backup-restore/index.ts");
+  // The unbounded delete this replaced could not empty ticket_lines at all:
+  // 111,777 rows, each firing the ticket-total trigger, cancelled by the
+  // eight-second cap and rolled back whole, so a retry started from 111,777
+  // again. Nothing here may go back to it.
+  assert.match(source, /restore_wipe_batch/);
+  assert.doesNotMatch(source, /from\(table\)\.delete\(\)/);
+  assert.match(source, /stepWipe\(db: SupabaseClient, c: RestoreCursor, deadline: number\)/,
+    "and the phase is budgeted like every other one");
+  // The same delete in the load, which is one row per rate line put back.
+  assert.match(source, /wipeBatch\(db, c, "rate_line_history", null\)/);
+
+  const migration = read("supabase/migrations/20260905222931_the_wipe_deletes_a_batch_at_a_time.sql");
+  assert.match(migration,
+    /revoke execute on function public\.restore_wipe_batch\(text, integer, uuid\) from public, anon, authenticated/);
+  assert.match(migration,
+    /grant execute on function public\.restore_wipe_batch\(text, integer, uuid\) to service_role/);
+  // Every table the wipe walks has to be on the function's whitelist, or the
+  // restore stops on the first one that is not.
+  for (const table of WIPE_ORDER) {
+    assert.ok(migration.includes(`'${table}'`), `${table} is not on restore_wipe_batch's list`);
+  }
+});
 
 test("the wipe walks its list once and then hands over to accounts", () => {
   let c = newRestoreCursor({ folderId: "f", folderName: "n", keepProfileId: "k" });
@@ -700,8 +844,9 @@ test("the three column patches go through the RPC, never an upsert", () => {
   }
   // Five calls — the three above, and the per-job restore's own two, which
   // patch the same two columns for exactly the rows that run wrote — and no
-  // upsert anywhere carrying a patch.
-  assert.equal((source.match(/p_table:/g) || []).length, 5);
+  // upsert anywhere carrying a patch. Counted on the function's own name:
+  // the wipe's RPC names a table too, and it names it to empty it.
+  assert.equal((source.match(/rpc\("restore_patch_rows"/g) || []).length, 5);
   assert.doesNotMatch(source, /upsert\(patches/);
   assert.doesNotMatch(source, /upsert\(chatReplyPatches|upsert\(approvedTotalPatches|upsert\(activityPatches/);
 });
@@ -962,6 +1107,30 @@ test("a child row already here is left alone, and said once for the table", () =
   assert.deepEqual(childRowsToRestore("reports", rows, []).skipped, []);
 });
 
+test("one of something reads as one of something, in the office's own words", () => {
+  // The noun was pluralised on the count and the verb was not, so a run
+  // reported "1 report were already in the app and were left alone" — to an
+  // Admin, in the panel, straight after a restore.
+  assert.equal(
+    childRowsToRestore("reports", [{ id: "a" }], ["a"]).skipped[0],
+    "1 report was already in the app and was left alone.");
+  assert.equal(
+    childRowsToRestore("rate_overrides", [{ id: "a" }, { id: "b" }], ["a", "b"]).skipped[0],
+    "2 rate overrides were already in the app and were left alone.");
+
+  // And the database's word for a thing is not the office's. No rule turns
+  // one into the other — "jhas" less its s is "jha" — so the words that
+  // matter are written down.
+  assert.equal(rowWords("jhas", 1), "assessment");
+  assert.equal(rowWords("jhas", 3), "assessments");
+  assert.equal(rowWords("ticket_crew", 1), "crew row");
+  assert.equal(rowWords("ticket_crew", 2), "crew rows");
+  assert.equal(rowWords("ticket_lines", 1), "ticket line");
+  assert.equal(rowWords("ticket_lines", 6), "ticket lines");
+  assert.equal(rowWords("tickets", 1), "ticket");
+  assert.match(childRowsToRestore("jhas", [{ id: "a" }], ["a"]).skipped[0], /^1 assessment was /);
+});
+
 test("a crew row whose person has gone is skipped and counted out loud", () => {
   const rows = [
     { id: "c1", profile_id: "p1", straight_hours: 8 },
@@ -1060,10 +1229,12 @@ test("a per-job restore walks part by part and table by table", () => {
 test("restoring a few jobs deletes nothing and overwrites nothing", () => {
   const source = read("supabase/functions/backup-restore/index.ts");
   assert.match(source, /restore_jobs/);
-  // Not one delete in the whole of the per-job path. The only deletes in the
-  // file are the wipe phase's and the price history the load itself wrote,
-  // and both belong to restore-all.
-  assert.equal((source.match(/\.delete\(\)/g) || []).length, 2);
+  // Not one delete in the whole of the per-job path — and none anywhere in
+  // the file any more, because restore-all's two (the wipe phase's, and the
+  // price history the load itself wrote) both go through restore_wipe_batch
+  // now. An unbounded PostgREST delete reappearing here is the bug that
+  // could not empty ticket_lines.
+  assert.equal((source.match(/\.delete\(\)/g) || []).length, 0);
   assert.match(source, /function startRestoreJobs\(/);
   assert.match(source, /function putJobs\(/);
   assert.match(source, /function putJobChildren\(/);

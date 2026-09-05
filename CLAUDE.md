@@ -32,6 +32,14 @@ Cloudflare Worker `solitary-snowflake-ee22` (assets + the `/approve` and
   DB fix waits as a draft under `supabase/handover/` (probes beside it) —
   a draft, not history, until it is applied and filed under migrations.
   Nothing is waiting there now. The latest is
+  `20260905222931_the_wipe_deletes_a_batch_at_a_time.sql` (probes in
+  `supabase/handover/probes-20260905222931-the-wipe-deletes-a-batch-at-a-time.sql`):
+  `restore_wipe_batch(table, limit, keep_id)`, the service role's alone,
+  empties at most `limit` rows of one of the tables a restore wipes and says
+  how many went, raising on any other table name and keeping a row back from
+  profiles alone. The wipe calls it until a short answer says the table is
+  empty; see the restore rules below for why one unbounded DELETE could not.
+  Before it,
   `20260905105635_a_patch_is_an_update_not_an_upsert.sql` (probes in
   `supabase/handover/probes-20260905105635-a-patch-is-an-update-not-an-upsert.sql`):
   `restore_patch_rows(table, rows)`, the service role's alone, writes back
@@ -206,10 +214,16 @@ Cloudflare Worker `solitary-snowflake-ee22` (assets + the `/approve` and
   minutes with `x-internal-secret` (chat-retention's shape, read from
   `private.internal_config` when the job fires); `backup-run` drives kinds
   `backup` and `before_restore` and forwards `restore_all` and
-  `restore_jobs` to `backup-restore`. Its own kinds come first, always: a
-  restore's safety backup is raised *after* the restore run, and taking the
-  restore first would leave that backup unstarted and the restore waiting
-  on it for ever. A `before_restore` run goes manifest → done and never
+  `restore_jobs` to `backup-restore`. The safety copy is NOT left to the
+  tick: `stepSafety` queues the `before_restore` run and then kicks
+  `backup-run` by name for it — deliberately unchained, so that a cron
+  picking up the same row in the same second loses to backup-run's
+  conditional claim instead of taking the copy twice. Before that kick a
+  restore sat in `safety` until the next tick, and for ever on a project
+  whose cron was missing or aimed elsewhere. The cron is still the backstop,
+  which is why its own kinds come first, always: taking the restore ahead of
+  them would leave a queued safety backup unstarted and the restore waiting
+  on it. A `before_restore` run goes manifest → done and never
   reaches `retention` (`nextPhaseAfterManifest`): retention prunes the drive
   to `backup_keep` folders and cannot see which folder the restore behind it
   is reading from, so at `keep = 1` the safety copy's own retention step
@@ -235,8 +249,25 @@ Cloudflare Worker `solitary-snowflake-ee22` (assets + the `/approve` and
   `profiles.id` is a foreign key to `auth.users(id)` — a profile whose Auth
   user is gone cannot be inserted at all; an account that cannot be
   re-created is dropped from the load, counted, and named on the run rather
-  than failing it. The wipe follows `supabase/handover/wipe-seed-data.sql`'s
-  own order (a test reads that file back), keeps the Admin running the
+  than failing it. A retry does NOT take a second safety copy: `safetyToReuse`
+  looks for the last failed `restore_all` on the same folder whose cursor
+  carries a completed `safetyFolderName`, and under 24 hours old it is
+  reused and named in the run's notes ("the safety copy from … is the way
+  back"). Taking a fresh one would copy a database the failed attempt had
+  already part-emptied — and it would be the newest folder in the drive, the
+  one an Admin reaches for. The wipe follows
+  `supabase/handover/wipe-seed-data.sql`'s
+  own order (a test reads that file back), deletes in bounded batches through
+  `restore_wipe_batch(table, limit, keep_id)` — the service role's alone, its
+  table names a whitelist — because the role these functions reach the
+  database through carries an eight-second statement cap it cannot raise, and
+  one unbounded DELETE over 111,777 ticket_lines was cancelled and rolled
+  back whole every time, so restore-everything could never finish on real
+  data and left the app half wiped when it failed. A batch is 2,000 rows
+  (`WIPE_BATCH`), halved down to `MIN_WIPE_BATCH` on a 57014 and no other
+  error, with the size and the per-table `counts.wiped` on the cursor; the
+  load's own `rate_line_history` clear goes the same way. It keeps the Admin
+  running the
   restore so their session does not lose its permissions halfway, deletes
   `rate_lines` BEFORE `rate_line_history` (the delete trigger refills
   history), and clears `audit_log` and `function_errors` although neither is

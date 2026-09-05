@@ -44,6 +44,8 @@ import {
   WRITE_BATCH, CHAT_INSERT_PASS,
   newRestoreCursor, reviveRestoreCursor, restoreCounts,
   afterWipeStep, wipeKeepsCaller, afterPartLoaded, afterTableLoaded,
+  afterWipeBatch, smallerWipeBatch, wipeTimedOut,
+  SAFETY_REUSE_MS, safetyToReuse, reusedSafetyNote,
   partsForTable, withoutAuthEmail, chatInsertRows, chatReplyPatches,
   settingsRestorePatch, ticketsForLoad, approvedTotalPatches, activityPatches,
   contentTypeFor, typedNameMatches, tooNewRefusal, accountFailureNote,
@@ -334,7 +336,7 @@ async function advance(
           return { ok: true, runId, phase: "safety", waiting: true };
         }
       }
-      else if (c.phase === "wipe") await stepWipe(db, r);
+      else if (c.phase === "wipe") await stepWipe(db, r, deadline);
       else if (c.phase === "accounts") c = await stepAccounts(db, await opened(), await partList(), r, deadline);
       else if (c.phase === "tables") c = await stepLoad(db, await opened(), await partList(), r, deadline);
       else if (c.phase === "files") c = await stepFilesBack(db, await opened(), r, deadline);
@@ -390,7 +392,7 @@ async function advance(
     if (units > 0) kick("backup-restore", { action: "advance", runId, chain: true }, secret);
     return { ok: true, runId, phase: c.phase, continuing: true };
   } catch (e) {
-    return await fail(db, runId, (e as Error).message, guard, c.phase);
+    return await fail(db, runId, (e as Error).message, guard, c.phase, c);
   }
 }
 
@@ -431,11 +433,18 @@ async function beat(db: SupabaseClient, runId: string, guard: string): Promise<b
   return stillHoldsRun(held);
 }
 
+// The cursor goes down with the failure, in the same conditional write. A
+// slice that throws has usually done some of its work first — most sharply
+// in the wipe, where what it did was delete — and the run's own counts are
+// the only place an Admin can read what the app has lost. Same guard as
+// every other write, so a superseded slice still records nothing.
 async function fail(
-  db: SupabaseClient, runId: string, message: string, guard: string, phase: string
+  db: SupabaseClient, runId: string, message: string, guard: string, phase: string,
+  c: RestoreCursor | JobRestoreCursor
 ): Promise<Record<string, unknown>> {
   const { data: held } = await db.from("backup_runs").update({
-    status: "failed", error: message, finished_at: new Date().toISOString()
+    status: "failed", error: message, finished_at: new Date().toISOString(),
+    phase: c.phase, cursor: c, counts: countsOf(c)
   }).eq("id", runId).eq("status", guard).select("id");
   const superseded = !stillHoldsRun(held);
   await logError("backup-restore", message, superseded ? { runId, phase, superseded } : { runId, phase });
@@ -455,6 +464,20 @@ async function stepSafety(
   db: SupabaseClient, c: RestoreCursor, runId: string, guard: string, secret: string
 ): Promise<boolean> {
   if (!c.safetyRunId) {
+    // Before raising one: has the last attempt on this same backup already
+    // finished a copy? Pressing Restore again after a failure is the first
+    // thing anybody does, and the wipe it failed in had already emptied
+    // tables — so a second copy is a copy of the damage, and it is the
+    // newest folder in the drive, the one an Admin would reach for.
+    const reuse = await reusableSafety(db, c);
+    if (reuse) {
+      c.safetyRunId = reuse.runId;
+      c.safetyFolderName = reuse.folderName;
+      c.notes.push(reusedSafetyNote(reuse.folderName));
+      c.phase = "wipe";
+      return true;
+    }
+
     const name = beforeRestoreName(folderStamp(Date.now()));
     const { data, error } = await db.from("backup_runs")
       .insert({ kind: "before_restore", status: "queued", folder_name: name })
@@ -506,35 +529,90 @@ async function stepSafety(
   return true;
 }
 
+// The failed attempts on this same backup, newest first, and whether one of
+// them left a copy this attempt can stand on. A day's worth is asked for and
+// the decision is made on the rows, not by the query: the cursor is what
+// says whether a copy actually completed, and that is not something
+// PostgREST can filter on.
+async function reusableSafety(
+  db: SupabaseClient, c: RestoreCursor
+): Promise<{ folderName: string; runId: string | null } | null> {
+  const now = Date.now();
+  const { data, error } = await db.from("backup_runs")
+    .select("id, kind, status, folder_id, cursor, started_at, finished_at")
+    .eq("kind", "restore_all").eq("status", "failed").eq("folder_id", c.folderId)
+    .gte("started_at", new Date(now - SAFETY_REUSE_MS).toISOString())
+    .order("started_at", { ascending: false }).limit(10);
+  if (error) throw error;
+  return safetyToReuse((data ?? []) as unknown as Record<string, unknown>[], {
+    folderId: c.folderId, now
+  });
+}
+
 // ── Phase: wipe ──────────────────────────────────────────────────────────
-// One table per step, in the order the handover script established —
+// One table at a time, in the order the handover script established —
 // children first, profiles last, and the error log and audit trail in there
 // too because their foreign keys to profiles would otherwise refuse the
 // delete. The service role is doing this, so RLS and the guard policies are
 // not in the way, which is the point and also why nothing but this function
 // may.
+//
+// A table goes in bounded batches and not in one statement. The role these
+// functions reach the database through carries an eight-second cap on any
+// one statement and cannot raise it, so the single DELETE this used to issue
+// was cancelled and rolled back on ticket_lines every time — 111,777 rows,
+// each firing the ticket-total trigger — leaving the app half emptied,
+// ticket_crew gone, nothing put back, and a retry starting from the same
+// 111,777. The batches are safe with the triggers WIPE_ORDER exists to
+// manage: ticket_lines' sync trigger rewrites each ticket's total as its
+// lines go, so the deferred balance check passes at every batch's commit,
+// and every ticket is still deleted before the burn list is cleared.
 
-async function stepWipe(db: SupabaseClient, c: RestoreCursor): Promise<void> {
+async function stepWipe(db: SupabaseClient, c: RestoreCursor, deadline: number): Promise<void> {
   if (c.wipeIndex >= WIPE_ORDER.length) { c.phase = "accounts"; return; }
   const table = WIPE_ORDER[c.wipeIndex];
-  const key = (TABLE_KEYS[table] ?? ["id"])[0];
+  // Everything except the Admin running this, on profiles alone. Their row
+  // would take their own way into the API with it, and the session driving
+  // the restore would lose its permissions in the middle of the job. The
+  // load puts the backup's version of the row back over the top.
+  const keep = wipeKeepsCaller(table) ? (c.keepProfileId || null) : null;
 
-  let q = db.from(table).delete();
-  if (wipeKeepsCaller(table)) {
-    // Everything except the Admin running this. Their row would take their
-    // own way into the API with it, and the session driving the restore
-    // would lose its permissions in the middle of the job. The load puts the
-    // backup's version of the row back over the top.
-    q = q.neq("id", c.keepProfileId || "00000000-0000-0000-0000-000000000000");
-  } else {
-    // PostgREST refuses an unfiltered delete; "every row" is said as a
-    // filter that is true of all of them.
-    q = q.not(key, "is", null);
+  // Batches until the table is empty or this slice is out of time. A batch
+  // is committed on its own, so a slice that stops here has done real work
+  // that the next one simply does not find again; only the counting has to
+  // be written down, and the caller persists the cursor when this returns.
+  while (!outOfBudget(deadline, Date.now())) {
+    const asked = c.wipeBatch;
+    if (afterWipeBatch(c, table, await wipeBatch(db, c, table, keep)) < asked) {
+      // Short of what was asked for means there was no more to take.
+      afterWipeStep(c, WIPE_ORDER.length);
+      return;
+    }
   }
-  const { error } = await q;
-  if (error) throw new Error(`Emptying ${table} failed: ${error.message}`);
+}
 
-  afterWipeStep(c, WIPE_ORDER.length);
+// One batch of one table, through the definer RPC that does the bounded
+// delete — PostgREST cannot express "delete some of them", and a limit
+// pushed through a filter would be a different row set every call.
+//
+// A batch the database cancelled on the cap is halved and tried again rather
+// than failed: the delete rolled back whole, so nothing is half done, and
+// the size that works is kept on the cursor so the rest of the phase starts
+// from it. Only a batch that times out at the floor is a real failure.
+async function wipeBatch(
+  db: SupabaseClient, c: RestoreCursor, table: string, keep: string | null
+): Promise<number> {
+  for (;;) {
+    const { data, error } = await db.rpc("restore_wipe_batch", {
+      p_table: table, p_limit: c.wipeBatch, p_keep_id: keep
+    });
+    if (!error) return Number(data ?? 0);
+    const smaller = smallerWipeBatch(c.wipeBatch);
+    if (!wipeTimedOut(error) || !smaller) {
+      throw new Error(`Emptying ${table} failed: ${error.message}`);
+    }
+    c.wipeBatch = smaller;
+  }
 }
 
 // ── Phase: accounts ──────────────────────────────────────────────────────
@@ -660,11 +738,18 @@ async function stepLoad(
 
   // rate_lines' own insert trigger writes a history row for every line it
   // has just put back, so the history the load itself created has to go
-  // before the backup's history file is read. One unit, once per run.
+  // before the backup's history file is read. Once per run — and in the
+  // wipe's batches, through the same RPC, for the same reason: it is one row
+  // per rate line and the statement cap does not care that this delete is in
+  // the load rather than the wipe.
   if (table === "rate_line_history" && !c.historyCleared) {
-    const { error } = await db.from("rate_line_history").delete().not("id", "is", null);
-    if (error) throw new Error(`Clearing the price history the load wrote failed: ${error.message}`);
-    c.historyCleared = true;
+    while (!outOfBudget(deadline, Date.now())) {
+      const asked = c.wipeBatch;
+      if (await wipeBatch(db, c, "rate_line_history", null) < asked) {
+        c.historyCleared = true;
+        break;
+      }
+    }
     return c;
   }
 

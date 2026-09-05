@@ -89,9 +89,10 @@ const countOf = v => (Array.isArray(v) ? v.length : Number(v || 0));
 const skippedIn = counts => countOf(counts && counts.skipped);
 const collisionsIn = counts => countOf(counts && counts.collisions);
 // Everything a finished restore has to say, in the order it is worth
-// reading: what could not go back, what was already there, and who could
-// not be given an account again.
+// reading: what the run wants said outright, what could not go back, what
+// was already there, and who could not be given an account again.
 const notesIn = counts => [
+  ...noteList(counts && counts.notes),
   ...noteList(counts && counts.collisions),
   ...noteList(counts && counts.skipped),
   ...noteList(counts && counts.accountsFailed)
