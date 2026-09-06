@@ -219,6 +219,18 @@ Cloudflare Worker `solitary-snowflake-ee22` (assets + the `/approve` and
   rest — two devices saving one draft used to collide on the unique key and
   drop one side's hours. Keep it upsert-first: a failure leaves a person
   too many, never an empty crew.
+- A queued ticket replay is last-write-wins, and says so when it mattered:
+  the payload carries `baseFingerprint` (`ticketFingerprint.js`, what the
+  edit started from — db.js remembers the last loaded/written lines and crew
+  per ticket in `lastKnownTicketFingerprint`), the replay fingerprints the
+  row before writing, and when the row differs from both the base and the
+  payload somebody else saved in between: it still writes, then raises one
+  forced toast and checkpoints `overwroteNewer`. No base, no comparison.
+- The ticket editor and the JHA builder end in a fixed `.screen-foot` bar
+  (z-index 50, under the banner, drawer and dialogs) carrying the running
+  total or "N required left" and the primary button; the pages pad their
+  bottom for it. The dose export on Timesheets is every role's, scoped to
+  the signed-in person for a non-admin.
 - The JHA opens with nothing ticked (`SEED_HAZARDS` all `on: false`); the
   ticket editor asks once (`SANE_QUANTITY_*`, `SANE_CREW_HOURS` in data.js)
   before saving a figure that looks like a typo, and remembers the answer for

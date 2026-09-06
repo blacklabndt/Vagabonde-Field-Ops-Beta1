@@ -154,6 +154,16 @@ export function QueueDialog({ items, onRetry, onClose }) {
                   The crew hours entered on this device were saved on it. Only its welds and charges were not applied — cancel the approval and re-enter them, then discard this item.
                 </div>
               )}
+              {/* The replay said this once, in a toast, on whatever screen
+                  happened to be open while the outbox drained. An item that
+                  then stopped for some other reason is the one place the
+                  panel can still carry it, so it does. Items that finish are
+                  deleted, and this is not shown for those. */}
+              {item.type === "ticket" && (item.payload || {}).overwroteNewer && (
+                <div style={{ fontSize: 13, color: "color-mix(in srgb, var(--color-text) 65%, transparent)" }}>
+                  This device's copy replaced changes somebody else had saved while it was out of range. Open the ticket and check the figures.
+                </div>
+              )}
             </Blueprint>
           ))}
         </>

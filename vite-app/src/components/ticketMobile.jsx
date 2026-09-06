@@ -564,6 +564,10 @@ export function TicketMobileScreen({ job, jobRecord, currentUser, onSaved, ticke
   // existed — as 5%, never as exempt.
   const gstRate = gstRateOf(job && job.clientGstRate);
   const gst = gstOn(total, gstRate);
+  // The figure with the tax on it — what the rep signs for. Worked out once,
+  // in integer cents, because the totals block and the bar at the foot of the
+  // screen both show it and they must never read a cent apart.
+  const totalIncGst = Math.round(total * 100 + gst * 100) / 100;
 
   const availableWeld = rates.welds.filter(w => !weldLines.some(l => l.key === w.key));
   const availableService = rates.others.filter(s => !otherLines.some(l => l.key === s.key));
@@ -772,6 +776,10 @@ export function TicketMobileScreen({ job, jobRecord, currentUser, onSaved, ticke
           clientContact: { name: ticketClientContact || jobRecord.clientRep }, contractorContact: { name: ticketContractorContact || jobRecord.contractorRep },
           lines: buildLines(), status: "Draft",
           crew, delays, alreadyCreated: inDb, sendForApproval, approvalTo: to, clientKey,
+          // What this edit started from, so a replay can say if it wrote over
+          // somebody else's later save (App.jsx, ticketFingerprint.js). A ticket
+          // never created has no base and is never compared.
+          baseFingerprint: inDb ? Db.lastKnownTicketFingerprint(savedId) : null,
           // Marked when it was the SEND whose answer went missing, not the
           // save — `stage` is "email" only once sendTicketApproval has been
           // called. The send is what moves the row to Awaiting approval, so
@@ -924,7 +932,11 @@ export function TicketMobileScreen({ job, jobRecord, currentUser, onSaved, ticke
   }
 
   return (
-    <div className="page">
+    // Room at the foot of the page for the fixed bar below — two rows of it
+    // once the figure and the buttons stop sharing a line on a phone, plus
+    // the home indicator on an iPhone. Without it the last crew row, or
+    // Cancel this ticket, sits under the bar and cannot be reached.
+    <div className="page" style={{ paddingBottom: "calc(150px + env(safe-area-inset-bottom, 0px))" }}>
       <div className="phone-shell">
         {/* Frozen while a save is in flight: an edit typed during the save
             would be lost to it (see save()). pointer-events off keeps taps
@@ -1132,7 +1144,7 @@ export function TicketMobileScreen({ job, jobRecord, currentUser, onSaved, ticke
             <div style={{ fontSize: 10, textTransform: "uppercase", color: "color-mix(in srgb, var(--color-text) 55%, transparent)" }}>
               {gstRate === 0 ? "Ticket total · GST exempt" : "Ticket total · including GST"}
             </div>
-            <div className="tabular" style={{ fontFamily: "var(--font-heading)", fontWeight: 600, fontSize: 30 }}>{money(Math.round(total * 100 + gst * 100) / 100)}</div>
+            <div className="tabular" style={{ fontFamily: "var(--font-heading)", fontWeight: 600, fontSize: 30 }}>{money(totalIncGst)}</div>
             <div className="tabular" style={{ fontSize: 12, color: "color-mix(in srgb, var(--color-text) 60%, transparent)" }}>
               {money(total)} before GST · {gstLabel(gstRate)}{gstRate === 0 ? "" : ` ${money(gst)}`}
             </div>
@@ -1283,15 +1295,12 @@ export function TicketMobileScreen({ job, jobRecord, currentUser, onSaved, ticke
               {onOpenJob && <Btn variant="secondary" onClick={onOpenJob} style={{ minHeight: 36 }}>Go to Job detail</Btn>}
             </div>
           )}
-          <Btn variant="primary" block style={{ minHeight: 56, fontSize: 15 }} onClick={() => save(true)} disabled={saving || !ticketId || total <= 0 || unpriced.length > 0}
-            title={unpriced.length ? "An unpriced line is on this ticket — see the note above" : undefined}>
-            {saving ? savingLabel(savingMs, "Saving…") : emailFailed ? "Retry approval email" : "Email for approval"}
-          </Btn>
-          {/* No total gate here, unlike sending: a draft with nothing on it
-              yet is a legitimate placeholder for the day — it parks in the
-              tracker and Open tickets until it's finished. Only asking the
-              client to sign requires something to sign for. */}
-          <Btn variant="secondary" block style={{ minHeight: 48 }} onClick={() => save(false)} disabled={saving || !ticketId}>Save draft</Btn>
+          {/* Save draft and Email for approval are not here any more — they
+              are in the bar pinned to the foot of the screen, below. This
+              form is several phone-screens long, and they sat under the last
+              crew row. Cancelling is not: it is the rare, destructive one,
+              and it belongs at the end of the form rather than under a thumb
+              on every screenful. */}
           {created && (
             <Btn variant="ghost" block style={{ minHeight: 44, marginTop: 4 }} disabled={saving || cancelling} onClick={cancelTicket}>
               {cancelling ? "Cancelling…" : "Cancel this ticket"}
@@ -1302,6 +1311,34 @@ export function TicketMobileScreen({ job, jobRecord, currentUser, onSaved, ticke
         <div className="phone-explain">
           <p>Build the day's billing in a truck at dusk. Type the count straight in — every weld line and time/expense line is quantity × the client's on-file rate, pulled live from the published rate schedule.</p>
           <p>The crew block is what feeds Timesheets: each person's hours, their dose in mR, and — for subcontractors — their own mileage to lift into an invoice.</p>
+        </div>
+      </div>
+
+      {/* The day's figure and the two ways out of this screen, on the glass
+          however far down the welds someone has scrolled. Deliberately
+          OUTSIDE the frame above: that frame is dimmed and made deaf to taps
+          while a save is in flight, and this bar is where the save reports
+          itself. The buttons carry the same labels and the same disabled
+          rules they had at the bottom of the form. */}
+      <div className="screen-foot">
+        <div style={{ flex: "1 1 auto", minWidth: 0 }}>
+          <div className="tabular" style={{ fontFamily: "var(--font-heading)", fontWeight: 600, fontSize: 20, lineHeight: 1.15 }}>
+            {money(totalIncGst)}
+          </div>
+          <div className="tabular" style={{ fontSize: 11, color: "color-mix(in srgb, var(--color-text) 60%, transparent)" }}>
+            {gstRate === 0 ? "GST exempt" : "incl. GST"} · Draft{ticketId ? ` ${ticketId}` : ""}{provisionalNumber ? " · provisional" : ""}
+          </div>
+        </div>
+        <div style={{ display: "flex", gap: 8, flex: "1 1 230px", justifyContent: "flex-end" }}>
+          {/* No total gate on the draft, unlike sending: a draft with nothing
+              on it yet is a legitimate placeholder for the day — it parks in
+              the tracker and Open tickets until it's finished. Only asking
+              the client to sign requires something to sign for. */}
+          <Btn variant="secondary" style={{ minHeight: 48 }} onClick={() => save(false)} disabled={saving || !ticketId}>Save draft</Btn>
+          <Btn variant="primary" style={{ minHeight: 48, fontSize: 15 }} onClick={() => save(true)} disabled={saving || !ticketId || total <= 0 || unpriced.length > 0}
+            title={unpriced.length ? "An unpriced line is on this ticket — see the note on the ticket" : undefined}>
+            {saving ? savingLabel(savingMs, "Saving…") : emailFailed ? "Retry approval email" : "Email for approval"}
+          </Btn>
         </div>
       </div>
     </div>

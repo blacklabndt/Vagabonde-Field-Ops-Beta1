@@ -5,6 +5,7 @@ import { Toasts } from "./toastBus.js";
 import { OfflineQueue, isNetworkError } from "./offlineQueue.js";
 import { RESPONSE_ROW_CAP, fetchAllPages, fetchAllKeyset } from "./paging.js";
 import { backupSettingsPatch } from "./backupPanelLogic.js";
+import { ticketFingerprint } from "./ticketFingerprint.js";
 
 // Thin data-access layer over the tables that are wired to Supabase so far
 // (see README "What's wired"). Screens call these instead of touching
@@ -371,6 +372,28 @@ function shapeArchiveTicket(t) {
 
 // One ticket's crew, or a whole job's. ticket_id rides along so the batched
 // read can file each row under the ticket it belongs to.
+// The ticket's editable content as this device last saw the server hold it:
+// the two reads the editor opens a draft with, and the line replacement that
+// follows a save. One slot, because one ticket is open at a time — a read for
+// a different ticket takes it over rather than accumulating.
+//
+// It exists for the outbox. A queued save replays the whole ticket and the
+// last write wins, so a truck back in range at 18:00 writes over whatever the
+// office saved meanwhile — and said nothing about it. The queued payload
+// carries this fingerprint; the replay compares it with what is on the row by
+// then, and a difference is somebody else's work about to be replaced.
+//
+// Kept here rather than on the ticket screen because this is the layer that
+// sees the load AND the write that follows it. Measured against the copy the
+// editor was opened with, a draft saved online and then edited again would
+// accuse its own author of overwriting somebody.
+let lastSeenTicket = null;
+const rememberTicketPart = (ticketId, part) => {
+  if (!ticketId) return;
+  if (!lastSeenTicket || lastSeenTicket.ticketId !== ticketId) lastSeenTicket = { ticketId };
+  Object.assign(lastSeenTicket, part);
+};
+
 const CREW_COLUMNS = "id, ticket_id, profile_id, crew_role, straight_hours, ot_hours, solo_hours, solo_ot_hours, dose_mr, mileage_km, profiles(name, first_name, last_name, is_subcontractor, level, id_code)";
 function shapeCrew(c) {
   return {
@@ -2258,7 +2281,9 @@ export const Db = {
     const { data, error } = await sbClient
       .from("ticket_crew").select(CREW_COLUMNS).eq("ticket_id", ticketId);
     if (error) throw error;
-    return data.map(shapeCrew);
+    const crew = data.map(shapeCrew);
+    rememberTicketPart(ticketId, { crew });
+    return crew;
   },
 
   async saveCrewForTicket(ticketId, crew) {
@@ -2302,6 +2327,19 @@ export const Db = {
     if (keep.length) gone = gone.not("profile_id", "in", `("${keep.join('","')}")`);
     const { error: dErr } = await gone;
     if (dErr) throw humanizeError(dErr);
+    // The row's crew is now the crew that was sent, so the base a queued save
+    // is measured against moves with it (see rememberTicketPart). Recorded in
+    // the shape it was stored in — the role default and the floors included —
+    // or a later save would be compared against figures that differ only
+    // because the database tidied them on the way in.
+    rememberTicketPart(ticketId, {
+      crew: crew.map(c => ({
+        profileId: c.profileId, role: c.role || "Technician",
+        straight: nonNegative(c.straight), ot: nonNegative(c.ot),
+        solo: nonNegative(c.solo), soloOt: nonNegative(c.soloOt),
+        dose: nonNegative(c.dose), mileage: nonNegative(c.mileage)
+      }))
+    });
   },
 
   // Every crew entry in a pay period, with the ticket and job behind it —
@@ -2906,7 +2944,18 @@ export const Db = {
       .select("id, job_id, technician_id, work_date, status, total, delays, client_contact, contractor_contact, ticket_lines(kind, label, unit, quantity, unit_rate)")
       .eq("id", ticketId).single();
     if (error) throw error;
+    rememberTicketPart(ticketId, { lines: data.ticket_lines || [], delays: data.delays });
     return data;
+  },
+
+  // What this device last saw the server holding for a ticket, fingerprinted
+  // — the base a queued save carries into the outbox with it. Null whenever
+  // either half is missing or belongs to a different ticket, and null means
+  // "do not compare", never an accusation.
+  lastKnownTicketFingerprint(ticketId) {
+    const seen = lastSeenTicket;
+    if (!ticketId || !seen || seen.ticketId !== ticketId || !seen.lines || !seen.crew) return null;
+    return ticketFingerprint(seen.lines, seen.crew, seen.delays);
   },
 
   // Saving a reopened draft. Lines are replaced wholesale for the same reason
@@ -3036,6 +3085,13 @@ export const Db = {
         throw friendlyLineError(lErr);
       }
     }
+    // The row now holds what this save wrote, so that is what the next queued
+    // save is measured against. Without this the base would still be the copy
+    // the editor was opened with, and a technician who saved once online and
+    // then queued a later edit would be told they had overwritten somebody.
+    // `undefined` delays means the caller wasn't touching them, so the
+    // remembered note stays as it was.
+    rememberTicketPart(ticketId, delays === undefined ? { lines } : { lines, delays: delays || null });
     return { id: ticketId, total };
   },
 

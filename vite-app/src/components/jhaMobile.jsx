@@ -1,7 +1,7 @@
 import React, { useState, useEffect, useRef } from "react";
 import { JHA_TEMPLATES, SEED_HAZARDS, todayLocal, localDate, dayMonth, storageKeySafe } from "../data.js";
 import { Db } from "../db.js";
-import { Blueprint, Btn, CheckBox, TagX, Field, Dialog, ErrorBox, Switch, splitContact, hazardTagVariant, NoJobSelected, ConnectionBar, QueuedPanel, useMissingFields, RequiredLeft } from "./common.jsx";
+import { Blueprint, Btn, CheckBox, TagX, Field, Dialog, ErrorBox, Switch, splitContact, hazardTagVariant, NoJobSelected, ConnectionBar, QueuedPanel, useMissingFields } from "./common.jsx";
 import { OfflineQueue } from "../offlineQueue.js";
 import { OfflineCache } from "../offlineCache.js";
 import { hasNoSerials, trimmedSerials, isMissingSetOwnDosimetry } from "../dosimetryPrompt.js";
@@ -509,7 +509,11 @@ export function JhaBuilderScreen({ job, jobRecord, contacts, currentUser, onSubm
   if (!job) return <NoJobSelected what="a hazard assessment" />;
 
   return (
-    <div className="page">
+    // Room at the foot of the page for the fixed bar below — two rows of it
+    // once the count and the button stop sharing a line on a phone, plus the
+    // home indicator on an iPhone. Without it Cancel sits under the bar and
+    // cannot be reached.
+    <div className="page" style={{ paddingBottom: "calc(150px + env(safe-area-inset-bottom, 0px))" }}>
       <div className="phone-shell">
         <Blueprint className="phone-frame">
           <ConnectionBar label={job.id} />
@@ -724,10 +728,13 @@ export function JhaBuilderScreen({ job, jobRecord, contacts, currentUser, onSubm
           </div>
 
           <ErrorBox>{error}</ErrorBox>
-          {/* Above the button rather than beside it — the button is the full
-              width of the phone. */}
-          <RequiredLeft count={requiredLeft} />
-          <Btn variant="primary" block style={{ minHeight: 56, fontSize: 15 }} onClick={submit} disabled={saving}>{saving ? savingLabel(savingMs, "Filing…") : "File JHA"}</Btn>
+          {/* File JHA and the count of what is still outstanding are not here
+              any more — they are in the bar pinned to the foot of the screen,
+              below, because this form is several phone-screens of hazards
+              deep and the button that finishes it sat under all of them.
+              Cancel stays: throwing the assessment away is the rare act, and
+              it belongs at the end of the form rather than under a thumb on
+              every screenful. */}
           <Btn variant="ghost" block style={{ minHeight: 44, marginTop: 8 }} disabled={saving}
             onClick={() => { if (confirm("Discard this hazard assessment? Nothing has been filed yet.")) { dropWip(); onCancel(); } }}>
             Cancel
@@ -738,6 +745,24 @@ export function JhaBuilderScreen({ job, jobRecord, contacts, currentUser, onSubm
           <p>The FLHA as the crew fills it: site information, the hazard worksheet with a severity, probability and frequency rating each, the equipment record, and both nuclear energy workers with their dosimetry.</p>
           <p>Unit #, ID code and the three serials come from each person's profile in Users &amp; access — change one here only if equipment was swapped that day.</p>
           <p>Start readings are always 0, so the end reading is the dose. Those are entered at the end of the day: the assessment stays <strong>Open</strong> on Job detail until it's closed out.</p>
+        </div>
+      </div>
+
+      {/* What the form is still waiting on, and the way out of it, on the
+          glass however far down the hazard list someone has scrolled. The
+          count is the same one submit() refuses on, so the bar goes quiet at
+          the moment filing will actually work. */}
+      <div className="screen-foot">
+        {/* Announced as it changes, the way the line above the button used
+            to be: a screen reader hears the last serial being typed take the
+            count to nothing. */}
+        <div aria-live="polite" style={{ flex: "1 1 auto", minWidth: 0, fontSize: 13 }}>
+          {requiredLeft
+            ? <span style={{ color: "var(--color-accent-700)" }}>{requiredLeft} required left</span>
+            : <span style={{ color: "color-mix(in srgb, var(--color-text) 60%, transparent)" }}>Ready to file</span>}
+        </div>
+        <div style={{ display: "flex", flex: "1 1 180px", justifyContent: "flex-end" }}>
+          <Btn variant="primary" style={{ minHeight: 48, fontSize: 15 }} onClick={submit} disabled={saving}>{saving ? savingLabel(savingMs, "Filing…") : "File JHA"}</Btn>
         </div>
       </div>
     </div>

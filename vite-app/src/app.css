@@ -178,6 +178,38 @@ input[type=range] { accent-color: var(--color-accent); }
 }
 .hazard-check.on { background: var(--color-accent); border-color: var(--color-accent); color: var(--color-bg); }
 
+/* — the bar the long single-column screens end with —
+   The ticket editor and the JHA run several phone-screens deep, and the
+   buttons that finish them sat below every weld line, crew row and hazard:
+   checking the day's total and then filing meant a scroll to the bottom and
+   back up again. This keeps the running figure and the primary button on the
+   glass wherever the form has been scrolled to. Each screen adds its own
+   bottom padding, so the last field is never left under the bar.
+
+   z-index 50 is the bottom rung of the shell's ladder — the comment on
+   .dialog-backdrop has the rest of it. The update banner at 55, the drawer at
+   60 and any dialog at 100 all cover this bar, which is the point: a row of
+   live buttons under a modal is a row that takes the taps meant for the
+   modal.
+
+   Fixed carries .screen-in's caveat. An ancestor mid-transform becomes the
+   containing block, so this rides up the page for the length of a screen's
+   entrance animation; App.jsx strips that class on animationend, and it has
+   to go on doing so. */
+.screen-foot {
+  position: fixed; left: 0; right: 0; bottom: 0; z-index: 50;
+  display: flex; align-items: center; gap: 12px; flex-wrap: wrap;
+  padding: 10px 16px;
+  padding-bottom: calc(10px + env(safe-area-inset-bottom, 0px));
+  background: var(--color-bg);
+  border-top: 1px solid var(--color-divider);
+  box-shadow: 0 -6px 18px color-mix(in srgb, #000 12%, transparent);
+}
+/* The same lift on the dark ground, where a 12% black shadow is invisible. */
+:root[data-theme="dark"] .screen-foot {
+  box-shadow: 0 -6px 18px color-mix(in srgb, #000 50%, transparent);
+}
+
 /* — dispatch board / tables — */
 tbody tr.clickable { cursor: pointer; }
 /* The billing tracker is nine columns wide. On a phone the choice is between

@@ -468,11 +468,13 @@ export function TimesheetsScreen({ currentUser }) {
               onChange={e => setDosePeriod(doseOptions.find(o => o.start === e.target.value) || doseOptions[0])}>
               {doseOptions.map(o => <option key={o.start} value={o.start}>{o.label}</option>)}
             </select>
-            {isAdmin && (
-              <Btn variant="secondary" style={{ minHeight: 38, marginLeft: "auto" }} onClick={exportDose} disabled={!doseLedger.length || doseLoading || doseExporting}>
-                {doseExporting ? "Building…" : "Export dose report (.csv)"}
-              </Btn>
-            )}
+            {/* Everyone, not Admins alone: a dose record is the one document
+                a technician is personally asked for, and the ledger they are
+                looking at is already their own. exportDose keeps a non-admin
+                to their own rows, so the file is the screen and nothing more. */}
+            <Btn variant="secondary" style={{ minHeight: 38, marginLeft: "auto" }} onClick={exportDose} disabled={!doseLedger.length || doseLoading || doseExporting}>
+              {doseExporting ? "Building…" : isAdmin ? "Export dose report (.csv)" : "Export my dose record (.csv)"}
+            </Btn>
           </div>
           <Blueprint style={{ padding: "6px 18px 14px" }}>
             {doseLoading && <div style={{ padding: "12px 4px", fontSize: 13, color: "color-mix(in srgb, var(--color-text) 55%, transparent)" }}>Loading dose entries…</div>}

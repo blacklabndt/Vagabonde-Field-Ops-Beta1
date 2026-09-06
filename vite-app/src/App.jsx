@@ -7,6 +7,7 @@ import { Toasts } from "./toastBus.js";
 import { QueueBadge, QueueDialog } from "./components/queuePanel.jsx";
 import { FeatureRequestDialog } from "./components/featureRequest.jsx";
 import { OfflineQueue } from "./offlineQueue.js";
+import { ticketFingerprint, replacedNewerWork } from "./ticketFingerprint.js";
 import { OfflineCache } from "./offlineCache.js";
 import { SwUpdates } from "./swUpdates.js";
 import { restoreSession, IDENTITY_KEY } from "./session.js";
@@ -168,6 +169,30 @@ function UpdateBanner({ onLater }) {
       </div>
     </div>
   );
+}
+
+// The ticket's editable content as it stands this moment, fingerprinted — or
+// null when it cannot be read, or read but not trusted.
+//
+// Never throws. This is one sentence at the end of a replay, and a replay
+// that has the day's work in its hands must not fail over a nicety: an
+// unreadable row simply goes uncompared, and the write below happens exactly
+// as it always did.
+async function currentTicketFingerprint(ticketId) {
+  try {
+    const [row, crew] = await Promise.all([Db.getTicket(ticketId), Db.listCrewForTicket(ticketId)]);
+    const lines = row.ticket_lines || [];
+    // No lines on a ticket that carries money means the lines are there and
+    // this account cannot see them — prices are Admins' and Technicians', and
+    // the policy hides the rows rather than refusing the read (the same trap
+    // updateTicket guards before it replaces them). Comparing against that
+    // would accuse every save of overwriting somebody.
+    if (!lines.length && Number(row.total || 0) > 0) return null;
+    return ticketFingerprint(lines, crew, row.delays);
+  } catch (e) {
+    console.warn("Couldn't check whether this queued ticket overwrote a newer save:", e.message);
+    return null;
+  }
 }
 
 export function App() {
@@ -362,6 +387,22 @@ export function App() {
           }
         }
       } else {
+        // Somebody else may have saved this ticket while the payload sat in
+        // the outbox. Last write wins — the payload is the whole day as the
+        // field left it, and nothing here knows better than the person who
+        // worked it — but an overwrite nobody is told about is how the
+        // office's afternoon correction disappears at 18:00 with no trace
+        // anywhere. So read the row before writing over it and compare it
+        // with what this device had when it loaded the draft. Afterwards is
+        // too late: by then the row is this payload.
+        // Not read again once it has been told: a truck between towers fires
+        // `online` all afternoon and each one re-runs this item.
+        const overwrote = payload.baseFingerprint && !payload.overwroteNewer
+          ? replacedNewerWork(
+            payload.baseFingerprint,
+            ticketFingerprint(payload.lines, payload.crew, payload.delays),
+            await currentTicketFingerprint(id))
+          : false;
         try {
           // The reps ride along: the payload is the whole ticket as the field
           // left it, and a rep edited on a reopened draft is part of it.
@@ -396,6 +437,19 @@ export function App() {
             id = saved.id;
             await checkpoint({ alreadyCreated: true, ticketId: id });
           }
+        }
+        // The write landed on top of work somebody else had saved. Say it
+        // once, and forced, the way the signature refusal is: toasts are
+        // muted while the outbox drains, and an item that finishes is deleted
+        // — this is the only chance anybody has to hear it. The checkpoint is
+        // what keeps the next reconnect quiet.
+        //
+        // Not for a refusal, whose lines never landed, and not for a ticket
+        // that turned out to be gone: raised fresh under a new number, it
+        // replaced nothing.
+        if (overwrote && !linesRefused && id === payload.ticketId) {
+          Toasts.show(`Your queued copy of ${id} replaced changes somebody else saved while you were out of range — open the ticket and check the figures.`, "error", true);
+          await checkpoint({ overwroteNewer: true });
         }
       }
       // Crew is a delete-then-insert, so replaying it is harmless.
