@@ -151,8 +151,26 @@ Cloudflare Worker `solitary-snowflake-ee22` (assets + the `/approve` and
   (server-side, paged) — the delete-job transfer target and Rate admin's job
   override are the two. Never read every job to fill a dropdown; the
   archive's `listJobsCreatedBetween` is bounded by its date range.
+  `SearchSelect` also fronts in-memory lists when a dropdown got long: the
+  ticket editor's crew picker (`searchCrew`, over the cached crew by name,
+  initials or id code, technicians before helpers, a pick adds the person in
+  the role `crewRoleFor` decides and never twice) — its `search(text, max)`
+  returns `{ rows, total }` either way. The JHA's helper field stays a
+  native select because it holds one value with a "working alone" option.
+  Contacts filters an organisation's people client-side (name, title, email,
+  phone) and the pager counts the filtered set; the list was already
+  fetched per organisation, so nothing new is read.
 - The offline queue is for work only — scores, telemetry and other
-  nice-to-haves call the API directly and fail soft.
+  nice-to-haves call the API directly and fail soft. `savingWords.js` holds
+  the two decisions the three field screens share: `deviceOffline()` sends a
+  save straight to the outbox when the device already knows there is no
+  signal (the token refresh in front of a failed save cost eight frozen
+  seconds otherwise), and `savingLabel(elapsed, base)` names the outbox
+  while a long wait is happening. Keep new field saves going through both.
+- A queued report whose upload synced but whose email failed raises one
+  forced toast naming the job and the recipient and where to resend it
+  from (App.jsx's report replay) — a console line was the whole record of
+  that before, and the report sat Pending until somebody wondered.
 - The device cache has an owner (`cache.owner`, `OfflineCache.claimFor`):
   signing in — and a session restored at boot — empties the store first
   unless this same account already owns it, so a shared tablet never hands
@@ -263,7 +281,29 @@ Cloudflare Worker `solitary-snowflake-ee22` (assets + the `/approve` and
   and leaving them ticked; App passes `onReload` so the drawer badge moves
   with the list. Rate admin counts the house card's followers
   (`listScheduleFollowers`, newest schedule per client) and a following
-  client's Rate history shows the house card's changes under its own.
+  client's Rate history shows the house card's changes under its own. Its
+  New client dialog can copy another client's card (`copyDefaultInto(id,
+  fromScheduleId)` — the house card when null): a copy, never a follow, and
+  the copy lands BEFORE `follows_default` goes off, so a failed copy leaves
+  the client priced from the house card rather than on an empty card; a
+  source that itself follows the house card copies the house card. Once the
+  insert has landed the dialog holds the client (`made`) so a failed copy is
+  retried alone, never a second insert of the same name.
+- The tracker's pure parts are modules: `chasePlan.js` (who a chase would
+  mail, shown before it sends), `ticketAging.js` (the aging tiles and By
+  client view over `ticket_aging()`), `accountingExport.js` (the two CSVs,
+  GST per ticket from the client's rate). Open tickets' half-entered strip
+  reads the device's recovery copies through `wipDrafts.js`, and its bulk
+  cancel runs through `approvalRun.js`. Home's Needs attention strip asks
+  `attention.js`'s four questions. Keep logic out of the screens and in
+  those files, where `npm test` reaches it.
+- The backup panel's list of earlier runs is `EARLIER_RUNS` (12) deep, each
+  row showing records, files and size from `runRows/runFiles/runBytes` in
+  `backupPanelLogic.js` — the same helpers the last-run sentence uses, so
+  the two cannot drift — with `sizeTrend` drawing complete backup and
+  before_restore runs scaled from zero and flagging `halved` when the latest
+  is under half the one before. Five points on a daily schedule was too
+  short to read as a trend.
 - In-app help is `vite-app/src/help.js`, pure data keyed by screen key with
   a test that every TABS key has an entry under 200 words; the top bar's "?"
   opens it for the active screen. Keep it true when a screen changes. The
@@ -609,7 +649,14 @@ session has set `app.confirm_total_wipe = 'yes'`.
   raised in a year or date range, zipped in the browser
   (vite-app/src/archive.js), filed client → month raised → job, each job
   folder holding Job details.txt, JHAs/, Reports/, Invoices/ (HTML), plus
-  Index.csv and README.txt at the top. The build keeps a manifest (name,
+  Index.csv and README.txt at the top. A finished build is kept on the
+  device for a day (`archive.built` in the OfflineCache: zip name, manifest,
+  summary, the jobs' ids and dbIds, written after the download and read
+  straight back before the dialog believes it), so the Admin can check the
+  zip and clear the next morning: reopening offers "Check that zip", and a
+  resumed clear acts on the HELD job ids — never the range picker's current
+  count, which may be sitting on another year. Building again, or a
+  completed clear, forgets it. The build keeps a manifest (name,
   size, CRC per entry); the dialog then makes the Admin pick the downloaded
   zip and verifyZip reads its central directory back against the manifest.
   Only a zip that checks out, from a build with nothing unretrieved,
