@@ -1,6 +1,7 @@
 import React, { useState, useEffect, useRef } from "react";
 import { money, todayLocal, localDate, dayMonth, initialsOf, ticketDateStamp, lastNumbers, JOB_FIELDS, EMPTY_JOB_RECORD, seesPrices as pricesFor, fileSize, reportFileRefusal, MAX_REPORT_LABEL, decimalString } from "../data.js";
 import { acceptsNumberText } from "../numberInput.js";
+import { serialsOnProfile, newSerials, mergedSerials, isMissingSetOwnDosimetry, dosimetryAskedFor, markDosimetryAsked } from "../dosimetryPrompt.js";
 import { Db } from "../db.js";
 import { OfflineCache } from "../offlineCache.js";
 import { OfflineQueue } from "../offlineQueue.js";
@@ -1120,6 +1121,50 @@ function JhaCloseOutDialog({ jha, currentUser, onClose, onDone }) {
   const [saving, setSaving] = useState(false);
   const [err, setErr] = useState("");
 
+  // The same offer the builder makes, at the other end of the day: the
+  // serials on this assessment for whoever is closing it out, when the
+  // profile does not hold them. A JHA is often raised by one technician and
+  // closed by the other, and the close-out is the first time the second one
+  // sees their own kit written down. Asked once a session through the
+  // builder's own mark, so the two screens never nag in turn; the profile is
+  // read from the cached crew list, which is what the builder derives kits
+  // from too.
+  const [offer, setOffer] = useState(null);   // { row, onFile }
+  const [keeping, setKeeping] = useState(false);
+  const [keepMsg, setKeepMsg] = useState("");
+  useEffect(() => {
+    if (dosimetryAskedFor(currentUser.id)) return undefined;
+    const mine = rows.find(r => r.profileId === currentUser.id);
+    if (!mine) return undefined;
+    let alive = true;
+    Db.listActiveProfiles().then(list => {
+      if (!alive) return;
+      const me = list.find(p => p.id === currentUser.id);
+      if (!me) return;
+      const onFile = serialsOnProfile(me);
+      if (!newSerials(mine, onFile).length) return;
+      markDosimetryAsked(currentUser.id);
+      setOffer({ row: mine, onFile });
+    }).catch(() => {});
+    return () => { alive = false; };
+  }, []);
+  const keepSerials = async () => {
+    if (!offer) return;
+    setKeeping(true);
+    setKeepMsg("");
+    try {
+      await Db.setOwnDosimetry(mergedSerials(offer.row, offer.onFile));
+      setOffer(null);
+    } catch (e) {
+      setKeepMsg(isMissingSetOwnDosimetry(e)
+        ? "This app can't put serials on a profile here yet — ask an admin to add them to your profile."
+        : (e.message || "Couldn't save them to your profile."));
+    }
+    setKeeping(false);
+  };
+  const offered = offer ? newSerials(offer.row, offer.onFile) : [];
+  const offeredNames = offered.map(k => ({ tld: "TLD", drd: "DRD", alarm: "alarm" })[k]).join(", ");
+
   const set = (i, v) => setRows(p => p.map((r, idx) => idx === i ? { ...r, endReading: v } : r));
 
   const submit = async () => {
@@ -1167,6 +1212,25 @@ function JhaCloseOutDialog({ jha, currentUser, onClose, onDone }) {
       {!rows.length && (
         <div style={{ fontSize: 13 }}>
           This assessment has no workers recorded on it — closing out will simply mark it done.
+        </div>
+      )}
+      {offer && (
+        <div style={{
+          fontSize: 12, padding: "8px 10px", border: "1px solid var(--color-accent-700)",
+          background: "color-mix(in srgb, var(--color-accent) 8%, transparent)", display: "flex", flexDirection: "column", gap: 8
+        }}>
+          <span>
+            The {offeredNames} serial{offered.length > 1 ? "s" : ""} on this assessment {offered.length > 1 ? "aren't" : "isn't"} on your
+            profile. Keep {offered.length > 1 ? "them" : "it"} there and the next JHA fills {offered.length > 1 ? "them" : "it"} in.
+          </span>
+          {keepMsg && <span style={{ color: "var(--color-accent-700)" }}>{keepMsg}</span>}
+          <div style={{ display: "flex", gap: 8, alignItems: "center" }}>
+            <Btn variant="secondary" onClick={keepSerials} disabled={keeping}>{keeping ? "Keeping…" : "Keep these on my profile"}</Btn>
+            <button type="button" onClick={() => setOffer(null)}
+              style={{ background: "none", border: "none", textDecoration: "underline", cursor: "pointer", color: "inherit", font: "inherit", padding: 0 }}>
+              Not now
+            </button>
+          </div>
         </div>
       )}
       {rows.map((r, i) => (

@@ -64,9 +64,13 @@ Cloudflare Worker `solitary-snowflake-ee22` (assets + the `/approve` and
   `supabase/handover/probes-20260906135356-a-worker-keeps-their-own-serials.sql`):
   `set_own_dosimetry(tld, drd, alarm)`, a definer RPC any signed-in, unlocked
   account may call to write the three serial columns on its OWN profile row
-  and nothing else — the JHA builder's "Keep these on my profile" button,
-  because profiles_update wants the users tab the field does not hold. The
-  screen falls back (PGRST202 or a message naming the function) to keeping
+  and nothing else — the "Keep these on my profile" button, offered by the
+  JHA builder (a profile with no serial at load, or a serial typed that the
+  kit on file does not hold, after a pause) and by Job detail's close-out
+  dialog for the closer's own row; `dosimetryPrompt.js` holds the pure
+  questions (`newSerials`, `mergedSerials` — keeping never blanks a serial
+  the profile has) and the once-a-session mark both screens share. The
+  screens fall back (PGRST202 or a message naming the function) to keeping
   the serials on the assessment alone. Before it,
   `20260906033223_the_error_log_can_be_cleared.sql` (probes in
   `supabase/handover/probes-20260906033223-the-error-log-can-be-cleared.sql`):
@@ -181,6 +185,13 @@ Cloudflare Worker `solitary-snowflake-ee22` (assets + the `/approve` and
   provisioning trigger caps metadata roles to Technician/Helper and the
   function writes the real rank itself. Never widen the trigger's role
   allowlist back.
+- The chat composer is held whole across a screen change — words, the
+  message being answered, an unsent picture, an unlistened voice note — in
+  `chatDrafts.js`, keyed by profile id and cleared at sign-out. Files are
+  held as Files and the screen mints a fresh object URL on remount, because
+  it revokes its own on unmount; the room's first load drops a held reply
+  whose parent has gone. Nothing in the shell may import the chat chunk for
+  this — the module exists so sign-out can reach it without doing so.
 - Team chat forgets: unpinned messages expire after 30 days, deleted by
   the chat-retention Edge Function (it also removes their chat-media
   pictures), fired nightly by the pg_cron job `chat-retention-nightly`.

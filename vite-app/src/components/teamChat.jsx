@@ -1,6 +1,6 @@
 import React, { useState, useEffect, useLayoutEffect, useMemo, useRef } from "react";
 import { Db } from "../db.js";
-import { heldDraftFor, holdDraft } from "../chatDrafts.js";
+import { heldDraftFor, holdDraft, heldComposerFor, holdComposer } from "../chatDrafts.js";
 import { initialsOf } from "../data.js";
 // The merge every message path funnels through — see chatMerge.js,
 // where the regression tests hold the door on the "Someone" bug.
@@ -447,7 +447,12 @@ export function TeamChatScreen({ currentUser, onOpenJob, onRead }) {
   const [loadingOlder, setLoadingOlder] = useState(false);
   const [loadError, setLoadError] = useState("");
   const [draft, setDraft] = useState(() => heldDraftFor(currentUser.id));
-  const [attach, setAttach] = useState(null);   // { file, url } awaiting send
+  // { file, url } awaiting send. A picture chosen before a screen change is
+  // offered back with a fresh URL — the File is what is held, see chatDrafts.
+  const [attach, setAttach] = useState(() => {
+    const f = heldComposerFor(currentUser.id).attachFile;
+    return f ? { file: f, url: URL.createObjectURL(f) } : null;
+  });
   const [gifOpen, setGifOpen] = useState(false);
   const [sending, setSending] = useState(false);
   const [sendError, setSendError] = useState("");
@@ -463,7 +468,9 @@ export function TeamChatScreen({ currentUser, onOpenJob, onRead }) {
   const [pushState, setPushState] = useState("unsupported");
   const [pushBusy, setPushBusy] = useState(false);
   // The message being answered — its quote rides the next send.
-  const [replyTarget, setReplyTarget] = useState(null);
+  // Held across a screen change like the words; the room's first load
+  // drops it again if the message has gone (reconcileWindow, below).
+  const [replyTarget, setReplyTarget] = useState(() => heldComposerFor(currentUser.id).reply);
   // Which message's ⋯ menu is open, if any.
   const [menuFor, setMenuFor] = useState(null);
   // Where this person had read up to when they walked in — the "new
@@ -489,7 +496,10 @@ export function TeamChatScreen({ currentUser, onOpenJob, onRead }) {
   const [recElapsed, setRecElapsed] = useState(0);
   // A finished recording waiting to be listened to and sent: { file, url }.
   // Nothing reaches the room from the microphone without passing through here.
-  const [voiceNote, setVoiceNote] = useState(null);
+  const [voiceNote, setVoiceNote] = useState(() => {
+    const f = heldComposerFor(currentUser.id).voiceFile;
+    return f ? { file: f, url: URL.createObjectURL(f) } : null;
+  });
   // "↓ new messages" — shown when something lands while scrolled up.
   const [jumpChip, setJumpChip] = useState(false);
   // Crewmates with the room open right now (never includes yourself).
@@ -883,6 +893,11 @@ export function TeamChatScreen({ currentUser, onOpenJob, onRead }) {
   useEffect(() => {
     holdDraft(currentUser.id, draft);
   }, [draft, currentUser.id]);
+  // The rest of the composer the same way: a send or a × empties the state,
+  // and the held copy follows it to empty.
+  useEffect(() => {
+    holdComposer(currentUser.id, { reply: replyTarget, attachFile: attach ? attach.file : null, voiceFile: voiceNote ? voiceNote.file : null });
+  }, [replyTarget, attach, voiceNote, currentUser.id]);
 
   // Grow the composer with the message instead of scrolling a two-line slot:
   // 2,005 characters used to be typed through a 55 px window with a

@@ -5,7 +5,7 @@ import { acceptsNumberText } from "../numberInput.js";
 import { Blueprint, Btn, CheckBox, TagX, Field, Dialog, ErrorBox, Switch, splitContact, hazardTagVariant, NoJobSelected, ConnectionBar, QueuedPanel, useMissingFields, useScreenFoot } from "./common.jsx";
 import { OfflineQueue } from "../offlineQueue.js";
 import { OfflineCache } from "../offlineCache.js";
-import { hasNoSerials, trimmedSerials, isMissingSetOwnDosimetry, dosimetryAskedFor, markDosimetryAsked } from "../dosimetryPrompt.js";
+import { hasNoSerials, trimmedSerials, isMissingSetOwnDosimetry, newSerials, dosimetryAskedFor, markDosimetryAsked } from "../dosimetryPrompt.js";
 import { savingLabel, deviceOffline } from "../savingWords.js";
 
 // The JHA (FLHA) — filed at the start of the day, closed out at the end.
@@ -128,7 +128,9 @@ export function JhaBuilderScreen({ job, jobRecord, contacts, currentUser, onSubm
   // `keepable` goes false when the database has no set_own_dosimetry yet:
   // pressing again would fail the same way, so the panel keeps the message
   // and drops the button.
-  const [askDosimetry, setAskDosimetry] = useState(false);
+  // "" for no offer, "none" when the profile holds no serial at all, "new"
+  // when a serial has been typed that the profile does not hold.
+  const [askDosimetry, setAskDosimetry] = useState("");
   const [keeping, setKeeping] = useState(false);
   const [keepMsg, setKeepMsg] = useState("");
   const [keepable, setKeepable] = useState(true);
@@ -318,8 +320,25 @@ export function JhaBuilderScreen({ job, jobRecord, contacts, currentUser, onSubm
     const me = people.find(p => p.id === currentUser.id);
     if (!me || !hasNoSerials(kitOf(me, equipment))) return;
     markDosimetryAsked(currentUser.id);
-    setAskDosimetry(true);
+    setAskDosimetry("none");
   }, [people, equipment, equipReady, currentUser.id]);
+
+  // The other offer: a serial typed that is not on file — the worker whose
+  // profile holds two of the three, or whose dosimeter was swapped since it
+  // was written down. Compared with the kit the form was filled from, so a
+  // serial the Equipment tab assigns counts as on file. Waits for a pause in
+  // the typing rather than the first keystroke, and is asked once a session
+  // like the first offer, through the same mark.
+  useEffect(() => {
+    if (!equipReady || askDosimetry || dosimetryAskedFor(currentUser.id)) return undefined;
+    const me = people.find(p => p.id === currentUser.id);
+    if (!me || !newSerials(w1, kitOf(me, equipment)).length) return undefined;
+    const t = setTimeout(() => {
+      markDosimetryAsked(currentUser.id);
+      setAskDosimetry("new");
+    }, 1500);
+    return () => clearTimeout(t);
+  }, [w1, people, equipment, equipReady, askDosimetry, currentUser.id]);
 
   // What the button in that panel does. The serials it keeps are the ones on
   // the form — worker (1)'s boxes are the same three fields, so there is
@@ -353,7 +372,7 @@ export function JhaBuilderScreen({ job, jobRecord, contacts, currentUser, onSubm
       ? { ...p, tld_serial: serials.tld || null, drd_serial: serials.drd || null, alarm_serial: serials.alarm || null }
       : p));
     setKeeping(false);
-    setAskDosimetry(false);
+    setAskDosimetry("");
   };
 
   useEffect(() => {
@@ -648,7 +667,11 @@ export function JhaBuilderScreen({ job, jobRecord, contacts, currentUser, onSubm
               background: "color-mix(in srgb, var(--color-accent) 8%, transparent)",
               display: "flex", flexDirection: "column", gap: 8
             }}>
-              <span>No dosimeter serials are on your profile yet. Enter your TLD, DRD and alarm serials once and the app will keep them for next time.</span>
+              <span>
+                {askDosimetry === "new"
+                  ? "A serial below isn't on your profile. Keep it there and the app fills it in next time."
+                  : "No dosimeter serials are on your profile yet. Enter your TLD, DRD and alarm serials once and the app will keep them for next time."}
+              </span>
               {keepMsg && <span style={{ color: "var(--color-accent-700)" }}>{keepMsg}</span>}
               <div style={{ display: "flex", gap: 8, alignItems: "center", flexWrap: "wrap" }}>
                 {keepable && (
@@ -656,7 +679,7 @@ export function JhaBuilderScreen({ job, jobRecord, contacts, currentUser, onSubm
                     {keeping ? "Keeping…" : "Keep these on my profile"}
                   </Btn>
                 )}
-                <button type="button" onClick={() => setAskDosimetry(false)}
+                <button type="button" onClick={() => setAskDosimetry("")}
                   style={{ background: "none", border: "none", textDecoration: "underline", cursor: "pointer", color: "inherit", font: "inherit", padding: 0 }}>
                   {keepable ? "Not now" : "Close"}
                 </button>

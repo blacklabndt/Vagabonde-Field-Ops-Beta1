@@ -30,6 +30,35 @@ export function trimmedSerials(kit) {
   };
 }
 
+// The three serials a profile row holds, in the kit's own shape, so a kit
+// and a profile can be compared without either side learning the other's
+// column names.
+export function serialsOnProfile(profile) {
+  const p = profile || {};
+  return { tld: String(p.tld_serial || "").trim(), drd: String(p.drd_serial || "").trim(), alarm: String(p.alarm_serial || "").trim() };
+}
+
+// Which of the typed serials are news to what is on file: non-empty, and not
+// the same as the one held. A box left empty says nothing — a worker who
+// wears two devices is not told every job that the third is missing — and a
+// serial retyped exactly as the profile has it is nothing to keep. This is
+// what turns the first-time offer into an offer for the worker whose profile
+// holds two of three, or whose dosimeter was swapped since.
+export function newSerials(typed, onFile) {
+  const t = trimmedSerials(typed);
+  const o = trimmedSerials(onFile);
+  return ["tld", "drd", "alarm"].filter(k => t[k] && t[k] !== o[k]);
+}
+
+// What goes to the profile when a typed kit is kept over what is on file:
+// every typed serial, and for a box left empty the profile's own — the RPC
+// writes all three, and an empty box must not wipe a serial the profile has.
+export function mergedSerials(typed, onFile) {
+  const t = trimmedSerials(typed);
+  const o = trimmedSerials(onFile);
+  return { tld: t.tld || o.tld, drd: t.drd || o.drd, alarm: t.alarm || o.alarm };
+}
+
 // Whether this error means the database has no set_own_dosimetry yet — a
 // fresh environment standing up before the migration is applied — rather
 // than a refusal or a timeout.

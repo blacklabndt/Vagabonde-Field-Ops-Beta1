@@ -11,7 +11,7 @@
 
 import test from "node:test";
 import assert from "node:assert/strict";
-import { hasNoSerials, trimmedSerials, isMissingSetOwnDosimetry } from "./dosimetryPrompt.js";
+import { hasNoSerials, trimmedSerials, isMissingSetOwnDosimetry, serialsOnProfile, newSerials, mergedSerials } from "./dosimetryPrompt.js";
 
 test("a kit with nothing in it is the one worth asking about", () => {
   assert.equal(hasNoSerials({ unit: "12", idCode: "24401", tld: "", drd: "", alarm: "" }), true);
@@ -49,4 +49,17 @@ test("a refusal, a timeout and a silence are not a missing function", () => {
   assert.equal(isMissingSetOwnDosimetry({ code: "57014", message: "canceling statement due to statement timeout" }), false);
   assert.equal(isMissingSetOwnDosimetry({ message: "Could not find the function public.dose_totals" }), false);
   assert.equal(isMissingSetOwnDosimetry(null), false);
+});
+
+test("a typed serial is news only when the profile does not hold it", () => {
+  const onFile = serialsOnProfile({ tld_serial: "T-1", drd_serial: null, alarm_serial: " A-9 " });
+  assert.deepEqual(onFile, { tld: "T-1", drd: "", alarm: "A-9" });
+  // Retyped as held, and a box left empty: nothing to keep.
+  assert.deepEqual(newSerials({ tld: " T-1 ", drd: "", alarm: "A-9" }, onFile), []);
+  // The missing one filled in, the alarm swapped for another unit.
+  assert.deepEqual(newSerials({ tld: "T-1", drd: "D-4", alarm: "A-10" }, onFile), ["drd", "alarm"]);
+  // Keeping writes all three: typed where typed, the profile's where not.
+  assert.deepEqual(mergedSerials({ tld: "", drd: "D-4", alarm: "" }, onFile), { tld: "T-1", drd: "D-4", alarm: "A-9" });
+  // A profile with nothing on it: every typed serial is news.
+  assert.deepEqual(newSerials({ tld: "T-1", drd: "", alarm: "" }, serialsOnProfile(null)), ["tld"]);
 });
