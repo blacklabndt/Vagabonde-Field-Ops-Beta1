@@ -23,12 +23,14 @@ test("no help entry names a screen that no longer exists", () => {
 
 // Each entry is what the dialog renders directly: a name for the screen and
 // paragraphs to print. An empty body would open a dialog with nothing in it.
-test("every entry carries a heading and at least three paragraphs", () => {
+// One paragraph is enough: the owner writes these, and some screens are
+// said in a sentence.
+test("every entry carries a heading and at least one paragraph", () => {
   for (const [key, entry] of Object.entries(HELP)) {
     assert.equal(typeof entry.heading, "string", `${key} has no heading`);
     assert.ok(entry.heading.trim().length > 0, `${key} has an empty heading`);
     assert.ok(Array.isArray(entry.body), `${key} has no body array`);
-    assert.ok(entry.body.length >= 3, `${key} has only ${entry.body.length} paragraph(s)`);
+    assert.ok(entry.body.length >= 1, `${key} has no paragraphs`);
     for (const p of entry.body) {
       assert.equal(typeof p, "string", `${key} has a non-string paragraph`);
       assert.ok(p.trim().length > 0, `${key} has an empty paragraph`);

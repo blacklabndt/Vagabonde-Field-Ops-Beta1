@@ -22,49 +22,31 @@ export const HELP = {
   board: {
     heading: "Home",
     body: [
-      "The dispatch board: every job, searched on the server rather than pulled down whole, so a long list is paged instead of slow. The pills filter by status; the box beside them searches one field at a time — pick which field from the dropdown next to it.",
-      "Tap a job to open Job detail, which is where its assessments, reports and tickets live. The buttons at the right raise new work: + Job creates the job record, + Ticket starts a billing ticket. + Ticket needs the ticket screen and the price permission, so it is not on every account.",
-      "Admins also get a \"Needs attention\" strip above the filters when something needs saying — a backup that failed, a drive whose consent lapsed, a run of background errors. On an ordinary morning it is not there at all.",
-      "With no signal the board shows what this device last saved, and says Offline in the top bar. Searching still works over the saved copy; new jobs wait for a connection."
+      "From this screen you see and open any of the created jobs, you can search through them, filter them and create new jobs using the +Job button on the top right of your screen. You can also create a new ticket within any active job using the +Ticket button also located at the top of your screen next to the +Job button. Press the hamburger menu button to see the other available tabs."
     ]
   },
   job: {
     heading: "Job detail",
     body: [
-      "Everything filed against one job: its hazard assessments, its radiographic reports and its billing tickets, each card reloading only itself after you change something.",
-      "The buttons here are how the field screens are meant to be reached. Start JHA, + Upload report and Create ticket all open with this job already under them — that is why those screens are not in the menu: one opened from a menu operates on whichever job happened to be active, which is how the wrong job gets written up.",
-      "+ Upload report only appears for accounts with the upload permission. A Helper cannot file a radiographic report; the database refuses it too, so the missing button is the honest answer rather than a hidden one.",
-      "Create ticket saves nothing by itself. It hands the work date and this job's reps to the ticket screen, which saves — and queues, if you are out of range — exactly like a ticket started from Home.",
-      "Delete job is an Admin's, or yours while nothing on the job has been billed and you raised it; it asks what should happen to the work underneath first. An approved ticket cannot be deleted this way at all."
+      "From this screen you can see the job details, open, create and send JHAs, and Tickets as well as upload and send reports. When you upload a report the numbers should be automatically read and displayed but please double check they are correct for the next technician"
     ]
   },
   jha: {
     heading: "JHA builder",
     body: [
-      "The field level hazard assessment as the crew fills it: site information, the hazards with their ratings, the equipment on the job, and both nuclear energy workers with their dosimetry. Filing it writes a real record and renders the PDF.",
-      "The date of the assessment is editable. One missed on site can be written up afterwards for the day it actually covers, rather than for the day you typed it.",
-      "Each hazard starts at the rating you last gave it, read back out of assessments you filed yourself. There is no preferences list behind that — it is your own filed work, so it cannot drift from what was actually signed.",
-      "The equipment section pre-fills from what the Equipment screen has assigned to each worker. Fix it there and the next assessment is right.",
-      "Close-out is a separate step later on Job detail: end readings off each dosimeter at the end of the day. The dose is worked out from those readings rather than taken from the screen, and the PDF is redrawn."
+      "From this screen you can build your JHA... Self explanitory"
     ]
   },
   upload: {
     heading: "Report upload",
     body: [
-      "Files a finished radiographic report against this job. The PDF goes into a private bucket and a report record is written; nothing here is public.",
-      "Uploading and emailing are two steps on purpose. The file is stored first, then sent to the contractor's contact on the job. If the email fails the report is still on file and shows as Pending — send it again from Job detail rather than uploading a second copy.",
-      "If the job has no contractor email, the upload still happens and the screen says nothing was sent. Add the address to the job record and send from Job detail.",
-      "This screen needs the upload permission. A Helper holds the job screen but not this one, and the database enforces that, not just the menu."
+      "Upload and send your report from this screen"
     ]
   },
   ticket: {
     heading: "Billing ticket",
     body: [
-      "The field ticket: every weld and charge priced from the client's rate schedule, plus the crew's hours, dose and mileage.",
-      "The dropdowns are the client's own rate card — its lines, in its order — so a charge that is not on their card is not offered. A saved ticket can still hold a line the card no longer sells: those sit read-only under \"No longer on the rate card\", at the rate they were filed at, and their money is still in the total. Use the × to drop one.",
-      "Save draft keeps it yours. Email for approval sends the client rep a link to sign. After that the ticket is locked for pricing — a later save is refused until Cancel approval on Job detail (yours if you raised it, or the office's) kills the client's link and makes it a draft again. Crew hours stay writable, because they are the day's pay.",
-      "Solo hours are for the timesheet only and are never billed. Billing is per truck, not per technician.",
-      "Out of range, the whole ticket queues and sends itself when you have signal. The top bar's outbox badge is where it waits."
+      "From here you build your ticket that will be sent to the client. Be sure to add your helper on to this as well as his hours are calculated from this screen"
     ]
   },
   mytickets: {
