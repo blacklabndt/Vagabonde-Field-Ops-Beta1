@@ -1167,13 +1167,6 @@ export function App() {
                 )}
               </button>
             ))}
-            {/* Not a screen: the last entry in the list opens a form that
-                mails the office. Set apart from the tabs above it — the
-                tabs are what the account may open; this is for everyone. */}
-            <button onClick={() => { setMenuOpen(false); setShowFeature(true); }}
-              style={{ marginTop: 10, borderTop: "1px solid var(--color-divider)", fontSize: 14, color: "color-mix(in srgb, var(--color-text) 70%, transparent)" }}>
-              Feature request
-            </button>
             <div className="drawer-foot">
               {/* Double-click your own name. Nothing announces it and nothing
                   depends on it; a double-click on a label is not something
@@ -1195,8 +1188,14 @@ export function App() {
             </div>
             {/* The Switch carries no visible text of its own — the word
                 beside it is the label people actually read. */}
-            <div className="drawer-foot" style={{ justifyContent: "flex-end" }}>
-              <span style={{ color: "color-mix(in srgb, var(--color-text) 65%, transparent)" }}>Animations</span>
+            <div className="drawer-foot">
+              {/* Not a screen: it opens a form that mails the office, and it
+                  sits down here with the settings rather than in the tab
+                  list — one more 52px row there made the drawer scroll on a
+                  phone. The tabs are what the account may open; this is
+                  for everyone. */}
+              <Btn variant="secondary" onClick={() => { setMenuOpen(false); setShowFeature(true); }}>Feature request</Btn>
+              <span style={{ marginLeft: "auto", color: "color-mix(in srgb, var(--color-text) 65%, transparent)" }}>Animations</span>
               <Switch on={motion === "on"} onClick={() => setMotion(motion === "on" ? "off" : "on")} label="Animations" />
             </div>
             {/* Which build this device is on — name, commit, day — so "is

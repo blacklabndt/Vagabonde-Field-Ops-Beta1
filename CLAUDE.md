@@ -157,7 +157,7 @@ Cloudflare Worker `solitary-snowflake-ee22` (assets + the `/approve` and
   onboarding sender, which delivers only to the inbox the Resend account
   was created with — a send to anyone else is refused by Resend and
   mail.ts translates that refusal into a plain message naming the fix.
-- The drawer's "Feature request" entry (below the tabs, for every account)
+- The drawer's "Feature request" button (beside the Animations switch, for every account)
   mails the owner through the `feature-request` Edge Function: the
   recipient is the function's own constant (`FEATURE_REQUEST_TO`), never
   taken from the request, the reply-to is the sender's address, and the
