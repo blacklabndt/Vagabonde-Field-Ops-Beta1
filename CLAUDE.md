@@ -230,6 +230,11 @@ Cloudflare Worker `solitary-snowflake-ee22` (assets + the `/approve` and
   the service role's act alone: the tickets UPDATE policy's WITH CHECK
   pins the approval columns, so no signed-in account can set Approved.
   Probe it with role simulation if you touch that policy.
+  Withdrawing is offered three places — Job detail's ticket row, the
+  field-invoice viewer and the tracker row — each with a plain "Cancel
+  approval" and a "Cancel and edit" that opens the ticket (its job page,
+  from the tracker) once the list has re-read it as a draft; the RPC's
+  own-or-office rule is the gate, not the button.
 - The role→tabs defaults live in TWO places that must move together:
   ROLE_PRESETS in vite-app/src/data.js and tabs_for_role() in the
   database (create-user provisions from the latter). data.test.mjs reads

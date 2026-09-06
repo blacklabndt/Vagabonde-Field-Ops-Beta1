@@ -101,6 +101,10 @@ export function BillingTrackerScreen({ onOpenTicket, currentUser }) {
   // value of showing it there rather than in the page-wide error box.
   const [resendId, setResendId] = useState("");
   const [resendAsk, setResendAsk] = useState(null);
+  // Pulling a sent ticket back from the tracker: the row being asked about
+  // (with whether the editor follows) and the row mid-withdraw.
+  const [withdrawAsk, setWithdrawAsk] = useState(null);
+  const [withdrawingId, setWithdrawingId] = useState("");
   const [rowNotes, setRowNotes] = useState({});
 
   // The four tiles are computed over every ticket, independent of the page
@@ -291,6 +295,30 @@ export function BillingTrackerScreen({ onOpenTicket, currentUser }) {
       noteOn(id, e.message || "Couldn't resend that link.", true);
     }
     setResendId("");
+  };
+
+  // The client's link dies and the ticket goes back to Draft, through the
+  // same definer RPC Job detail uses; the database applies the own-or-office
+  // rule, so a technician's tap on somebody else's ticket comes back as the
+  // RPC's own refusal rather than being hidden here. "Cancel and edit"
+  // then opens the ticket, which for a draft means its job page — the
+  // editor only ever opens over its own job's record (see App.openTicket) —
+  // where Edit is one tap away. The page is re-read afterwards because a
+  // Draft row does not belong in most of this screen's views.
+  const withdrawApproval = async ({ row, edit }) => {
+    setWithdrawAsk(null);
+    setWithdrawingId(row.id);
+    noteOn(row.id, "");
+    try {
+      await Db.withdrawTicketApproval(row.id);
+      setWithdrawingId("");
+      if (edit) { onOpenTicket({ ...row, status: "Draft" }); return; }
+      noteOn(row.id, `Approval cancelled — ${row.id} is a draft again.`);
+      await fetchPage(page, filter);
+    } catch (e) {
+      setWithdrawingId("");
+      noteOn(row.id, e.message || "Couldn't cancel that approval.", true);
+    }
   };
 
   // Approved → Invoiced (and back, for a slip). Admin-only in the database;
@@ -693,6 +721,21 @@ export function BillingTrackerScreen({ onOpenTicket, currentUser }) {
                               title="Emails the client rep a fresh approval link. It replaces the link they already have.">
                               {resendId === t.id ? "Sending…" : "Resend link"}
                             </Btn>)}
+                        {/* The figure is wrong and the client has not signed
+                            yet: take the link back, and optionally go and
+                            fix it. Not behind the price gate — cancelling
+                            sends nothing; the database decides whose
+                            ticket it is. */}
+                        <Btn variant="secondary" disabled={withdrawingId === t.id}
+                          title="Kills the client's signing link and puts the ticket back to Draft."
+                          onClick={() => setWithdrawAsk({ row: t, edit: false })}>
+                          {withdrawingId === t.id ? "Cancelling…" : "Cancel approval"}
+                        </Btn>
+                        <Btn variant="secondary" disabled={withdrawingId === t.id}
+                          title="Cancels the approval request and opens the ticket's job so it can be edited."
+                          onClick={() => setWithdrawAsk({ row: t, edit: true })}>
+                          Cancel and edit
+                        </Btn>
                       </div>
                     )}
                     {rowNotes[t.id] && (
@@ -744,6 +787,20 @@ export function BillingTrackerScreen({ onOpenTicket, currentUser }) {
           <div style={{ fontSize: 14 }}>
             Resend the approval link for {resendAsk.id} to <strong>{resendAsk.to}</strong>? This replaces the
             link they already have.
+          </div>
+        </Dialog>
+      )}
+      {withdrawAsk && (
+        <Dialog title={`Cancel the approval request for ${withdrawAsk.row.id}?`} maxWidth={460} onClose={() => setWithdrawAsk(null)}
+          actions={<>
+            <Btn variant="secondary" onClick={() => setWithdrawAsk(null)}>Keep it</Btn>
+            <Btn variant="primary" onClick={() => withdrawApproval(withdrawAsk)}>
+              {withdrawAsk.edit ? "Cancel and edit" : "Cancel approval"}
+            </Btn>
+          </>}>
+          <div style={{ fontSize: 14 }}>
+            The client's signing link stops working and the ticket goes back to Draft.
+            {withdrawAsk.edit ? " Its job opens next, with the ticket ready to edit and resend." : " It can be fixed and resent from its job."}
           </div>
         </Dialog>
       )}

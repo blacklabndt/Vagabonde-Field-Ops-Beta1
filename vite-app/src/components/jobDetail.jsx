@@ -132,13 +132,23 @@ export function JobDetailScreen({ job, currentUser, onStartJha, onOpenTicket, on
 
   // Pulling a sent ticket back before the client signs it. The wording says
   // exactly what changes: the link dies, the ticket reopens as a draft.
-  const cancelApproval = async t => {
-    if (!confirm(`Cancel the approval request for ${t.id}? The client's signing link stops working and the ticket goes back to Draft to be fixed and resent.`)) return;
+  //
+  // "Cancel and edit" is the same act with the editor opened straight after,
+  // because pulling a ticket back is nearly always the first half of fixing
+  // it — and the two-step version (cancel here, find the row, tap Edit) was
+  // what the owner asked to be one step. The editor is only opened once the
+  // list has been re-read and the ticket is a draft again; the openers below
+  // refuse anything else.
+  const cancelApproval = async (t, thenEdit = false) => {
+    const tail = thenEdit ? " It opens for editing straight away." : " The ticket goes back to Draft to be fixed and resent.";
+    if (!confirm(`Cancel the approval request for ${t.id}? The client's signing link stops working.${tail}`)) return;
     setWithdrawingId(t.id);
     setRowError(p => ({ ...p, [t.id]: "" }));
-    try { await Db.withdrawTicketApproval(t.id); await refreshTickets(); }
+    let withdrawn = false;
+    try { await Db.withdrawTicketApproval(t.id); withdrawn = true; await refreshTickets(); }
     catch (e) { setRowError(p => ({ ...p, [t.id]: e.message || "Couldn't cancel the approval." })); }
     setWithdrawingId(null);
+    if (withdrawn && thenEdit) onOpenTicket(t.id);
   };
   const refresh = async () => {
     setLoading(true);
@@ -510,6 +520,17 @@ export function JobDetailScreen({ job, currentUser, onStartJha, onOpenTicket, on
                               onClick={e => { e.stopPropagation(); cancelApproval(t); }}>
                               {withdrawingId === t.id ? "Cancelling…" : "Cancel approval"}
                             </Btn>
+                            {/* Only for an account the editor would open for
+                                anyway (the same gate as the row's own Edit):
+                                without the ticket tab and the prices, a
+                                withdrawn ticket is a draft they cannot fill. */}
+                            {canRaiseTickets && !complete && (
+                              <Btn variant="ghost" disabled={withdrawingId === t.id}
+                                title="Cancels the approval request and opens the ticket for editing"
+                                onClick={e => { e.stopPropagation(); cancelApproval(t, true); }}>
+                                Cancel and edit
+                              </Btn>
+                            )}
                           </div>
                         )}
                       </td>
@@ -700,7 +721,14 @@ export function JobDetailScreen({ job, currentUser, onStartJha, onOpenTicket, on
       {viewingTicket && (
         <TicketViewDialog ticketId={viewingTicket} jobRecord={jobRecord}
           onClose={() => setViewingTicket(null)}
-          onSent={async () => { setViewingTicket(null); await refreshTickets(); }} />
+          onSent={async () => { setViewingTicket(null); await refreshTickets(); }}
+          // The viewer is where a sent ticket is read, so it is where the
+          // person notices the figure is wrong; the two cancel buttons live
+          // here as well as on the row. Same gates as the row, resolved here
+          // so the dialog knows nothing about roles.
+          onWithdraw={(t, thenEdit) => { setViewingTicket(null); return cancelApproval(t, thenEdit); }}
+          canEditAfter={canRaiseTickets && !complete}
+          canWithdraw={t => t.status === "Awaiting approval" && (isAdmin || t.technician_id === currentUser.id)} />
       )}
 
     </div>
@@ -718,7 +746,7 @@ export function JobDetailScreen({ job, currentUser, onStartJha, onOpenTicket, on
 //
 // The one thing it does write is the approval email, which changes nothing on
 // the ticket except that it has been sent again.
-function TicketViewDialog({ ticketId, jobRecord, onClose, onSent }) {
+function TicketViewDialog({ ticketId, jobRecord, onClose, onSent, onWithdraw, canEditAfter, canWithdraw }) {
   const [ticket, setTicket] = useState(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState("");
@@ -826,6 +854,18 @@ function TicketViewDialog({ ticketId, jobRecord, onClose, onSent }) {
     <Dialog title={`Field invoice ${ticketId}`} maxWidth={900} onClose={onClose}
       actions={<>
         <Btn variant="secondary" onClick={onClose}>Close</Btn>
+        {/* Pull a sent ticket back from here, where its figures are on
+            screen. The dialog closes first and the job page does the
+            asking, the refresh and (for "and edit") the opening — one
+            code path whichever button it started from. */}
+        {ticket && !sentNote && onWithdraw && canWithdraw && canWithdraw(ticket) && (
+          <>
+            <Btn variant="secondary" disabled={sending} onClick={() => onWithdraw({ id: ticketId }, false)}>Cancel approval</Btn>
+            {canEditAfter && (
+              <Btn variant="secondary" disabled={sending} onClick={() => onWithdraw({ id: ticketId }, true)}>Cancel and edit</Btn>
+            )}
+          </>
+        )}
         {canSend && (
           <Btn variant="primary" disabled={sending || !!sentNote} onClick={send}>
             {sending ? "Sending…"
