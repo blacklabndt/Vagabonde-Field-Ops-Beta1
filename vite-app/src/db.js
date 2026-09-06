@@ -3313,6 +3313,40 @@ export const Db = {
     }
   },
 
+  // Who prices from the house card, and which rate_schedules row the house
+  // card is. Both answers come out of the same read because the Rate admin
+  // screen needs both: how many clients an edit to the house card reprices,
+  // and the schedule whose history explains a follower's price rise.
+  // A client can have more than one schedule row — a newer draft in front of
+  // an older card — and the newest by effective_from is the one that prices
+  // their tickets, which is how _fetchPublishedRates decides it too. Paged,
+  // because "every schedule" is an all-of-them read.
+  async listScheduleFollowers() {
+    const rows = await fetchAllPages(async (page, size) => {
+      const { data, error, count } = await sbClient
+        .from("rate_schedules")
+        .select("id, client_id, follows_default, effective_from", page === 0 ? { count: "exact" } : {})
+        // Grouped by client with the newest first, so the first row seen for
+        // a client is the operative one; id keeps the pages from overlapping.
+        .order("client_id").order("effective_from", { ascending: false }).order("id")
+        .range(page * size, page * size + size - 1);
+      if (error) throw error;
+      return { rows: data || [], total: count ?? (data || []).length };
+    });
+    let defaultScheduleId = null;
+    const newest = new Map();
+    for (const r of rows) {
+      // No client_id is the house card itself; the first one seen is the
+      // newest, the same row getEditableSchedule opens.
+      if (!r.client_id) { if (!defaultScheduleId) defaultScheduleId = r.id; continue; }
+      if (!newest.has(r.client_id)) newest.set(r.client_id, r);
+    }
+    return {
+      defaultScheduleId,
+      followerIds: [...newest.values()].filter(r => r.follows_default).map(r => r.client_id)
+    };
+  },
+
   // Copies the house default into a schedule — the card itself, not just
   // its figures:
   //

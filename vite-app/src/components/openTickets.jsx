@@ -1,7 +1,8 @@
-import React, { useState, useEffect, useMemo } from "react";
-import { Blueprint, Btn, TableScroll, StatusTag, RowsPerPage, useRowsPerPage } from "./common.jsx";
+import React, { useState, useEffect, useMemo, useRef } from "react";
+import { Blueprint, Btn, TableScroll, StatusTag, RowsPerPage, useRowsPerPage, Dialog } from "./common.jsx";
 import { money, seesPrices } from "../data.js";
 import { Db } from "../db.js";
+import { runInOrder, approvalProgressLine } from "../approvalRun.js";
 import { OfflineCache } from "../offlineCache.js";
 import { TICKET_WIP_PREFIX, JHA_WIP_PREFIX, jobDbIdsOf, buildWipRows, wipJobLabel, wipWhen } from "../wipDrafts.js";
 
@@ -11,8 +12,15 @@ import { TICKET_WIP_PREFIX, JHA_WIP_PREFIX, jobDbIdsOf, buildWipRows, wipJobLabe
 // covers every technician's tickets); once it has left the truck it has no
 // business on this list, and the drawer badge counts the same set.
 
-export function OpenTicketsScreen({ tickets, loading, onOpenTicket, currentUser, openJhas = [], onOpenJob = null }) {
-  const open = tickets.filter(t => t.status === "Draft");
+export function OpenTicketsScreen({ tickets, loading, onOpenTicket, currentUser, openJhas = [], onOpenJob = null, onReload = null }) {
+  // The list this screen draws: the parent's copy, until cancelling drafts
+  // here re-reads it (the parent has no idea rows have gone). Cleared the
+  // moment the parent hands over a fresh array, so its own reload always
+  // wins over this one rather than being masked by it.
+  const [reloaded, setReloaded] = useState(null);
+  useEffect(() => { setReloaded(null); }, [tickets]);
+  const rows = reloaded || tickets;
+  const open = rows.filter(t => t.status === "Draft");
   // Integer-cents sum, per the house money rule (gstOn in data.js) — never
   // a running float of dollars, which drifts a half-cent low at some totals.
   const sum = arr => arr.reduce((s, t) => s + Math.round(t.amount * 100), 0) / 100;
@@ -43,6 +51,92 @@ export function OpenTicketsScreen({ tickets, loading, onOpenTicket, currentUser,
   // empty on a page that no longer exists.
   const safePage = Math.min(page, pageCount - 1);
   const pageRows = shown.slice(safePage * pageSize, safePage * pageSize + pageSize);
+
+  // ── Cancelling drafts in a batch ───────────────────────────────────────
+  // A season's worth of drafts is a list nobody maintains one ticket at a
+  // time: the editor's Cancel is three taps deep and a confirm per ticket.
+  // This ticks them off the list and runs the very same call, one after
+  // another, so a refusal on one — a client who signed it minutes ago — is a
+  // named line rather than the end of the run.
+  const [picked, setPicked] = useState(() => new Set());
+  const [askCancel, setAskCancel] = useState(false);
+  const [running, setRunning] = useState(false);
+  const [stopping, setStopping] = useState(false);
+  const [progress, setProgress] = useState("");
+  const [runResult, setRunResult] = useState("");
+  const stopRun = useRef(false);
+  // Read back out of the rows on screen rather than kept as its own array, so
+  // a ticket that has left the list — cancelled, sent, or filtered out of
+  // view — leaves the selection with it. The button then can never count
+  // something the person cannot see, and the dialog can never name it.
+  const chosen = shown.filter(t => picked.has(t.id));
+  const togglePick = id => setPicked(prev => {
+    const next = new Set(prev);
+    if (next.has(id)) next.delete(id); else next.add(id);
+    return next;
+  });
+
+  // The parent owns this list and the drawer badge counts the same drafts, so
+  // its reload is the one that puts both right. Without it this screen at
+  // least re-reads its own, which is the part being looked at.
+  const reloadAfterCancel = async goneIds => {
+    if (onReload) { onReload(); return; }
+    try {
+      setReloaded(await Db.listMyTickets(currentUser ? currentUser.id : null));
+    } catch (e) {
+      // No signal for the re-read, and the tickets are gone all the same —
+      // drop them by hand rather than leave the tiles counting work that no
+      // longer exists.
+      setReloaded(prev => (prev || tickets).filter(t => !goneIds.has(t.id)));
+    }
+  };
+
+  const cancelChosen = async () => {
+    setAskCancel(false);
+    // Fixed here, before anything is deleted: the run must not grow or shrink
+    // under its own progress line.
+    const list = chosen;
+    if (!list.length) return;
+    stopRun.current = false;
+    setStopping(false);
+    setRunning(true);
+    setRunResult("");
+    setProgress(approvalProgressLine(1, list.length, list[0].id));
+
+    const out = await runInOrder(list, async t => {
+      try {
+        await Db.deleteTicket(t.id);
+      } catch (e) {
+        // Already cancelled on another device is the outcome that was asked
+        // for — the same reading the ticket editor's own Cancel takes.
+        if (!e.ticketGone) throw e;
+      }
+    }, {
+      shouldStop: () => stopRun.current,
+      onStart: (n, total, t) => setProgress(approvalProgressLine(n, total, t.id))
+    });
+
+    setProgress("");
+    const parts = [`Cancelled ${out.done.length} of ${list.length}`];
+    if (out.stopped && out.notStarted.length) parts.push(`stopped — ${out.notStarted.length} not started`);
+    // Named by ticket number and by reason, never counted: "3 failed" leaves
+    // a technician hunting through the list for which three, and the reason
+    // is the part that says whether pressing again will help.
+    if (out.failed.length) {
+      const named = out.failed
+        .map(f => `${f.item.id} — ${(f.error && f.error.message) || "couldn't be cancelled"}`)
+        .join("; ");
+      parts.push(`${out.failed.length} still here: ${named}`);
+    }
+    setRunResult(parts.join(" · "));
+    // Whatever did not go stays ticked, so pressing the button again is the
+    // retry rather than a hunt for the ones that refused.
+    setPicked(new Set([...out.failed.map(f => f.item.id), ...out.notStarted.map(t => t.id)]));
+    setRunning(false);
+    setStopping(false);
+    stopRun.current = false;
+    await reloadAfterCancel(new Set(out.done.map(t => t.id)));
+  };
 
   // ── Half-entered on this device ────────────────────────────────────────
   // The ticket editor and the JHA builder each keep a recovery copy of what
@@ -94,7 +188,10 @@ export function OpenTicketsScreen({ tickets, loading, onOpenTicket, currentUser,
     })();
     return () => { live = false; };
   }, [wipEntries]);
-  const wipRows = useMemo(() => buildWipRows(wipEntries, { tickets, jobs: wipJobs }), [wipEntries, tickets, wipJobs]);
+  // Over the rows this screen is showing, not the parent's copy: a draft
+  // cancelled here is gone, and the strip must stop naming it as the ticket
+  // a half-entered copy belongs to.
+  const wipRows = useMemo(() => buildWipRows(wipEntries, { tickets: rows, jobs: wipJobs }), [wipEntries, rows, wipJobs]);
 
   const openWipJob = row => {
     if (!onOpenJob) return;
@@ -216,17 +313,62 @@ export function OpenTicketsScreen({ tickets, loading, onOpenTicket, currentUser,
         <span style={{ fontSize: 13, color: "color-mix(in srgb, var(--color-text) 60%, transparent)", whiteSpace: "nowrap" }}>
           {needle ? `${shown.length} of ${open.length} shown` : `${open.length} draft${open.length === 1 ? "" : "s"}`}
         </span>
+        {/* The tick-all button says out loud which set it takes — every draft
+            the filter leaves standing, across all of its pages, not the
+            twenty-five rows in view. On a filtered list that is the whole
+            point of the filter; unfiltered it is the lot. */}
+        {open.length > 0 && (<>
+          <Btn variant="secondary" style={{ minHeight: 38 }} disabled={running || !shown.length}
+            onClick={() => setPicked(new Set(shown.map(t => t.id)))}>
+            {needle ? `Tick all ${shown.length} matching` : `Tick all ${open.length} draft${open.length === 1 ? "" : "s"}`}
+          </Btn>
+          <Btn variant="secondary" style={{ minHeight: 38 }} disabled={running || !picked.size}
+            onClick={() => setPicked(new Set())}>Clear</Btn>
+          <Btn variant="primary" style={{ minHeight: 38, marginLeft: "auto" }}
+            disabled={!chosen.length || running}
+            onClick={() => setAskCancel(true)}
+            title="Deletes the ticked drafts outright, one after another.">
+            {running ? "Cancelling…" : `Cancel ${chosen.length} draft${chosen.length === 1 ? "" : "s"}`}
+          </Btn>
+          {/* A run of a dozen deletions has to be callable off — the wrong
+              ticket number is spotted on the second one, not the last. It
+              starts no more; the one in hand finishes, because a ticket
+              half-way through its delete is not a state to stop in. */}
+          {running && (
+            <Btn variant="secondary" style={{ minHeight: 38 }} disabled={stopping}
+              onClick={() => { stopRun.current = true; setStopping(true); }}
+              title="Finishes the ticket being cancelled and leaves the rest.">
+              {stopping ? "Stopping…" : "Stop"}
+            </Btn>
+          )}
+        </>)}
       </div>
+      {(progress || runResult) && (
+        <div style={{ fontSize: 13, color: "color-mix(in srgb, var(--color-text) 65%, transparent)", marginBottom: 12 }}>
+          {progress || runResult}
+        </div>
+      )}
 
       <Blueprint style={{ padding: "6px 18px 14px" }}>
         {loading && <div style={{ padding: "12px 4px", fontSize: 13, color: "color-mix(in srgb, var(--color-text) 55%, transparent)" }}>Loading your tickets…</div>}
         <TableScroll><table className="table table-wide">
           <thead>
-            <tr><th>Ticket</th><th>Date</th><th>Age</th><th>Job</th><th>Project + client</th>{showAmounts && <th>Amount</th>}<th>Status</th><th></th></tr>
+            <tr>
+              {/* Takes the filtered set, every page of it — the same set the
+                  tick-all button names, so the two can't disagree. */}
+              <th style={{ width: 34 }}>
+                <input type="checkbox" disabled={running || !shown.length}
+                  aria-label={needle ? `Select all ${shown.length} drafts matching the filter` : "Select all your drafts"}
+                  title={needle ? `Ticks all ${shown.length} matching drafts, not only this page` : "Ticks every draft, not only this page"}
+                  checked={shown.length > 0 && chosen.length === shown.length}
+                  onChange={e => setPicked(e.target.checked ? new Set(shown.map(t => t.id)) : new Set())} />
+              </th>
+              <th>Ticket</th><th>Date</th><th>Age</th><th>Job</th><th>Project + client</th>{showAmounts && <th>Amount</th>}<th>Status</th><th></th>
+            </tr>
           </thead>
           <tbody>
             {!loading && !shown.length && (
-              <tr><td colSpan={showAmounts ? 8 : 7} style={{ color: "color-mix(in srgb, var(--color-text) 55%, transparent)" }}>
+              <tr><td colSpan={showAmounts ? 9 : 8} style={{ color: "color-mix(in srgb, var(--color-text) 55%, transparent)" }}>
                 {open.length
                   ? `No draft matches "${filter.trim()}" — clear the filter to see all ${open.length}.`
                   : "Nothing to send — every ticket you've raised has gone out to the client."}
@@ -234,6 +376,10 @@ export function OpenTicketsScreen({ tickets, loading, onOpenTicket, currentUser,
             )}
             {!loading && pageRows.map(t => (
               <tr key={t.id}>
+                <td>
+                  <input type="checkbox" aria-label={`Select draft ticket ${t.id}`} disabled={running}
+                    checked={picked.has(t.id)} onChange={() => togglePick(t.id)} />
+                </td>
                 {/* The way into a ticket, and it answered only to a mouse.
                     Same shape as the ticket rows on Job detail: a button in
                     a cell, Enter or Space to open. */}
@@ -250,7 +396,9 @@ export function OpenTicketsScreen({ tickets, loading, onOpenTicket, currentUser,
                 <td>{t.project}<div style={{ fontSize: 11, color: "color-mix(in srgb, var(--color-text) 55%, transparent)" }}>{t.client}</div></td>
                 {showAmounts && <td className="tabular">{money(t.amount)}</td>}
                 <td><StatusTag status={t.status} /></td>
-                <td><Btn variant="secondary" onClick={() => onOpenTicket(t)}>Finish &amp; send</Btn></td>
+                {/* Shut while a cancel run is going: opening a ticket leaves
+                    this screen, and the run is on it. */}
+                <td><Btn variant="secondary" disabled={running} onClick={() => onOpenTicket(t)}>Finish &amp; send</Btn></td>
               </tr>
             ))}
           </tbody>
@@ -266,6 +414,35 @@ export function OpenTicketsScreen({ tickets, loading, onOpenTicket, currentUser,
           </div>
         )}
       </Blueprint>
+
+      {/* Asked once for the whole batch, and it names every ticket that goes:
+          a count is not something anybody can check, and this is a real
+          delete. The wording is the ticket editor's own Cancel, in the
+          plural — the hours and the dose go with the ticket there too. */}
+      {askCancel && chosen.length > 0 && (
+        <Dialog title={`Cancel ${chosen.length} draft${chosen.length === 1 ? "" : "s"}`} maxWidth={480}
+          onClose={() => setAskCancel(false)}
+          actions={<>
+            <Btn variant="secondary" onClick={() => setAskCancel(false)}>Keep them</Btn>
+            <Btn variant="primary" onClick={cancelChosen}>Cancel {chosen.length} draft{chosen.length === 1 ? "" : "s"}</Btn>
+          </>}>
+          <div style={{ fontSize: 14 }}>
+            {chosen.length === 1
+              ? "This ticket is deleted outright, along with any hours and dose recorded on it. This can't be undone."
+              : "These tickets are deleted outright, along with any hours and dose recorded on them. This can't be undone."}
+          </div>
+          <ul style={{ margin: 0, paddingLeft: 20, fontSize: 14, maxHeight: 220, overflowY: "auto" }}>
+            {chosen.map(t => (
+              <li key={t.id}>
+                {t.id} — {t.job}{showAmounts ? ` · ${money(t.amount)}` : ""}
+              </li>
+            ))}
+          </ul>
+          <div style={{ fontSize: 12, color: "color-mix(in srgb, var(--color-text) 65%, transparent)" }}>
+            They go one after another and can be stopped part way. Any the office refuses — a client may have just approved one — are named and stay on the list.
+          </div>
+        </Dialog>
+      )}
     </div>
   );
 }

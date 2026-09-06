@@ -31,6 +31,11 @@ export function RateAdminScreen() {
   const [justPublished, setJustPublished] = useState(false);
   const [showNewClient, setShowNewClient] = useState(false);
   const [showNewOverride, setShowNewOverride] = useState(false);
+  // Who follows the house card, and which schedule the house card is. null
+  // until the read lands, so the header says nothing rather than flashing
+  // "No client follows this card yet" at an admin whose clients all do.
+  const [follow, setFollow] = useState(null);
+  const [showFollowers, setShowFollowers] = useState(false);
 
   const loadClients = async () => {
     try {
@@ -43,8 +48,15 @@ export function RateAdminScreen() {
     try { setOverrides(await Db.listOverrides()); }
     catch (e) { console.error("Couldn't load overrides:", e.message); }
   };
+  // Who follows the house card is a courtesy, not the rates themselves — a
+  // failed read leaves the count off the header rather than a red box over a
+  // screen whose figures loaded fine.
+  const loadFollow = async () => {
+    try { setFollow(await Db.listScheduleFollowers()); }
+    catch (e) { console.error("Couldn't load who follows the house card:", e.message); }
+  };
 
-  useEffect(() => { loadClients(); loadOverrides(); }, []);
+  useEffect(() => { loadClients(); loadOverrides(); loadFollow(); }, []);
 
   // The `live` flag on the effect below only stops a *later* load starting —
   // once one is in flight its setState is unguarded, so switching clients
@@ -100,6 +112,18 @@ export function RateAdminScreen() {
   // The switch: this client's tickets price from the house card, and the
   // lines on screen are the house card's, read-only here.
   const following = !isDefault && !!(schedule && schedule.follows_default);
+  // How many clients an edit to the house card reprices, and who they are.
+  // The count comes from the ids, the names from the client list already
+  // loaded — a name that can't be matched is left out of the list rather
+  // than shown blank, and the count still says how many there are.
+  const followerCount = follow ? follow.followerIds.length : 0;
+  const followerNames = follow
+    ? follow.followerIds
+      .map(id => { const c = clients.find(x => x.id === id); return c ? c.name : ""; })
+      .filter(Boolean)
+      .sort((a, b) => a.localeCompare(b))
+    : [];
+  const followerPhrase = followerCount === 1 ? "1 client follows" : `${followerCount} clients follow`;
   // A group's rates render as plain figures when it can't be edited —
   // while its rows are being reordered, or while the card follows the
   // house card. They are money, and they go through money() like every
@@ -242,6 +266,8 @@ export function RateAdminScreen() {
         await Db.setFollowsDefault(schedule.id, true);
       }
       await loadSchedule();
+      // The switch just changed the count the house card's header shows.
+      await loadFollow();
     } catch (e) {
       setError(e.message || "Couldn't change who prices this client's tickets.");
       // Reconcile the switch with what actually landed — without this the
@@ -590,11 +616,21 @@ export function RateAdminScreen() {
                 {isDefault && <TagX variant="accent">House rate card</TagX>}
                 {!isDefault && client.effective_from && <span style={{ fontSize: 12, color: "color-mix(in srgb, var(--color-text) 55%, transparent)" }}>effective {client.effective_from}</span>}
                 {!isDefault && (
-                  <div style={{ marginLeft: "auto", display: "flex", alignItems: "center", gap: 8, opacity: switching ? 0.6 : 1 }}>
-                    <span style={{ fontSize: 12, fontWeight: 600, color: following ? "var(--color-accent-700)" : "color-mix(in srgb, var(--color-text) 55%, transparent)" }}>
-                      {switching ? "Saving…" : "Follows the house card"}
-                    </span>
-                    <Switch on={following} onClick={toggleFollow} label="Follows the house card" />
+                  <div style={{ marginLeft: "auto", display: "flex", flexDirection: "column", alignItems: "flex-end", gap: 2, opacity: switching ? 0.6 : 1 }}>
+                    <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
+                      <span style={{ fontSize: 12, fontWeight: 600, color: following ? "var(--color-accent-700)" : "color-mix(in srgb, var(--color-text) 55%, transparent)" }}>
+                        {switching ? "Saving…" : "Follows the house card"}
+                      </span>
+                      <Switch on={following} onClick={toggleFollow} label="Follows the house card" />
+                    </div>
+                    {/* Beside the switch that decides it: where this client's
+                        prices actually come from, and how much company they
+                        keep — one edit to the house card moves all of them. */}
+                    {following && follow && (
+                      <span style={{ fontSize: 11, color: "color-mix(in srgb, var(--color-text) 55%, transparent)" }}>
+                        Prices come from the house card — {followerPhrase} it
+                      </span>
+                    )}
                   </div>
                 )}
               </div>
@@ -605,6 +641,45 @@ export function RateAdminScreen() {
                     ? "This client's tickets price from the house card, live — the rates below are Default rates, read-only here. Turn the switch off to give them their own card; it starts from these figures."
                     : "This client has their own card. Turning the switch on prices their tickets from the house card instead; nothing here is lost, and it comes back when the switch is turned off."}
               </div>
+
+              {/* Who a rate typed on this card is about to reprice. The names
+                  are on hover for a quick look and in the list for a proper
+                  one — "raise the 6in film rate" is a different decision at
+                  one client than at eleven. */}
+              {isDefault && follow && (
+                <div style={{ fontSize: 12, marginBottom: 4 }}>
+                  {followerCount === 0 || !followerNames.length ? (
+                    <span style={{ color: "color-mix(in srgb, var(--color-text) 60%, transparent)" }}>
+                      {followerCount === 0
+                        ? "No client follows this card yet"
+                        : `${followerPhrase} this card`}
+                    </span>
+                  ) : (
+                    <>
+                      <button type="button"
+                        title={followerNames.join(", ")}
+                        aria-expanded={showFollowers}
+                        aria-controls="house-card-followers"
+                        onClick={() => setShowFollowers(v => !v)}
+                        style={{
+                          background: "none", border: 0, padding: 0, font: "inherit",
+                          color: "var(--color-accent-700)", fontWeight: 600,
+                          textDecoration: "underline", cursor: "pointer"
+                        }}>
+                        {followerPhrase} this card
+                      </button>
+                      <span style={{ color: "color-mix(in srgb, var(--color-text) 60%, transparent)" }}>
+                        {" "}— an edit here reprices {followerCount === 1 ? "them" : "all of them"}
+                      </span>
+                      {showFollowers && (
+                        <ul id="house-card-followers" style={{ margin: "6px 0 0", paddingLeft: 18, color: "color-mix(in srgb, var(--color-text) 70%, transparent)" }}>
+                          {followerNames.map(n => <li key={n}>{n}</li>)}
+                        </ul>
+                      )}
+                    </>
+                  )}
+                </div>
+              )}
 
 
 
@@ -794,13 +869,24 @@ export function RateAdminScreen() {
           onCreated={async created => {
             setShowNewClient(false);
             await loadClients();
+            // A new client starts on the house card, so the header's count
+            // has just gone up by one.
+            loadFollow();
             setSelected(created.id);
           }}
         />
       )}
 
       {showHistory && schedule && (
-        <RateHistoryDialog scheduleId={schedule.id} onClose={() => setShowHistory(false)} />
+        <RateHistoryDialog
+          scheduleId={schedule.id}
+          // A follower's own history is empty by definition — the house card
+          // is what repriced them — so the dialog is given the house card to
+          // read as well. Only while the switch is on: a client back on their
+          // own card is asking about their own figures.
+          houseScheduleId={following && follow ? follow.defaultScheduleId : null}
+          onClose={() => setShowHistory(false)}
+        />
       )}
 
     </div>
@@ -816,46 +902,89 @@ function RateInput({ value, onChange }) {
 // Every rate change ever made to this client's schedule, newest first —
 // backed by the trigger that logs old/new value + who + when on every
 // rate_lines update (see migrations).
-function RateHistoryDialog({ scheduleId, onClose }) {
+function RateHistoryDialog({ scheduleId, houseScheduleId, onClose }) {
   const [rows, setRows] = useState([]);
+  const [houseRows, setHouseRows] = useState([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState("");
 
+  // The house card is passed only for a client that follows it, and the
+  // dialog was answering "why did our prices go up?" with an empty list —
+  // the change is on the house card, not on theirs.
+  const alsoHouse = !!houseScheduleId && houseScheduleId !== scheduleId;
+
   useEffect(() => {
-    Db.getRateLineHistory(scheduleId)
-      .then(setRows)
-      .catch(e => setError(e.message || "Couldn't load rate history."))
-      .finally(() => setLoading(false));
-  }, [scheduleId]);
+    let live = true;
+    setLoading(true);
+    Promise.all([
+      Db.getRateLineHistory(scheduleId),
+      alsoHouse ? Db.getRateLineHistory(houseScheduleId) : Promise.resolve([])
+    ])
+      .then(([own, house]) => { if (live) { setRows(own); setHouseRows(house); } })
+      .catch(e => { if (live) setError(e.message || "Couldn't load rate history."); })
+      .finally(() => { if (live) setLoading(false); });
+    return () => { live = false; };
+  }, [scheduleId, houseScheduleId, alsoHouse]);
 
   return (
     <Dialog title="Rate history" maxWidth={620} onClose={onClose} actions={<Btn variant="secondary" onClick={onClose}>Close</Btn>}>
       <ErrorBox>{error}</ErrorBox>
       {loading && <Loading />}
-      {!loading && !rows.length && (
+      {!loading && !alsoHouse && !rows.length && (
         <div style={{ fontSize: 13, color: "color-mix(in srgb, var(--color-text) 60%, transparent)" }}>
           No rate changes recorded yet for this schedule.
         </div>
       )}
-      {!loading && rows.length > 0 && (
-        <div style={{ display: "grid", gap: 10, maxHeight: 420, overflowY: "auto" }}>
-          {rows.map(h => (
-            <div key={h.id} style={{ borderBottom: "1px solid var(--color-neutral-300)", paddingBottom: 8 }}>
-              <div style={{ display: "flex", justifyContent: "space-between", gap: 10, fontSize: 14 }}>
-                <span style={{ fontWeight: 600 }}>{h.label}</span>
-                {/* money(), like every other figure in the app: this dialog
-                    is where an argument about a price gets settled, and it
-                    was the one screen printing $1250.00. */}
-                <span className="tabular">{money(h.oldRate)} → {money(h.newRate)}</span>
-              </div>
-              <div style={{ fontSize: 11, color: "color-mix(in srgb, var(--color-text) 55%, transparent)" }}>
-                {h.changedBy} · {new Date(h.changedAt).toLocaleString("en-CA", { day: "2-digit", month: "short", year: "numeric", hour: "numeric", minute: "2-digit" })}
-              </div>
+      {!loading && !alsoHouse && rows.length > 0 && <RateHistoryRows rows={rows} />}
+      {!loading && alsoHouse && (
+        <div style={{ display: "grid", gap: 14, maxHeight: 460, overflowY: "auto" }}>
+          <div>
+            <div style={{ fontSize: 11, textTransform: "uppercase", letterSpacing: ".08em", color: "var(--color-accent)", marginBottom: 6 }}>
+              This client's own card
             </div>
-          ))}
+            {rows.length ? <RateHistoryRows rows={rows} scroll={false} /> : (
+              <div style={{ fontSize: 13, color: "color-mix(in srgb, var(--color-text) 60%, transparent)" }}>
+                Nothing has changed on this client's own card — the house card prices their tickets.
+              </div>
+            )}
+          </div>
+          <div>
+            <div style={{ fontSize: 11, textTransform: "uppercase", letterSpacing: ".08em", color: "var(--color-accent)", marginBottom: 6 }}>
+              Changes to the house card, which this client follows
+            </div>
+            {houseRows.length ? <RateHistoryRows rows={houseRows} scroll={false} /> : (
+              <div style={{ fontSize: 13, color: "color-mix(in srgb, var(--color-text) 60%, transparent)" }}>
+                No rate changes recorded yet on the house card.
+              </div>
+            )}
+          </div>
         </div>
       )}
     </Dialog>
+  );
+}
+
+// One list of rate changes. Its own scroller when it is the whole dialog;
+// inside the two headings it isn't, or the dialog would carry a scrollbar
+// within a scrollbar.
+function RateHistoryRows({ rows, scroll = true }) {
+  return (
+    <div style={{ display: "grid", gap: 10, ...(scroll ? { maxHeight: 420, overflowY: "auto" } : {}) }}>
+      {rows.map(h => (
+        <div key={h.id} style={{ borderBottom: "1px solid var(--color-neutral-300)", paddingBottom: 8 }}>
+          <div style={{ display: "flex", justifyContent: "space-between", gap: 10, fontSize: 14 }}>
+            <span style={{ fontWeight: 600 }}>{h.label}</span>
+            {/* money(), like every other figure in the app: this dialog
+                is where an argument about a price gets settled, and it
+                was the one screen printing $1250.00. */}
+            <span className="tabular">{money(h.oldRate)} → {money(h.newRate)}</span>
+          </div>
+          <div style={{ fontSize: 11, color: "color-mix(in srgb, var(--color-text) 55%, transparent)" }}>
+            {h.changedBy} · {new Date(h.changedAt).toLocaleString("en-CA", { day: "2-digit", month: "short", year: "numeric", hour: "numeric", minute: "2-digit" })}
+          </div>
+        </div>
+      ))}
+    </div>
   );
 }
 

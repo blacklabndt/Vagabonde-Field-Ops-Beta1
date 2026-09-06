@@ -231,6 +231,12 @@ Cloudflare Worker `solitary-snowflake-ee22` (assets + the `/approve` and
   total or "N required left" and the primary button; the pages pad their
   bottom for it. The dose export on Timesheets is every role's, scoped to
   the signed-in person for a non-admin.
+- Open tickets cancels drafts in bulk through the same `Db.deleteTicket` the
+  editor's Cancel uses, one after another (`runInOrder`), naming failures
+  and leaving them ticked; App passes `onReload` so the drawer badge moves
+  with the list. Rate admin counts the house card's followers
+  (`listScheduleFollowers`, newest schedule per client) and a following
+  client's Rate history shows the house card's changes under its own.
 - The JHA opens with nothing ticked (`SEED_HAZARDS` all `on: false`); the
   ticket editor asks once (`SANE_QUANTITY_*`, `SANE_CREW_HOURS` in data.js)
   before saving a figure that looks like a typo, and remembers the answer for

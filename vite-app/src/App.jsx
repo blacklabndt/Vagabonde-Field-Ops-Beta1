@@ -1308,7 +1308,10 @@ export function App() {
       // number when it is already in hand would be a network call the strip
       // has no signal to make.
       body = <OpenTicketsScreen tickets={myTickets} loading={myTicketsLoading} onOpenTicket={openTicket} currentUser={currentUser}
-        openJhas={myOpenJhas} onOpenJob={j => (j.dbId ? openJob(j) : openJobByNumber(j.job))} />;
+        openJhas={myOpenJhas} onOpenJob={j => (j.dbId ? openJob(j) : openJobByNumber(j.job))}
+        // After a bulk cancel the drawer badge has to move with the list; this
+        // is the same read that fills it on arrival.
+        onReload={loadMyTickets} />;
       break;
     case "timesheets":
       body = <TimesheetsScreen currentUser={currentUser} />;
