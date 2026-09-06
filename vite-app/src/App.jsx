@@ -6,6 +6,8 @@ import { tabList, Blueprint, Btn, ErrorBox, ErrorBoundary, TagX, Toast, Loading,
 import { Toasts } from "./toastBus.js";
 import { QueueBadge, QueueDialog } from "./components/queuePanel.jsx";
 import { FeatureRequestDialog } from "./components/featureRequest.jsx";
+import { HelpDialog } from "./components/helpDialog.jsx";
+import { helpFor } from "./help.js";
 import { OfflineQueue } from "./offlineQueue.js";
 import { ticketFingerprint, replacedNewerWork } from "./ticketFingerprint.js";
 import { OfflineCache } from "./offlineCache.js";
@@ -305,6 +307,11 @@ export function App() {
   useEffect(() => SwUpdates.subscribe(setUpdateReady), []);
   const [showQueue, setShowQueue] = useState(false);
   const [showFeature, setShowFeature] = useState(false);
+  // The "?" beside the section name. Held here, above the early returns,
+  // with every other hook — one put below a return crashed the ticket
+  // screen. It is not part of the address: help is a thing you open on the
+  // screen you are on, not somewhere a reload should land you.
+  const [showHelp, setShowHelp] = useState(false);
   const [egg, setEgg] = useState(false);
   // Every save in the app arrives here, from db.js by way of the toast bus.
   const [toast, setToast] = useState(null);
@@ -993,6 +1000,9 @@ export function App() {
   // The drawer never lists the contextual screens, whatever the account may
   // access — see CONTEXT_TABS. They are reached from a job, deliberately.
   const allowedTabs = TABS.filter(t => myTabs.includes(t.key) && !CONTEXT_TABS.includes(t.key));
+  // Read from `screen` rather than remembered when the button was pressed,
+  // so the panel and the section name in the bar are always the same screen.
+  const helpEntry = helpFor(screen);
   const goto = key => { if (myTabs.includes(key)) { if (key === "ticket") setActiveTicket(null); setContextScreen(""); setScreen(key); setMenuOpen(false); } };
   // Reached from a button inside another screen (a job card, "Start JHA",
   // "New ticket") rather than the tab menu — always allowed, even when the
@@ -1371,6 +1381,20 @@ export function App() {
           style={{ fontFamily: "var(--font-heading)", fontWeight: 600, fontSize: 14, letterSpacing: ".04em", textTransform: "uppercase", color: "var(--color-accent)" }}>
           {(TABS.find(t => t.key === screen) || {}).label || ""}
         </span>
+        {/* What this screen is for, beside its name — the one place the
+            question gets asked. Only where there is something to say: a
+            screen with no entry in help.js has no button rather than a
+            button that opens nothing. The panel travels with the app, so
+            it answers in a truck with no signal too. */}
+        {helpEntry && (
+          <button
+            type="button"
+            className="btn btn-secondary topbar-help"
+            aria-label="How this screen works"
+            title="How this screen works"
+            onClick={() => setShowHelp(true)}
+          >?</button>
+        )}
         {cacheState.servingCached && (
           <TagX variant="outline" title={`No connection. Showing what this device saved at ${new Date(cacheState.at).toLocaleTimeString("en-CA", { hour: "2-digit", minute: "2-digit", hour12: false })}.`}>
             Offline
@@ -1524,6 +1548,13 @@ export function App() {
       )}
       {showFeature && (
         <FeatureRequestDialog onClose={() => setShowFeature(false)} />
+      )}
+      {/* Gated on the entry as well as the flag: a screen that changes out
+          from under an open panel — an account that loses a tab mid-session
+          is moved to another screen — would otherwise leave a dialog with
+          nothing in it and no obvious way out. */}
+      {showHelp && helpEntry && (
+        <HelpDialog screenKey={screen} onClose={() => setShowHelp(false)} />
       )}
       {updateReady && !updateDeferred && <UpdateBanner onLater={() => setUpdateDeferred(true)} />}
       <Toast message={toast && toast.text} tone={toast && toast.tone} onDone={() => setToast(null)} />

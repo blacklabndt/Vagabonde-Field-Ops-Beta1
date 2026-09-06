@@ -321,15 +321,42 @@ function RecentErrorsPanel() {
   const [err, setErr] = useState("");
 
   const [clearing, setClearing] = useState(false);
+  // One function's errors, or all of them; the names come from the log
+  // itself. `more` is true while the last page came back full, so the
+  // button disappears exactly when there is nothing older to show.
+  const [names, setNames] = useState([]);
+  const [fn, setFn] = useState("");
+  const [more, setMore] = useState(false);
+  const [loadingMore, setLoadingMore] = useState(false);
+  const PAGE = 20;
 
-  const load = () => {
+  const load = (functionName = fn) => {
     setLoading(true);
     // The reason the last read failed is not the reason for this one, and
     // leaving it up made every later Refresh look like it had failed too.
     setErr("");
-    Db.listFunctionErrors().then(setErrors).catch(e => setErr(e.message || "Couldn't load recent errors.")).finally(() => setLoading(false));
+    Promise.all([Db.listFunctionErrors(PAGE, { functionName }), Db.listFunctionErrorNames().catch(() => null)])
+      .then(([rows, seen]) => { setErrors(rows); setMore(rows.length === PAGE); if (seen) setNames(seen); })
+      .catch(e => setErr(e.message || "Couldn't load recent errors."))
+      .finally(() => setLoading(false));
   };
   useEffect(() => { load(); }, []);
+
+  const loadMore = async () => {
+    const last = errors[errors.length - 1];
+    if (!last) return;
+    setLoadingMore(true);
+    setErr("");
+    try {
+      const rows = await Db.listFunctionErrors(PAGE, { before: last, functionName: fn });
+      setErrors(p => p.concat(rows));
+      setMore(rows.length === PAGE);
+    } catch (e) {
+      setErr(e.message || "Couldn't load older errors.");
+    } finally {
+      setLoadingMore(false);
+    }
+  };
 
   // The whole log, not the twenty on screen: the list shows the newest
   // twenty, and clearing only those would leave older rows to surface as
@@ -352,8 +379,16 @@ function RecentErrorsPanel() {
     <Blueprint style={{ padding: "18px 20px", minWidth: 0 }}>
       <div style={{ display: "flex", alignItems: "center", gap: 10, marginBottom: 4, flexWrap: "wrap" }}>
         <div style={{ ...SECTION_TITLE, marginBottom: 0 }}>Recent background errors</div>
-        <span style={{ marginLeft: "auto", display: "flex", gap: 8 }}>
-          <Btn variant="secondary" onClick={load} disabled={loading || clearing}>{loading ? "Loading…" : "Refresh"}</Btn>
+        <span style={{ marginLeft: "auto", display: "flex", gap: 8, alignItems: "center", flexWrap: "wrap" }}>
+          {names.length > 1 && (
+            <select className="input" aria-label="Which function" value={fn}
+              style={{ width: "auto", minHeight: 34, padding: "4px 8px", fontSize: 13 }}
+              onChange={e => { setFn(e.target.value); load(e.target.value); }}>
+              <option value="">All functions</option>
+              {names.map(n => <option key={n} value={n}>{n}</option>)}
+            </select>
+          )}
+          <Btn variant="secondary" onClick={() => load()} disabled={loading || clearing}>{loading ? "Loading…" : "Refresh"}</Btn>
           <Btn variant="danger" onClick={clear} disabled={loading || clearing || !errors.length}>{clearing ? "Clearing…" : "Clear"}</Btn>
         </span>
       </div>
@@ -363,6 +398,11 @@ function RecentErrorsPanel() {
       <ErrorBox>{err}</ErrorBox>
       {!loading && !errors.length && !err && (
         <div style={{ fontSize: 13, color: "color-mix(in srgb, var(--color-text) 55%, transparent)" }}>Nothing logged — everything's been going through cleanly.</div>
+      )}
+      {errors.length > 0 && (
+        <div style={{ fontSize: 12, color: "color-mix(in srgb, var(--color-text) 55%, transparent)", marginBottom: 8 }}>
+          Showing the newest {errors.length}{fn ? ` from ${fn}` : ""}{more ? " — there are older ones" : " — that is all of them"}.
+        </div>
       )}
       {errors.length > 0 && (
         <div style={{ display: "grid", gap: 8 }}>
@@ -381,6 +421,11 @@ function RecentErrorsPanel() {
               <div style={{ marginTop: 4, whiteSpace: "pre-wrap", overflowWrap: "anywhere" }}>{e.message}</div>
             </div>
           ))}
+        </div>
+      )}
+      {more && !loading && (
+        <div style={{ marginTop: 10 }}>
+          <Btn variant="secondary" onClick={loadMore} disabled={loadingMore || clearing}>{loadingMore ? "Loading…" : "Load 20 more"}</Btn>
         </div>
       )}
     </Blueprint>

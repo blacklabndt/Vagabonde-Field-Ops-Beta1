@@ -3467,11 +3467,30 @@ export const Db = {
   },
 
   // ── Users & access ───────────────────────────────────────────────────
-  async listFunctionErrors(limit = 20) {
-    const { data, error } = await sbClient
-      .from("function_errors").select("*").order("created_at", { ascending: false }).limit(limit);
+  // Newest first. `before` is the last row already on screen, so "load more"
+  // is a keyset walk — the twenty older than that one — rather than an
+  // offset that would skip a row when the log grew between two presses.
+  // `functionName` narrows to one function, because twenty copies of the same
+  // line hide the older, different error that matters.
+  async listFunctionErrors(limit = 20, { before = null, functionName = "" } = {}) {
+    let q = sbClient.from("function_errors").select("*");
+    if (functionName) q = q.eq("function_name", functionName);
+    if (before && before.created_at) {
+      // Quoted: a timestamp carries ":" and "+", which PostgREST reads as
+      // its own syntax inside an or() unless the value is in double quotes.
+      const ts = `"${before.created_at}"`;
+      q = q.or(`created_at.lt.${ts},and(created_at.eq.${ts},id.lt.${before.id})`);
+    }
+    const { data, error } = await q.order("created_at", { ascending: false }).order("id", { ascending: false }).limit(limit);
     if (error) throw error;
     return data;
+  },
+  // The names in the log, for the panel's filter — the log is small (it is
+  // cleared by hand) so a distinct over it is a cheap read.
+  async listFunctionErrorNames() {
+    const { data, error } = await sbClient.from("function_errors").select("function_name").order("function_name");
+    if (error) throw error;
+    return [...new Set((data || []).map(r => r.function_name))];
   },
 
   // The Admin screen's Clear button. A definer RPC, Admin-only inside the

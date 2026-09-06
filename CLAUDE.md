@@ -237,6 +237,12 @@ Cloudflare Worker `solitary-snowflake-ee22` (assets + the `/approve` and
   with the list. Rate admin counts the house card's followers
   (`listScheduleFollowers`, newest schedule per client) and a following
   client's Rate history shows the house card's changes under its own.
+- In-app help is `vite-app/src/help.js`, pure data keyed by screen key with
+  a test that every TABS key has an entry under 200 words; the top bar's "?"
+  opens it for the active screen. Keep it true when a screen changes. The
+  error log pages by keyset (`listFunctionErrors(limit, { before,
+  functionName })`, the timestamp double-quoted inside the or()) and filters
+  by function name.
 - The JHA opens with nothing ticked (`SEED_HAZARDS` all `on: false`); the
   ticket editor asks once (`SANE_QUANTITY_*`, `SANE_CREW_HOURS` in data.js)
   before saving a figure that looks like a typo, and remembers the answer for

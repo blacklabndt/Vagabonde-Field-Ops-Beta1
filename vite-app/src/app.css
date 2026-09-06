@@ -84,6 +84,17 @@ input[type=range] { accent-color: var(--color-accent); }
   -webkit-mask: var(--wordmark) left center / contain no-repeat;
   mask: var(--wordmark) left center / contain no-repeat;
 }
+/* The "?" beside the section name. A .btn-secondary squared off into a
+   circle: the DS button's padding is built for a word, so a single glyph
+   comes out as a lopsided oval. 40px is the tap target the rest of the bar
+   uses, and flex: none keeps it from being squeezed to nothing when a long
+   section name and the outbox badge share a phone's width. */
+.topbar-help {
+  flex: none;
+  width: 40px; height: 40px; padding: 0;
+  border-radius: 50%;
+  font-size: 16px; line-height: 1;
+}
 .seg-theme {
   display: inline-flex; border: 1px solid var(--color-divider); overflow: hidden;
 }
