@@ -32,7 +32,12 @@ Cloudflare Worker `solitary-snowflake-ee22` (assets + the `/approve` and
   re-point the trigger before anything else — HANDOVER.md's Path B says how. An unshipped
   DB fix waits as a draft under `supabase/handover/` (probes beside it) —
   a draft, not history, until it is applied and filed under migrations.
-  Nothing is waiting there now. The latest are
+  Nothing is waiting there now. The latest is
+  `20260906181829_the_shared_drive_is_deleted_by_the_office.sql` — the
+  `shared delete` storage policy needs Admin or Coordinator as well as the
+  files tab (the Files screen's × was a courtesy with no gate behind it);
+  storage.objects refuses a direct DELETE from SQL, so its probes evaluate
+  the predicate under role simulation. Before it,
   `20260906154840_an_invoice_has_a_number.sql` — `tickets.invoice_number`
   from `invoice_number_seq` (starts at 1000, `authenticated` has no USAGE),
   stamped only by `mark_tickets_invoiced` and kept across an un-invoice; the

@@ -1,7 +1,7 @@
 import React, { useState, useEffect, useMemo, useRef } from "react";
 import { money, todayLocal, localDate, dayMonth, initialsOf, crewRoleFor, hours, lineTotal, gstOn, gstLabel, gstRateOf, seesPrices, saneQuantityCeiling, SANE_CREW_HOURS } from "../data.js";
 import { Db } from "../db.js";
-import { Blueprint, Btn, TagX, Field, ErrorBox, emailIn, NoJobSelected, QueuedPanel, NumField , Loading } from "./common.jsx";
+import { Blueprint, Btn, TagX, Field, ErrorBox, emailIn, NoJobSelected, QueuedPanel, NumField , Loading, useScreenFoot } from "./common.jsx";
 import { OfflineQueue } from "../offlineQueue.js";
 import { OfflineCache } from "../offlineCache.js";
 import { savingLabel, deviceOffline } from "../savingWords.js";
@@ -180,6 +180,9 @@ export function TicketMobileScreen({ job, jobRecord, currentUser, onSaved, ticke
   // interval and a tick count would report a wait shorter than it was. Up
   // here with every other hook, above the early returns below.
   const [savingMs, setSavingMs] = useState(0);
+  // Which of the two footer buttons is in flight, so the "still trying"
+  // words land on the one that was pressed rather than always on the primary.
+  const [savingSend, setSavingSend] = useState(false);
   useEffect(() => {
     if (!saving) { setSavingMs(0); return undefined; }
     const startedAt = Date.now();
@@ -188,6 +191,9 @@ export function TicketMobileScreen({ job, jobRecord, currentUser, onSaved, ticke
   }, [saving]);
   const [saveError, setSaveError] = useState("");
   const [queued, setQueued] = useState(false);
+  // The footer is on screen whenever the form is (not the no-job or queued
+  // panels); the toast reads this to keep clear of it.
+  useScreenFoot(!!job && !queued);
   // Set once the ticket row exists, so a retry emails rather than re-inserts.
   // A reopened draft is already in the database, so it starts true and every
   // save is an update.
@@ -740,6 +746,7 @@ export function TicketMobileScreen({ job, jobRecord, currentUser, onSaved, ticke
     }
 
     setSaving(true);
+    setSavingSend(!!sendForApproval);
     setSaveError("");
     setEmailFailed(false);
     // What goes to the database is what is on screen at this moment. Until
@@ -1084,7 +1091,7 @@ export function TicketMobileScreen({ job, jobRecord, currentUser, onSaved, ticke
                     <div style={{ fontSize: 14 }}>{r.item.label} {isUnpriced(r.item) && <TagX variant="outline">unpriced</TagX>}</div>
                     <div className="tabular" style={{ fontSize: 10, color: "color-mix(in srgb, var(--color-text) 55%, transparent)" }}>{money(rate)} / {r.item.unit}</div>
                   </div>
-                  <NumField style={{ width: 66, textAlign: "right" }} step={r.item.step || 1} value={r.qty}
+                  <NumField style={{ width: 66, textAlign: "right" }} step={r.item.step} value={r.qty}
                     onChange={v => setOtherQty(r.key, v)} />
                   <span style={{ fontSize: 11, width: 22 }}>{r.item.unit}</span>
                   <span className="tabular" style={{ width: 62, textAlign: "right", fontSize: 14 }}>{money(lineTotal(r.qty, rate))}</span>
@@ -1334,10 +1341,12 @@ export function TicketMobileScreen({ job, jobRecord, currentUser, onSaved, ticke
               on it yet is a legitimate placeholder for the day — it parks in
               the tracker and Open tickets until it's finished. Only asking
               the client to sign requires something to sign for. */}
-          <Btn variant="secondary" style={{ minHeight: 48 }} onClick={() => save(false)} disabled={saving || !ticketId}>Save draft</Btn>
+          <Btn variant="secondary" style={{ minHeight: 48 }} onClick={() => save(false)} disabled={saving || !ticketId}>
+            {saving && !savingSend ? savingLabel(savingMs, "Saving…") : "Save draft"}
+          </Btn>
           <Btn variant="primary" style={{ minHeight: 48, fontSize: 15 }} onClick={() => save(true)} disabled={saving || !ticketId || total <= 0 || unpriced.length > 0}
             title={unpriced.length ? "An unpriced line is on this ticket — see the note on the ticket" : undefined}>
-            {saving ? savingLabel(savingMs, "Saving…") : emailFailed ? "Retry approval email" : "Email for approval"}
+            {saving && savingSend ? savingLabel(savingMs, "Sending…") : emailFailed ? "Retry approval email" : "Email for approval"}
           </Btn>
         </div>
       </div>

@@ -207,6 +207,9 @@ input[type=range] { accent-color: var(--color-accent); }
    containing block, so this rides up the page for the length of a screen's
    entrance animation; App.jsx strips that class on animationend, and it has
    to go on doing so. */
+/* Published for the toast, which has to clear the bar: set by the screens
+   that mount a footer (see useScreenFoot in common.jsx) and 0 otherwise. */
+:root { --screen-foot-h: 0px; }
 .screen-foot {
   position: fixed; left: 0; right: 0; bottom: 0; z-index: 50;
   display: flex; align-items: center; gap: 12px; flex-wrap: wrap;

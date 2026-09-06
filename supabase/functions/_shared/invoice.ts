@@ -19,7 +19,23 @@
 import { esc } from "./mail.ts";
 import { wordmark } from "./wordmark.ts";
 
-export const GST_RATE = 0.05; // Alberta: federal only. Mirrors data.js.
+// Alberta: federal only, 5%. The default when a client carries no rate of
+// its own; clients.gst_rate (a percent, 0 for an exempt client) wins. Read
+// through gstRateOf so an absent or unreadable rate is the ordinary 5% and
+// never a silent exemption — the same rule data.js keeps on the app side.
+export const GST_RATE_DEFAULT = 5;
+export const GST_RATE = GST_RATE_DEFAULT / 100;
+export function gstRateOf(value: unknown): number {
+  if (value == null || value === "") return GST_RATE_DEFAULT;
+  const n = Number(value);
+  return Number.isFinite(n) && n >= 0 && n <= 100 ? n : GST_RATE_DEFAULT;
+}
+// The percent the document charges, off the client's row.
+export const gstPercentOf = (d: InvoiceData) =>
+  gstRateOf(d.job && d.job.clients ? (d.job.clients as { gst_rate?: unknown }).gst_rate : null);
+// "GST @ 5%", or "GST exempt" — a zero rate is a fact about the client, not
+// a line to print as 0%.
+export const gstLabelOf = (d: InvoiceData) => { const p = gstPercentOf(d); return p === 0 ? "GST exempt" : "GST @ " + p + "%"; };
 
 export interface InvoiceLine {
   kind: string; label: string; unit: string;
@@ -57,7 +73,7 @@ export interface InvoiceData {
   };
   job: {
     job_number?: string; project?: string; lsd?: string; afe?: string;
-    area?: string; clients?: { name?: string }; contractors?: { name?: string };
+    area?: string; clients?: { name?: string; gst_rate?: number | string | null }; contractors?: { name?: string };
   };
   contact?: string;
   lines: InvoiceLine[];
@@ -143,7 +159,8 @@ const lineCents = (l: InvoiceLine) =>
 // free to disagree with the bill the client is being asked to sign.
 export function invoiceTotals(d: InvoiceData) {
   const subtotal = (d.lines || []).reduce((s, l) => s + lineCents(l), 0);
-  const gst = Math.round(subtotal * GST_RATE);
+  // The client's own rate, so an exempt client's bill carries no GST.
+  const gst = Math.round(subtotal * (gstPercentOf(d) / 100));
   return { subtotal, gst, grand: subtotal + gst };
 }
 
@@ -330,7 +347,7 @@ export function renderInvoice(d: InvoiceData): string {
 
   <table class="totals">
     <tr><td class="k">Subtotal</td><td class="v">${moneyCents(total.subtotal)}</td></tr>
-    <tr><td class="k">GST @ ${(GST_RATE * 100).toFixed(0)}%</td><td class="v">${moneyCents(total.gst)}</td></tr>
+    <tr><td class="k">${esc(gstLabelOf(d))}</td><td class="v">${moneyCents(total.gst)}</td></tr>
     <tr class="grand"><td>Total due</td><td class="v">${moneyCents(total.grand)}</td></tr>
   </table>
 

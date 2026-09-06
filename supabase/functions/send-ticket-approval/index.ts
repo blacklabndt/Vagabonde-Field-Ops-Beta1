@@ -14,7 +14,7 @@
 
 import { createClient } from "https://esm.sh/@supabase/supabase-js@2";
 import { sendMail, appSettings, corsHeaders, wrapEmail, esc, recipients, optionalRecipients } from "../_shared/mail.ts";
-import { invoicePage, GST_RATE, invoiceTotals } from "../_shared/invoice.ts";
+import { invoicePage, gstLabelOf, invoiceTotals } from "../_shared/invoice.ts";
 import { loadInvoice } from "../_shared/ticketInvoice.ts";
 import { hashToken } from "../_shared/approvalToken.ts";
 
@@ -150,7 +150,7 @@ Deno.serve(async (req) => {
       <table role="presentation" cellpadding="0" cellspacing="0" style="width:100%;margin-top:10px">
         <tr><td style="color:#6b6d6e">Subtotal</td>
             <td style="text-align:right;color:#6b6d6e">${money(subtotal)}</td></tr>
-        <tr><td style="color:#6b6d6e">GST @ ${(GST_RATE * 100).toFixed(0)}%</td>
+        <tr><td style="color:#6b6d6e">${esc(gstLabelOf(invoiceData))}</td>
             <td style="text-align:right;color:#6b6d6e">${money(gst)}</td></tr>
         <tr><td style="font-weight:600;padding-top:6px">Total due</td>
             <td style="text-align:right;font-size:20px;font-weight:600;padding-top:6px">${money(grand)}</td></tr>
@@ -170,7 +170,7 @@ Deno.serve(async (req) => {
       ...lines.map(l => `${l.label} — ${l.quantity} ${l.unit ?? ""} — ${money(lineTotal(l))}`),
       "",
       `Subtotal: ${money(subtotal)}`,
-      `GST @ ${(GST_RATE * 100).toFixed(0)}%: ${money(gst)}`,
+      `${gstLabelOf(invoiceData)}: ${money(gst)}`,
       `Total due: ${money(grand)}`,
       "",
       `Approve: ${link}`

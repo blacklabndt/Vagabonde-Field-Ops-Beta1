@@ -298,10 +298,9 @@ async function drawJha(jha: any): Promise<Uint8Array> {
   [["Collimator available", !!eq.collimator], ["Emergency equipment on hand", !!eq.emergencyKit]]
     .forEach(([l, on]) => { checkbox(on as boolean, l as string, px, y); px += 200; });
   y -= 18;
-  if (Number(eq.redSurveyMr) > 200) {
-    text("SURFACE READING EXCEEDS 200 mR/h — DEVICE NOT TO BE USED", M + 4, y, { size: 8, bold: true, color: ACCENT });
-    y -= 12;
-  }
+  // No warning line under the survey: the reading is recorded, not judged —
+  // the screen dropped its own warning for the same reason, and the document
+  // the contractor receives has to say what the screen says.
 
   // ── hazard worksheet ───────────────────────────────────────────────
   pageBreakIfNeeded(120);

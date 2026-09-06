@@ -35,7 +35,7 @@ export const HELP = {
       "The buttons here are how the field screens are meant to be reached. Start JHA, + Upload report and Create ticket all open with this job already under them — that is why those screens are not in the menu: one opened from a menu operates on whichever job happened to be active, which is how the wrong job gets written up.",
       "+ Upload report only appears for accounts with the upload permission. A Helper cannot file a radiographic report; the database refuses it too, so the missing button is the honest answer rather than a hidden one.",
       "Create ticket saves nothing by itself. It hands the work date and this job's reps to the ticket screen, which saves — and queues, if you are out of range — exactly like a ticket started from Home.",
-      "Delete job is an Admin's, and it asks what should happen to the work underneath first. An approved ticket cannot be deleted this way at all."
+      "Delete job is an Admin's, or yours while nothing on the job has been billed and you raised it; it asks what should happen to the work underneath first. An approved ticket cannot be deleted this way at all."
     ]
   },
   jha: {
@@ -120,7 +120,7 @@ export const HELP = {
     heading: "Timesheets",
     body: [
       "Hours, solo hours, dose and mileage per person per pay period. None of it is typed here: every figure comes from the crew rows on billing tickets, so a wrong number is fixed on the ticket it came from, not on this screen.",
-      "Technicians and Helpers see their own hours and nobody else's. Admins see everyone. That is the database's rule, not the screen's.",
+      "Technicians and Helpers see their own hours and nobody else's. Admins and Coordinators see everyone. That is the database's rule, not the screen's.",
       "An Admin approves a period, which is what marks it done for payroll. Export to Excel builds a two-sheet workbook of the period.",
       "The dose ledger beside it is milliroentgens per person per calendar quarter and year — the figures a nuclear energy worker's record needs. The database adds it up, so a whole year is a few dozen numbers rather than tens of thousands of rows.",
       "Solo hours appear here and are never billed to a client."
@@ -133,7 +133,7 @@ export const HELP = {
       "There is a house card, and each client can have their own. A client set to follow the default takes the house prices live, so a change to the house card moves them too. A client with their own card is on their own prices.",
       "Publish matters exactly once per card. After it has been published, edits go live as they save — which is why the button disappears. There is no second confirmation.",
       "\"Restore removed lines\" puts back any standard line missing from a schedule at zero, ready to be priced. A job override prices one line differently for one job. Every price change is logged with who made it; the history is on each line.",
-      "Prices are for Admins and Technicians. Other roles cannot open this screen, and the database will not hand them the figures either."
+      "Prices are for Admins and Technicians: the screen opens for anyone given the Rate admin section, but the database hands other roles no figures and refuses their edits."
     ]
   },
   tracker: {

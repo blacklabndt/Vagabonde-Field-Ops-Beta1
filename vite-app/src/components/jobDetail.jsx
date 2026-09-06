@@ -1,5 +1,6 @@
 import React, { useState, useEffect, useRef } from "react";
-import { money, todayLocal, localDate, dayMonth, initialsOf, ticketDateStamp, lastNumbers, JOB_FIELDS, EMPTY_JOB_RECORD, seesPrices as pricesFor, fileSize, reportFileRefusal, MAX_REPORT_LABEL } from "../data.js";
+import { money, todayLocal, localDate, dayMonth, initialsOf, ticketDateStamp, lastNumbers, JOB_FIELDS, EMPTY_JOB_RECORD, seesPrices as pricesFor, fileSize, reportFileRefusal, MAX_REPORT_LABEL, decimalString } from "../data.js";
+import { acceptsNumberText } from "../numberInput.js";
 import { Db } from "../db.js";
 import { OfflineCache } from "../offlineCache.js";
 import { OfflineQueue } from "../offlineQueue.js";
@@ -139,16 +140,25 @@ export function JobDetailScreen({ job, currentUser, onStartJha, onOpenTicket, on
   // what the owner asked to be one step. The editor is only opened once the
   // list has been re-read and the ticket is a draft again; the openers below
   // refuse anything else.
+  // Answers whether the person agreed, so a caller that closed something to
+  // ask (the viewer) can leave it open on a "no". The editor is opened only
+  // when the list has been re-read as well: a withdraw that landed and a
+  // refresh that failed used to navigate away from the error it had just
+  // written, so it was never read.
   const cancelApproval = async (t, thenEdit = false) => {
     const tail = thenEdit ? " It opens for editing straight away." : " The ticket goes back to Draft to be fixed and resent.";
-    if (!confirm(`Cancel the approval request for ${t.id}? The client's signing link stops working.${tail}`)) return;
+    if (!confirm(`Cancel the approval request for ${t.id}? The client's signing link stops working.${tail}`)) return false;
     setWithdrawingId(t.id);
     setRowError(p => ({ ...p, [t.id]: "" }));
-    let withdrawn = false;
-    try { await Db.withdrawTicketApproval(t.id); withdrawn = true; await refreshTickets(); }
-    catch (e) { setRowError(p => ({ ...p, [t.id]: e.message || "Couldn't cancel the approval." })); }
+    let refreshed = false;
+    try {
+      await Db.withdrawTicketApproval(t.id);
+      try { await refreshTickets(); refreshed = true; }
+      catch (e) { setRowError(p => ({ ...p, [t.id]: `The approval was cancelled, but the list couldn't be re-read: ${e.message || "reload the job."}` })); }
+    } catch (e) { setRowError(p => ({ ...p, [t.id]: e.message || "Couldn't cancel the approval." })); }
     setWithdrawingId(null);
-    if (withdrawn && thenEdit) onOpenTicket(t.id);
+    if (refreshed && thenEdit) onOpenTicket(t.id);
+    return true;
   };
   const refresh = async () => {
     setLoading(true);
@@ -726,9 +736,11 @@ export function JobDetailScreen({ job, currentUser, onStartJha, onOpenTicket, on
           // person notices the figure is wrong; the two cancel buttons live
           // here as well as on the row. Same gates as the row, resolved here
           // so the dialog knows nothing about roles.
-          onWithdraw={(t, thenEdit) => { setViewingTicket(null); return cancelApproval(t, thenEdit); }}
+          onWithdraw={async (t, thenEdit) => { if (await cancelApproval(t, thenEdit)) setViewingTicket(null); }}
           canEditAfter={canRaiseTickets && !complete}
-          canWithdraw={t => t.status === "Awaiting approval" && (isAdmin || t.technician_id === currentUser.id)} />
+          // The same gate as the row: a Complete job's withdrawn ticket would
+          // be a draft nobody on that job can edit.
+          canWithdraw={t => !complete && t.status === "Awaiting approval" && (isAdmin || t.technician_id === currentUser.id)} />
       )}
 
     </div>
@@ -1120,7 +1132,7 @@ function JhaCloseOutDialog({ jha, currentUser, onClose, onDone }) {
       return;
     }
     const bad = rows.filter(r => {
-      const n = Number(String(r.endReading).replace(",", "."));
+      const n = Number(decimalString(r.endReading));
       return isNaN(n) || n < 0;
     });
     if (bad.length) {
@@ -1132,7 +1144,7 @@ function JhaCloseOutDialog({ jha, currentUser, onClose, onDone }) {
     try {
       await Db.closeOutJha({
         jhaId: jha.id,
-        dosimetry: rows.map(r => ({ ...r, endReading: String(r.endReading).replace(",", ".") })),
+        dosimetry: rows.map(r => ({ ...r, endReading: decimalString(r.endReading) })),
         closedBy: currentUser.id
       });
       await onDone();
@@ -1176,11 +1188,11 @@ function JhaCloseOutDialog({ jha, currentUser, onClose, onDone }) {
               <input className="input" type="text" inputMode="decimal" autoFocus={i === 0}
                 value={r.endReading}
                 style={{ borderColor: String(r.endReading).trim() === "" ? undefined : "var(--color-accent)" }}
-                onChange={e => set(i, e.target.value.replace(/[^\d.,]/g, ""))} />
+                onChange={e => { if (acceptsNumberText(e.target.value, 0.1)) set(i, e.target.value); }} />
             </Field>
           </div>
           <div style={{ fontSize: 12, color: "var(--color-accent)" }}>
-            Dose recorded: {String(r.endReading).trim() === "" ? "—" : Number(String(r.endReading).replace(",", ".")) + " mR"}
+            Dose recorded: {String(r.endReading).trim() === "" ? "—" : Number(decimalString(r.endReading)) + " mR"}
           </div>
         </div>
       ))}

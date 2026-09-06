@@ -1,7 +1,8 @@
 import React, { useState, useEffect, useRef } from "react";
 import { JHA_TEMPLATES, SEED_HAZARDS, todayLocal, localDate, dayMonth, storageKeySafe } from "../data.js";
 import { Db } from "../db.js";
-import { Blueprint, Btn, CheckBox, TagX, Field, Dialog, ErrorBox, Switch, splitContact, hazardTagVariant, NoJobSelected, ConnectionBar, QueuedPanel, useMissingFields } from "./common.jsx";
+import { acceptsNumberText } from "../numberInput.js";
+import { Blueprint, Btn, CheckBox, TagX, Field, Dialog, ErrorBox, Switch, splitContact, hazardTagVariant, NoJobSelected, ConnectionBar, QueuedPanel, useMissingFields, useScreenFoot } from "./common.jsx";
 import { OfflineQueue } from "../offlineQueue.js";
 import { OfflineCache } from "../offlineCache.js";
 import { hasNoSerials, trimmedSerials, isMissingSetOwnDosimetry } from "../dosimetryPrompt.js";
@@ -80,6 +81,7 @@ export function JhaBuilderScreen({ job, jobRecord, contacts, currentUser, onSubm
   }, [saving]);
   const [error, setError] = useState("");
   const [queued, setQueued] = useState(false);
+  useScreenFoot(!!job && !queued);
   // An idempotency key for this one assessment (jhas.client_key), minted
   // once, kept with the recovery copy and sent with the outbox payload, so
   // a filing whose answer was lost on the radio is found again rather than
@@ -635,7 +637,7 @@ export function JhaBuilderScreen({ job, jobRecord, contacts, currentUser, onSubm
                 on screen arrived here empty. The filter only ever admits
                 digits and separators, which also covers a pasted minus. */}
             <input className="input" type="text" inputMode="decimal" value={equip.redSurveyMr}
-              onChange={e => setEquip(p => ({ ...p, redSurveyMr: e.target.value.replace(/[^\d.,]/g, "") }))} />
+              onChange={e => { const v = e.target.value; if (acceptsNumberText(v, 0.1)) setEquip(p => ({ ...p, redSurveyMr: v })); }} />
           </Field>
           <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
             <Switch on={equip.collimator} label="Collimator available" onClick={() => setEquip(p => ({ ...p, collimator: !p.collimator }))} />

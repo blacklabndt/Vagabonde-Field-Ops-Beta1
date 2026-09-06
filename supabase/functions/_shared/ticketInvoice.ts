@@ -20,7 +20,7 @@ import { LEVEL_LEGEND } from "./levels.ts";
 export const TICKET_INVOICE_SELECT =
   "id, work_date, total, status, delays, client_contact, approved_at, approved_by_email, approved_signature, approval_sent_to, " +
   "invoice_number, invoiced_at, " +
-  "jobs(job_number, project, lsd, afe, area, clients(name), contractors(name)), " +
+  "jobs(job_number, project, lsd, afe, area, clients(name, gst_rate), contractors(name)), " +
   "ticket_lines(kind, label, unit, quantity, unit_rate)";
 
 // The embed above comes back in whatever order the heap holds the rows,

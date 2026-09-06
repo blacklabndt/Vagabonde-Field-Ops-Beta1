@@ -212,6 +212,20 @@ export function RequiredLeft({ count, style }) {
 //
 // Usage: flag the keys when validation fails, spread props(key) onto the
 // input, and pass missing={is(key)} to its Field.
+// A screen with a fixed footer says so while it is mounted, so the toast
+// (which is fixed to the same bottom edge) lifts clear of it. 88px covers the
+// bar's padding, a 48px button and its hairline. Declared here so the two
+// screens that carry a footer share one number with the toast.
+export const SCREEN_FOOT_H = "88px";
+export function useScreenFoot(active = true) {
+  useEffect(() => {
+    if (!active) return undefined;
+    const root = document.documentElement;
+    root.style.setProperty("--screen-foot-h", SCREEN_FOOT_H);
+    return () => root.style.setProperty("--screen-foot-h", "0px");
+  }, [active]);
+}
+
 export function useMissingFields() {
   const [missing, setMissing] = useState({});
   // Bumped only by flag(): the jump-to-field effect below keys on this, so
@@ -728,8 +742,10 @@ export function Toast({ message, tone = "ok", onDone, duration = 2600 }) {
   return (
     <div aria-live="polite" style={{
       position: "fixed", left: "50%", transform: "translateX(-50%)",
-      // Clear of the iOS home indicator and any bottom bar on a phone.
-      bottom: "calc(24px + env(safe-area-inset-bottom, 0px))",
+      // Clear of the iOS home indicator, and of a screen's own fixed footer
+      // (the ticket editor's and the JHA's .screen-foot sets --screen-foot-h
+      // on the root while it is mounted; everywhere else it is 0).
+      bottom: "calc(24px + var(--screen-foot-h, 0px) + env(safe-area-inset-bottom, 0px))",
       zIndex: 60, pointerEvents: "none",
       display: "flex", alignItems: "center", gap: 8,
       padding: "10px 16px", borderRadius: 999,

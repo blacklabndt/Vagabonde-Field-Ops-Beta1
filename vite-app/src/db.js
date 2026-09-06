@@ -387,11 +387,20 @@ function shapeArchiveTicket(t) {
 // sees the load AND the write that follows it. Measured against the copy the
 // editor was opened with, a draft saved online and then edited again would
 // accuse its own author of overwriting somebody.
-let lastSeenTicket = null;
+//
+// A few tickets, not one: the outbox replays read tickets through these same
+// calls, and a single slot was taken by whichever ticket the flush touched
+// last — so the draft open in the editor lost its baseline exactly while
+// the outbox was busy, and its next queued save carried none. Small and
+// bounded, because it only has to outlive one editing session.
+const SEEN_TICKETS_MAX = 8;
+const seenTickets = new Map();
 const rememberTicketPart = (ticketId, part) => {
   if (!ticketId) return;
-  if (!lastSeenTicket || lastSeenTicket.ticketId !== ticketId) lastSeenTicket = { ticketId };
-  Object.assign(lastSeenTicket, part);
+  const held = seenTickets.get(ticketId) || {};
+  seenTickets.delete(ticketId);
+  seenTickets.set(ticketId, Object.assign(held, part));
+  while (seenTickets.size > SEEN_TICKETS_MAX) seenTickets.delete(seenTickets.keys().next().value);
 };
 
 const CREW_COLUMNS = "id, ticket_id, profile_id, crew_role, straight_hours, ot_hours, solo_hours, solo_ot_hours, dose_mr, mileage_km, profiles(name, first_name, last_name, is_subcontractor, level, id_code)";
@@ -2953,8 +2962,8 @@ export const Db = {
   // either half is missing or belongs to a different ticket, and null means
   // "do not compare", never an accusation.
   lastKnownTicketFingerprint(ticketId) {
-    const seen = lastSeenTicket;
-    if (!ticketId || !seen || seen.ticketId !== ticketId || !seen.lines || !seen.crew) return null;
+    const seen = ticketId ? seenTickets.get(ticketId) : null;
+    if (!seen || !seen.lines || !seen.crew) return null;
     return ticketFingerprint(seen.lines, seen.crew, seen.delays);
   },
 

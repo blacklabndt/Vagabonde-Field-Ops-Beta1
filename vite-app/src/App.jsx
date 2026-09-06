@@ -4,6 +4,7 @@ import { TABS, CONTEXT_TABS, EMPTY_JOB_RECORD, Store } from "./data.js";
 import { Db } from "./db.js";
 import { tabList, Blueprint, Btn, ErrorBox, ErrorBoundary, TagX, Toast, Loading, Switch } from "./components/common.jsx";
 import { Toasts } from "./toastBus.js";
+import { forgetHeldDrafts } from "./chatDrafts.js";
 import { QueueBadge, QueueDialog } from "./components/queuePanel.jsx";
 import { FeatureRequestDialog } from "./components/featureRequest.jsx";
 import { HelpDialog } from "./components/helpDialog.jsx";
@@ -404,12 +405,19 @@ export function App() {
         // too late: by then the row is this payload.
         // Not read again once it has been told: a truck between towers fires
         // `online` all afternoon and each one re-runs this item.
-        const overwrote = payload.baseFingerprint && !payload.overwroteNewer
+        // Asked once, whatever the answer: a replay whose lines landed and
+        // whose crew then failed on the radio comes back to a row that is
+        // this item's lines over the old crew — which matches neither what it
+        // started from nor what it is writing, and would read as somebody
+        // else's work. The checkpoint below records that the question has
+        // been put, so a partial replay is never accused of itself.
+        const overwrote = payload.baseFingerprint && !payload.overwroteChecked
           ? replacedNewerWork(
             payload.baseFingerprint,
             ticketFingerprint(payload.lines, payload.crew, payload.delays),
             await currentTicketFingerprint(id))
           : false;
+        if (payload.baseFingerprint && !payload.overwroteChecked) await checkpoint({ overwroteChecked: true });
         try {
           // The reps ride along: the payload is the whole ticket as the field
           // left it, and a rep edited on a reopened draft is part of it.
@@ -583,7 +591,13 @@ export function App() {
       // asking, and the next sign-in empties the store anyway if it is
       // somebody else (OfflineCache.claimFor).
       try { await OfflineCache.remove(IDENTITY_KEY); } catch (e) { console.error("Couldn't forget this device's remembered identity:", e); }
-      setCurrentUser(null);
+      // The stored session too: this branch is reached for any answer that
+      // is not a network failure, a 5xx from the token endpoint included, and
+      // auth-js only removes the session itself when the server said "no
+      // session". Every sign-out path forgets it (CLAUDE.md), this one now
+      // as well, or the next reload signs the tablet straight back in.
+      forgetStoredSession();
+      clearSessionState();
     };
     window.addEventListener("online", recheck);
     return () => window.removeEventListener("online", recheck);
@@ -601,9 +615,11 @@ export function App() {
       setActiveJob(job);
       setContextScreen("job");
       setScreen("job");
+      return true;
     } catch (e) {
       console.error("Couldn't open the job that link names:", e.message);
       Toasts.show(`Couldn't open ${number}: ${e.message || "try again."}`, "error");
+      return false;
     }
   };
 
@@ -837,7 +853,15 @@ export function App() {
         // Already the open job: nothing to read, and nothing about it can
         // have changed on the way back to it.
         if (activeJob && activeJob.id === target.job) { setContextScreen("job"); setScreen("job"); return; }
-        openLandingJob(target.job);
+        // A job that cannot be read leaves the app where it was, so put the
+        // bar back to the screen that is showing — nothing changes state, so
+        // the effect above would never do it, and the address would go on
+        // naming a job the screen does not show.
+        openLandingJob(target.job).then(opened => {
+          if (opened) return;
+          const back = formatRoute({ screen, job: activeJob ? activeJob.id : null });
+          if (back && window.location.hash !== back) window.history.replaceState({}, "", back);
+        });
         return;
       }
       setContextScreen("");
@@ -1067,6 +1091,16 @@ export function App() {
     // which the app icon badge would keep showing (and expose) until a fresh
     // count resolves. Zeroing chatUnread also drives the badge effect to
     // clear the OS icon.
+    clearSessionState();
+  };
+
+  // Everything of the person's that lives in this component's state, put
+  // back. One function for both ways a session ends — Sign out, and the
+  // lapsed-session recheck below — because the recheck used to call
+  // setCurrentUser(null) alone: with the drawer open when it fired, the
+  // focus trap never released, the page stayed scroll-locked on the sign-in
+  // screen, and the drawer came up open over the next person's board.
+  const clearSessionState = () => {
     setMenuOpen(false);
     setMenuVisible(false);
     setChatUnread(0);
@@ -1082,6 +1116,7 @@ export function App() {
     setActiveTicket(null);
     setTicketSeed(null);
     setContextScreen("");
+    forgetHeldDrafts();
     setCurrentUser(null);
   };
 

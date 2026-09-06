@@ -29,7 +29,7 @@
 
 import { createClient } from "https://esm.sh/@supabase/supabase-js@2";
 import { esc, sendMail, appSettings, wrapEmail } from "../_shared/mail.ts";
-import { renderInvoice, invoiceCss, invoiceTotals, moneyCents, edmontonStamp } from "../_shared/invoice.ts";
+import { renderInvoice, invoiceCss, invoiceTotals, moneyCents, edmontonStamp, gstPercentOf } from "../_shared/invoice.ts";
 import type { InvoiceData } from "../_shared/invoice.ts";
 import { loadInvoice, TICKET_INVOICE_SELECT } from "../_shared/ticketInvoice.ts";
 import { hashToken, invoiceFingerprint } from "../_shared/approvalToken.ts";
@@ -203,7 +203,7 @@ async function notifyApproval(admin: any, row: any, d: InvoiceData, signer: stri
   const lines = [
     `Ticket ${row.id} was approved by ${signer} on ${when}.`,
     job.job_number ? `Job ${job.job_number}${job.project ? ` · ${job.project}` : ""}${job.clients?.name ? ` · ${job.clients.name}` : ""}` : "",
-    `Total ${moneyCents(totals.grand)} including GST.`,
+    `Total ${moneyCents(totals.grand)}${gstPercentOf(d) === 0 ? " (GST exempt)" : " including GST"}.`,
     "It is locked now and sits under Approved in the billing tracker, ready to invoice."
   ].filter(Boolean);
   await sendMail({

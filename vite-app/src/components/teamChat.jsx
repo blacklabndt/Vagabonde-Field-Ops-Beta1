@@ -1,5 +1,6 @@
 import React, { useState, useEffect, useLayoutEffect, useMemo, useRef } from "react";
 import { Db } from "../db.js";
+import { heldDraftFor, holdDraft } from "../chatDrafts.js";
 import { initialsOf } from "../data.js";
 // The merge every message path funnels through — see chatMerge.js,
 // where the regression tests hold the door on the "Someone" bug.
@@ -432,14 +433,6 @@ function Lightbox({ src, onClose }) {
   );
 }
 
-// The composer text outlives the screen. Team chat unmounts the moment the
-// drawer takes you to Files or a job, and the draft went with it — checking a
-// job number halfway through a message cost the message (2,005 characters of
-// it, in beta testing). Held here rather than in OfflineCache because an
-// unsent line is not work the queue owes anyone: it lives as long as the tab
-// does and no longer. Keyed by account so a shared tablet never hands the next
-// technician the last one's half-written message.
-const heldDrafts = new Map();
 
 // Past this many characters the composer starts counting down to the 4,000
 // the column accepts, so the limit is not something you meet by surprise.
@@ -453,7 +446,7 @@ export function TeamChatScreen({ currentUser, onOpenJob, onRead }) {
   const [loading, setLoading] = useState(true);
   const [loadingOlder, setLoadingOlder] = useState(false);
   const [loadError, setLoadError] = useState("");
-  const [draft, setDraft] = useState(() => heldDrafts.get(currentUser.id) || "");
+  const [draft, setDraft] = useState(() => heldDraftFor(currentUser.id));
   const [attach, setAttach] = useState(null);   // { file, url } awaiting send
   const [gifOpen, setGifOpen] = useState(false);
   const [sending, setSending] = useState(false);
@@ -888,8 +881,7 @@ export function TeamChatScreen({ currentUser, onOpenJob, onRead }) {
   // Keep the held copy in step with the box, including the emptying a send
   // does — nothing should be offered back once it has gone out.
   useEffect(() => {
-    if (draft) heldDrafts.set(currentUser.id, draft);
-    else heldDrafts.delete(currentUser.id);
+    holdDraft(currentUser.id, draft);
   }, [draft, currentUser.id]);
 
   // Grow the composer with the message instead of scrolling a two-line slot:
