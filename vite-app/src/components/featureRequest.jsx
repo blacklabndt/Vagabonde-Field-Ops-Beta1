@@ -9,7 +9,7 @@ import { Dialog, Field, Btn, ErrorBox } from "./common.jsx";
 //
 // A send that fails keeps the words in the dialog — a message typed in a
 // truck with a poor signal is not something to make anyone type twice.
-export function FeatureRequestDialog({ user, onClose }) {
+export function FeatureRequestDialog({ onClose }) {
   const [title, setTitle] = useState("");
   const [details, setDetails] = useState("");
   const [sending, setSending] = useState(false);
@@ -39,10 +39,6 @@ export function FeatureRequestDialog({ user, onClose }) {
         <Btn variant="primary" onClick={send} disabled={sending}>{sending ? "Sending…" : "Send"}</Btn>
       </>}>
       <ErrorBox>{error}</ErrorBox>
-      <p style={{ margin: 0, fontSize: 13, color: "color-mix(in srgb, var(--color-text) 65%, transparent)" }}>
-        Something the app should do, or do differently. It goes to the office
-        under your name{user && user.name ? ` (${user.name})` : ""}.
-      </p>
       <Field label="What would you like?" required>
         <input className="input" value={title} maxLength={120} placeholder="A line that says it"
           onChange={e => { setError(""); setTitle(e.target.value); }} />

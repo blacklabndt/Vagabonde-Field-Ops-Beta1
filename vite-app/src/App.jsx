@@ -1246,7 +1246,7 @@ export function App() {
           under the jobs table — the table showed through the form and took
           the click meant for Send. */}
       {showFeature && (
-        <FeatureRequestDialog user={currentUser} onClose={() => setShowFeature(false)} />
+        <FeatureRequestDialog onClose={() => setShowFeature(false)} />
       )}
       {updateReady && !updateDeferred && <UpdateBanner onLater={() => setUpdateDeferred(true)} />}
       <Toast message={toast && toast.text} tone={toast && toast.tone} onDone={() => setToast(null)} />
