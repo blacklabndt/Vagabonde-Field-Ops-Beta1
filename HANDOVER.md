@@ -13,7 +13,7 @@ changes hands, and what the new owner's admin does on day one.
 | The app | React PWA the crew installs on phones | Built from `vite-app/`, served by the Cloudflare Worker |
 | The Worker | Serves the app + renders client approval pages at `/approve` | `worker/index.js`, deployed with `npx wrangler deploy` |
 | Database, sign-in, files | Everything the app stores | Supabase project `eielmvxzdwwprmmfamlq` (Postgres + Auth + Storage) |
-| Server functions | Email sending, approvals, user provisioning, chat push, nightly cleanup | `supabase/functions/`, deployed with the Supabase CLI |
+| Server functions | Email sending, approvals, user provisioning and unlocking, chat push, nightly cleanup, the automatic backup, the morning digest, feature requests | `supabase/functions/`, deployed with the Supabase CLI |
 | Email | Reports and billing approval links | Resend (key entered on the in-app **Admin** screen) |
 | Chat GIFs | Team chat's GIF search | KLIPY (key on the **Admin** screen, optional) |
 | The backup drive | Where the app copies itself on a schedule, and restores from | One Google Drive / OneDrive / Dropbox account of the business's own, connected on the **Admin** screen |
@@ -369,17 +369,22 @@ they came from, so set it past the highest number restored —
 
 1. **Admin screen** (drawer → Admin): Resend key, then the two sending
    addresses once the domain verifies; the app's public address; KLIPY
-   key if the crew wants GIFs. Send the test email.
+   key if the crew wants GIFs; the **Invoices** section — terms, GST
+   number and remit-to block — so the first invoice prints complete. Send
+   the test email.
 2. **Supabase dashboard**, five minutes: Site URL, leaked-password
    protection.
 3. **Users & access**: create the crew's accounts — role sets the tabs,
    tabs can be tuned per person afterwards. Tick Subcontractor for anyone
    who invoices rather than draws payroll.
 4. **Rate admin**: replace the house card's placeholder prices with real
-   ones, per client add their card (or let it follow the house card), and
-   **Publish schedule** once per card — after that, edits go live as they
-   save. Tickets snapshot their rates when raised, so publishing never
-   reprices anything already out.
+   ones, per client add their card (or let it follow the house card, or
+   copy another client's card as a starting point), and **Publish
+   schedule** once per card — after that, edits go live as they save.
+   Tickets snapshot their rates when raised, so publishing never reprices
+   anything already out. Set the **GST rate** on any client that is exempt
+   (it is 5 unless changed) — the invoice, the approval email and the
+   receipt all charge the client's own rate.
 5. **Contacts**: the real clients, contractors, and the people at each —
    the primary contact is what jobs, report emails and approvals pre-fill.
 6. **Automatic backup**, once the app address is set: register one drive
@@ -404,6 +409,28 @@ they came from, so set it past the highest number restored —
   dealt with.
 - **An approval link opens as a plain text-looking page** — the Admin
   screen's App address is blank or wrong.
+- **A ticket went to the client by mistake, or with the wrong figures** —
+  **Cancel approval** on its row (Job detail, the field-invoice viewer or
+  the tracker) makes the client's link stop working and the ticket a draft
+  again; **Cancel and edit** does that and opens it. A ticket the client
+  has already signed cannot be pulled back this way.
+- **A client is GST exempt, or charged the wrong rate** — Rate admin, the
+  client's card, **GST rate**. Admin only; it changes every ticket priced
+  from then on and nothing already sent.
+- **"How old is the unsigned money?"** — the tracker's aging tiles and
+  **By client** view. The two export buttons beside them are for the
+  accountant: one row per ticket, GST and invoice number included.
+- **A technician says their ticket changed under them** — two devices
+  saved the same draft and the later save won, whole. If the later one was
+  a queued save replaying after signal came back, that device was told at
+  the time and shows a banner on the draft until it is dismissed. Reopen
+  the ticket and check the welds, charges and crew.
+- **Somebody wants the app to do something it doesn't** — the drawer's
+  **Feature request** button mails the owner with the sender's name and
+  role on top. The **?** in the top bar explains the open screen.
+- **"What happened overnight?"** — an Admin sees a **Needs attention**
+  strip above the board when something needs doing, and gets the same
+  by email each morning (admin-digest); silence means nothing is wrong.
 - **Chat push isn't arriving on one device** — notifications are allowed
   per device from Team chat; on shared tablets the next tech's sign-in
   claims the device's subscription automatically.

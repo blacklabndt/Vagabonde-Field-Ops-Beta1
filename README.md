@@ -21,7 +21,11 @@ Screens: the nine from the original design handoff — dialogs, ticket
 numbering, rate calculation, light/dark theme — plus eight that grew out of
 running it: Files, Contacts, Equipment, Timesheets, Open tickets, the admin
 billing tracker, Team chat, and the Admin screen the app is configured from.
-And two easter eggs nobody should document further.
+And two easter eggs nobody should document further. Every screen has a
+**?** in the top bar that explains it in under two hundred words
+(`src/help.js`, one entry per screen, tested to stay short), and the drawer's
+**Feature request** button mails the owner whatever the crew wishes the app
+did, under their own name.
 
 ## Run it
 
@@ -200,22 +204,74 @@ tables.
 | Screen | What it does |
 | --- | --- |
 | Sign in | Real Supabase Auth (`signInWithPassword`); the session persists across reloads |
-| Home / dispatch board | Paged, server-side job search (`search_jobs`) with a status filter and a per-column search |
-| Job detail | JHAs, reports and tickets for the open job, each card reloading only itself after a mutation |
-| JHA builder (mobile) | The FLHA as the crew fills it: site info, rated hazards, equipment record, both nuclear energy workers and their dosimetry. Files a real `jhas` row and renders a PDF. Carries an editable **date of the assessment**, so one missed on site can be written up afterwards for the day it actually covers. Hazard ratings start from what this person last gave each hazard, read back out of their own filed assessments — no preferences table to drift from what was actually filed |
-| JHA close-out | End readings off each DRD at the end of the day; the dose is computed here, not trusted from the screen, and the PDF is redrawn |
+| Home / dispatch board | Paged, server-side job search (`search_jobs`) with a status filter and a per-column search An Admin also gets a **Needs attention** strip above the board when a backup failed, a drive needs reconnecting or the functions logged errors overnight (see "Automatic backup"). **+ Ticket** and **+ New JHA** here carry the same gates as the buttons on Job detail. |
+| Job detail | JHAs, reports and tickets for the open job, each card reloading only itself after a mutation The address bar follows the screen (`#/job/S-10113`, `#/job/S-10113/ticket`), so Back steps back a screen and a reload stays put — and a job with its own ticket, JHA and upload is one history entry, so one Back leaves it. A ticket sent for approval by mistake has **Cancel approval** and **Cancel and edit** on its row and in the viewer: the client's link stops working and the ticket is a draft again. |
+| JHA builder (mobile) | The FLHA as the crew fills it: site info, rated hazards, equipment record, both nuclear energy workers and their dosimetry. Files a real `jhas` row and renders a PDF. Carries an editable **date of the assessment**, so one missed on site can be written up afterwards for the day it actually covers. Hazard ratings start from what this person last gave each hazard, read back out of their own filed assessments — no preferences table to drift from what was actually filed Nothing is ticked when it opens. The builder offers **Keep these on my profile** for the dosimeter serials — when the profile holds none, or when one typed differs from what is on file — so the same three numbers stop being typed on every job. |
+| JHA close-out | End readings off each DRD at the end of the day; the dose is computed here, not trusted from the screen, and the PDF is redrawn Makes the same serials offer for the closer's own row, since the person closing a JHA is often not the one who raised it. |
 | Report upload (mobile + dialog) | The PDF uploads to the private `reports` bucket, plus a `reports` row; emailing it is a separate, recoverable step |
-| Billing ticket (mobile) | Prices every weld and charge line against the client's *published* rate schedule, and records the crew's hours, solo hours and dose |
-| Open tickets | A technician's own unbilled tickets — drafts to finish, signatures to chase |
-| Team chat | One crew-wide room: pictures, voice notes, GIFs, replies, pins, unread badge and Web Push. Unpinned messages expire after 30 days; job numbers in a message linkify to the job |
-| Billing tracker | Every ticket across every job, paged server-side, with the four totals as one RPC rather than a full table scan in the browser. **Chase all unsigned** re-sends the approval link to every ticket still waiting: it leaves alone anything chased in the last three days or carrying an open client query, then sends through a paced pool (three at a time, spaced, `sendPool.js`) that waits out a rate-limited or unavailable transport instead of writing it off. It reports "sending *n* of *N*" as it goes, has a **Stop** that lets the sends in flight land and leaves the rest for another day, and names the tickets that failed by number, because a count of 37 is not something anyone can act on. Both that button and **Export to accounting** are behind the price gate: the database hands a role that can't see prices null totals, so a Coordinator would otherwise have mailed every client a $0.00 approval or built accounting a spreadsheet of zeroes |
-| Rate admin | Rate lines write straight to `rate_lines` (debounced); **"Restore removed lines"** re-adds any standard line missing from the schedule, at zero, ready to be priced, and the follow switch copies the house card into a client's own card; rate history is logged by a trigger |
+| Billing ticket (mobile) | Prices every weld and charge line against the client's *published* rate schedule, and records the crew's hours, solo hours and dose Number boxes refuse a keystroke that would leave a bad number rather than rewriting it, and honour the unit's step (hours and days by the half, km by the tenth). A figure that looks like a typo — 400 welds, a 30-hour day — is queried once before it saves. The crew is added through a type-ahead over name, initials or id code. Lines the rate card no longer offers are kept read-only under "No longer on the rate card", billed at the rate they were filed at. A queued save that replayed over somebody else's edit says so in a toast at the time and in a banner on the reopened draft until it is dismissed. |
+| Open tickets | A technician's own unbilled tickets — drafts to finish, signatures to chase Filtered and paged, with a strip of work half-entered on this device and never saved, and a tick-and-cancel for drafts that will never be finished, one after another, naming any that refuse. |
+| Team chat | One crew-wide room: pictures, voice notes, GIFs, replies, pins, unread badge and Web Push. Unpinned messages expire after 30 days; job numbers in a message linkify to the job Leaving the screen keeps the whole composer — the words, the reply target, an unsent picture or voice note — per account, until sign-out. |
+| Billing tracker | Every ticket across every job, paged server-side, with the four totals as one RPC rather than a full table scan in the browser. **Chase all unsigned** re-sends the approval link to every ticket still waiting: it leaves alone anything chased in the last three days or carrying an open client query, then sends through a paced pool (three at a time, spaced, `sendPool.js`) that waits out a rate-limited or unavailable transport instead of writing it off. It reports "sending *n* of *N*" as it goes, has a **Stop** that lets the sends in flight land and leaves the rest for another day, and names the tickets that failed by number, because a count of 37 is not something anyone can act on. Both that button and **Export to accounting** are behind the price gate: the database hands a role that can't see prices null totals, so a Coordinator would otherwise have mailed every client a $0.00 approval or built accounting a spreadsheet of zeroes **Resend link** on a single row; the chase dialog shows who each chase would mail before it sends. Aging tiles and a **By client** view answer how old the unsigned money is (`ticket_aging()`, counts for everyone and money for the price roles). Two exports for accounting carry the GST per ticket, and an Invoiced row shows its invoice number. |
+| Rate admin | Rate lines write straight to `rate_lines` (debounced); **"Restore removed lines"** re-adds any standard line missing from the schedule, at zero, ready to be priced, and the follow switch copies the house card into a client's own card; rate history is logged by a trigger The house card lists the clients following it, and a following client's Rate history shows the house card's changes under its own. Each client carries its own **GST rate** (5 by default, 0 for an exempt one; Admin-only), and the field invoice, the approval email and the receipt all charge that rate. **New client** can copy another client's card as figures of its own, unconnected afterwards. |
 | Files | A private `shared` bucket browsed directly; folders are path prefixes, not a table, so the listing can't drift from what's stored |
-| Contacts | The directory of people at each client and contractor, one primary each — what every other screen pre-fills a rep from |
+| Contacts | The directory of people at each client and contractor, one primary each — what every other screen pre-fills a rep from Ten to a page with a per-page dropdown, and a find box over name, title, email and phone inside one organisation. |
 | Equipment | Exposure devices, survey meters, dosimeters and tools with calibration dates; the JHA pre-fills each worker's kit from what's assigned here |
-| Timesheets | Hours, solo hours, dose and mileage per person per pay period, derived from ticket crew rows; admin approves a period, and "Export to Excel" builds a two-sheet workbook. The dose ledger beside it — milliroentgens per person per calendar quarter and year, the figures a nuclear energy worker's record needs — is added up by the database (`dose_totals`), not the browser: a "Year" view used to pull every crew row of the year, tens of thousands of them, to print one line each. It runs with the caller's own rights, so row-level security is still what keeps one technician's dose out of another's screen, and it falls back to the old row-by-row read on a database that hasn't had the function yet |
-| Users & access | Accounts, tab permissions and role presets; an account that was locked rather than deleted (its name is on tickets or JHAs) comes back with **Unlock account**, which lifts the Auth ban, clears `deactivated_at` and restores the role preset's tabs without touching the role |
-| Admin | The settings that used to be function secrets — Resend key and sending addresses, the approval-link base URL, the KLIPY key — in one Admin-only row, plus an **Invoices** section holding the terms, GST number and remit-to block the field invoice prints (the invoice number itself comes from the app's own series, stamped when a ticket is marked invoiced and starting at 1000), a test email, a panel of recent background errors from the Edge Functions (with Refresh and Clear), and the year/date-range archive. Building the archive reads every PDF and renders every ticket's invoice over the connection — minutes for a quiet month, an hour or more for a busy year, so it is a job to start at a desk. Clearing is gated three times over: the downloaded zip is checked back against the manifest the build kept; immediately before the delete, every job's tickets, assessments and reports are counted again live; and the word CLEAR has to be typed. A job that has gained or lost anything since the build stops the clear and says so — the zip on disk cannot know about a ticket filed at 16:20 against a job archived at 16:00. Below the archive sits **Automatic backup**: connect one drive account of the business's own (Google Drive, OneDrive or Dropbox), pick a frequency, an hour in Grande Prairie time and how many copies to keep, and the app writes every record and every PDF to a dated folder there on a schedule — on its own server, so nothing passes through the browser. The same panel lists what is in the drive and restores from it two ways: chosen jobs, which deletes nothing and overwrites nothing, or everything, which empties the database first and is gated four times over |
+| Timesheets | Hours, solo hours, dose and mileage per person per pay period, derived from ticket crew rows; admin approves a period, and "Export to Excel" builds a two-sheet workbook. The dose ledger beside it — milliroentgens per person per calendar quarter and year, the figures a nuclear energy worker's record needs — is added up by the database (`dose_totals`), not the browser: a "Year" view used to pull every crew row of the year, tens of thousands of them, to print one line each. It runs with the caller's own rights, so row-level security is still what keeps one technician's dose out of another's screen, and it falls back to the old row-by-row read on a database that hasn't had the function yet A technician's own view is headed "Your hours"; an Admin approves several periods at once; the dose export is every role's, scoped to the signed-in person for a non-admin. |
+| Users & access | Accounts, tab permissions and role presets; an account that was locked rather than deleted (its name is on tickets or JHAs) comes back with **Unlock account**, which lifts the Auth ban, clears `deactivated_at` and restores the role preset's tabs without touching the role The background-error log lives on the Admin screen now: filtered by function, twenty at a time with **Load 20 more**, and **Clear** behind an Admin-only door. |
+| Admin | The settings that used to be function secrets — Resend key and sending addresses, the approval-link base URL, the KLIPY key — in one Admin-only row, plus an **Invoices** section holding the terms, GST number and remit-to block the field invoice prints (the invoice number itself comes from the app's own series, stamped when a ticket is marked invoiced and starting at 1000), a test email, a panel of recent background errors from the Edge Functions (with Refresh and Clear), and the year/date-range archive. Building the archive reads every PDF and renders every ticket's invoice over the connection — minutes for a quiet month, an hour or more for a busy year, so it is a job to start at a desk. Clearing is gated three times over: the downloaded zip is checked back against the manifest the build kept; immediately before the delete, every job's tickets, assessments and reports are counted again live; and the word CLEAR has to be typed. A job that has gained or lost anything since the build stops the clear and says so — the zip on disk cannot know about a ticket filed at 16:20 against a job archived at 16:00. Below the archive sits **Automatic backup**: connect one drive account of the business's own (Google Drive, OneDrive or Dropbox), pick a frequency, an hour in Grande Prairie time and how many copies to keep, and the app writes every record and every PDF to a dated folder there on a schedule — on its own server, so nothing passes through the browser. The same panel lists what is in the drive and restores from it two ways: chosen jobs, which deletes nothing and overwrites nothing, or everything, which empties the database first and is gated four times over The list of earlier backup runs shows records, files and size for each, twelve deep, with a size line under them and a plain word when the latest backup is under half the one before. An archive build is kept on the device for a day, so the zip can be checked and the clear pressed after the dialog was closed — on the jobs the build covered, never the picker's current count. |
+
+### What the field test changed
+
+Beta 1 went through a field test on the seed data — four testers trying
+to break every screen, then three review rounds over the code — and the
+list they came back with was worked through in one day (commits 1cfef40
+through c168a22). Most of it is in the rows above; the rest cuts across
+screens:
+
+- **The screen is in the address bar** (`src/route.js`, pure and tested):
+  `#/board`, `#/chat`, `#/job/S-10113`, `#/job/S-10113/ticket`. Back steps
+  back a screen, a reload stays put, a ticket or JHA address degrades to
+  its job, and a job's own screens share one history entry so one Back
+  leaves the job (`historyStep`).
+- **An invoice has a number.** Marking a ticket invoiced stamps the next
+  number in the app's own series (from 1000), kept across an un-invoice;
+  the terms, GST number and remit-to block on the Admin screen print on
+  the client's copy. HANDOVER.md says how to carry on a series started
+  elsewhere.
+- **GST is the client's.** `clients.gst_rate` (percent, Admin-only,
+  guarded per column by a trigger); a missing rate reads as 5, never as
+  exempt. `gstOn(subtotal, rate)` in data.js and `invoiceTotals` in
+  `_shared/invoice.ts` both take it, so the screen, the invoice, the
+  approval email and the receipt agree.
+- **The office hears about failures**: the Needs attention strip on the
+  board and the `admin-digest` email at 13:00 UTC, only when something
+  needs doing.
+- **A locked account comes back**: **Unlock account** on Users & access
+  (`unlock-user`), and **Email a set-password link** if they have
+  forgotten it.
+- **No signal is said at once**: a save on a device that knows it is
+  offline goes straight to the outbox and says "Saved on this device"
+  rather than trying the network first.
+- **A queued save is last-write-wins, and says so**: the queued ticket
+  carries a fingerprint of what the edit started from; the replay
+  compares before it writes, toasts once if it replaced somebody else's
+  save, and leaves a banner on the reopened draft (`overwriteNote.js`).
+  A queued report whose email failed says so in a forced toast.
+- **Numbers are typed, not corrected** (`numberInput.js`): a keystroke
+  that would leave an invalid figure is refused, a minus sign is never
+  silently made positive, and the ticket editor queries a figure that
+  looks like a typo once (`SANE_QUANTITY_*`, `SANE_CREW_HOURS`).
+- **Two devices saving one draft** no longer drop a side's hours:
+  `saveCrewForTicket` upserts on (ticket, person) and deletes the rest.
+- **The tests grew teeth**: the render scan refuses a hook below a
+  component's first early return (the mistake behind two of the day's
+  crashes), `appShape.test.mjs` pins App.jsx's ordering, and the
+  Playwright suite has a two-device test for the overwrite banner and a
+  check of the crew type-ahead.
+
+The full list, with what was fixed, built, removed and declined, is the
+"Beta 1 Field Test Findings" artifact the round produced.
 
 ### Offline
 
@@ -492,14 +548,37 @@ vite-app/
                             clock, DST and all; a byte-identical twin lives in
                             supabase/functions/_shared/ and a test compares them
     backupPanelLogic.js     the backup panel's pure parts — the provider list and
-                            labels, the redirect URI each registration needs, and
-                            reading the outcome the drive's redirect came back with
+                            labels, the redirect URI each registration needs,
+                            reading the outcome the drive's redirect came back with,
+                            and the per-run figures and size line
+    route.js                the hash routes: what the address bar says, what the app
+                            does with it, and when a screen change replaces the
+                            entry rather than pushing one
+    help.js                 the "?" text for every screen, under 200 words each
+    numberInput.js          which keystrokes a number box accepts (step, no minus)
+    ticketFingerprint.js    what a queued ticket edit started from, so the replay
+                            can tell it wrote over somebody else's save
+    overwriteNote.js        the note that replay leaves for the editor's banner
+    savingWords.js          "Saving…" against "Saved on this device" — what the
+                            button says while a save is on its way
+    chatDrafts.js           the chat composer held across screen changes, per account
+    dosimetryPrompt.js      the serials offer's pure questions: which typed serial is
+                            news, what keeping writes, and the once-a-session mark
+    wipDrafts.js            the half-entered work Open tickets lists off the device
+    approvalRun.js          running the bulk cancel one draft after another, naming
+                            what failed
+    chasePlan.js            who a chase would mail, before it does
+    ticketAging.js          the tracker's aging tiles and By client view
+    accountingExport.js     the two CSVs for accounting, GST per ticket
+    attention.js            the Needs attention strip's four questions
     *.test.mjs              `npm test` — node --test plus the render-name scan, no
                             browser needed (archive, chat merge, dates, numbers,
                             offline cache and queue, paging, periods, session, zip,
-                            and four for the backup — schedule, shared modules,
-                            restore, panel — which import the Edge Functions'
-                            TypeScript straight out of supabase/functions/)
+                            routes, help, number input, the fingerprint, the chat
+                            draft, the serials offer, and four for the backup —
+                            schedule, shared modules, restore, panel — which import
+                            the Edge Functions' TypeScript straight out of
+                            supabase/functions/)
     components/
       common.jsx            Blueprint frame, Btn, TagX, Field, Dialog, Switch, ErrorBoundary…
       auth.jsx              Sign in
@@ -524,23 +603,28 @@ vite-app/
                             two restores (everything, or chosen jobs)
       archiveDialog.jsx     Build the archive zip, check it, then unlock the clear
       queuePanel.jsx        The offline-queue badge and its what's-waiting panel
+      helpDialog.jsx        The "?" panel, one screen's entry from help.js
+      featureRequest.jsx    The drawer's Feature request form
       flappy880.jsx         One of the two easter eggs
   e2e/                      Playwright against the live project — auth.setup.js signs
                             the accounts in once, then fieldOps, networkSync and
                             multiUser drive real screens; helpers.js sweeps the drafts
                             a run leaves behind
   scripts/check-render.cjs  the render-name scan `npm test` runs first: every capitalised
-                            tag in a JSX file must resolve to something that file imports
+                            tag in a JSX file must resolve to something that file imports,
+                            and no hook may sit below a component's first early return
 supabase/
   migrations/               schema, applied in filename order
-  functions/                sixteen Edge Functions — the three that send mail
+  functions/                nineteen Edge Functions — the three that send mail
                             (send-report, send-jha, send-ticket-approval), the two
                             that render PDFs (render-invoice, render-jha), the client
                             approval page (approve-ticket), account handling
-                            (create-user, delete-user, password-reset), the chat's
-                            push and nightly cleanup (chat-push, chat-retention),
-                            the automatic backup (backup-oauth, backup-run,
-                            backup-restore), gif-search and mail-test; plus
+                            (create-user, delete-user, password-reset, unlock-user),
+                            the chat's push and nightly cleanup (chat-push,
+                            chat-retention), the automatic backup (backup-oauth,
+                            backup-run, backup-restore), the morning digest to the
+                            Admins (admin-digest), the drawer's feature-request
+                            mail, gif-search and mail-test; plus
                             `_shared/`, which is library code, not a function —
                             invoice/JHA rendering, mail, the approval token, and the
                             nine modules the backup is built from (drive.ts and its
