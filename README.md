@@ -214,7 +214,7 @@ tables.
 | Contacts | The directory of people at each client and contractor, one primary each — what every other screen pre-fills a rep from |
 | Equipment | Exposure devices, survey meters, dosimeters and tools with calibration dates; the JHA pre-fills each worker's kit from what's assigned here |
 | Timesheets | Hours, solo hours, dose and mileage per person per pay period, derived from ticket crew rows; admin approves a period, and "Export to Excel" builds a two-sheet workbook. The dose ledger beside it — milliroentgens per person per calendar quarter and year, the figures a nuclear energy worker's record needs — is added up by the database (`dose_totals`), not the browser: a "Year" view used to pull every crew row of the year, tens of thousands of them, to print one line each. It runs with the caller's own rights, so row-level security is still what keeps one technician's dose out of another's screen, and it falls back to the old row-by-row read on a database that hasn't had the function yet |
-| Users & access | Accounts, tab permissions and role presets |
+| Users & access | Accounts, tab permissions and role presets; an account that was locked rather than deleted (its name is on tickets or JHAs) comes back with **Unlock account**, which lifts the Auth ban, clears `deactivated_at` and restores the role preset's tabs without touching the role |
 | Admin | The settings that used to be function secrets — Resend key and sending addresses, the approval-link base URL, the KLIPY key — in one Admin-only row, plus a test email, a panel of recent background errors from the Edge Functions (with Refresh and Clear), and the year/date-range archive. Building the archive reads every PDF and renders every ticket's invoice over the connection — minutes for a quiet month, an hour or more for a busy year, so it is a job to start at a desk. Clearing is gated three times over: the downloaded zip is checked back against the manifest the build kept; immediately before the delete, every job's tickets, assessments and reports are counted again live; and the word CLEAR has to be typed. A job that has gained or lost anything since the build stops the clear and says so — the zip on disk cannot know about a ticket filed at 16:20 against a job archived at 16:00. Below the archive sits **Automatic backup**: connect one drive account of the business's own (Google Drive, OneDrive or Dropbox), pick a frequency, an hour in Grande Prairie time and how many copies to keep, and the app writes every record and every PDF to a dated folder there on a schedule — on its own server, so nothing passes through the browser. The same panel lists what is in the drive and restores from it two ways: chosen jobs, which deletes nothing and overwrites nothing, or everything, which empties the database first and is gated four times over |
 
 ### Offline
@@ -354,6 +354,19 @@ a first backup of a busy database — which can take an hour — needs nobody to
 keep a browser open. Older folders beyond the keep count are removed after
 each successful run; the copies taken automatically just before a restore
 never are.
+
+Neither the panel nor the error log says anything until somebody opens the
+Admin screen, so two things carry the bad news out. An Admin who opens the
+board gets a **Needs attention** strip above it, and only when there is
+something on it: a run that failed and why, a drive whose consent has lapsed
+and needs reconnecting, a backup that was due more than six hours ago and has
+not started, and how many background errors the Edge Functions logged since
+yesterday, grouped by which function. Each line names where to look, because
+the board cannot switch tabs for anybody. The **admin-digest** function says
+the same four things by email to every active Admin, once a morning at 13:00
+UTC — 07:00 in Grande Prairie in summer, 06:00 in winter, since pg_cron has no
+time zone — and sends nothing at all on a morning when nothing is wrong, so a
+message in the inbox always means something needs doing.
 
 Restoring comes two ways. **Restore jobs** is the everyday one: pick jobs off
 the backup's own index and they come back with their tickets, assessments,

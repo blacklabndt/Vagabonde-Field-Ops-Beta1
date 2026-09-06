@@ -68,21 +68,23 @@ deploy the Worker. Path A avoids all of this.
 > old project ref (`eielmvxzdwwprmmfamlq`) and expect no hits.
 >
 > **The moment `supabase db push` finishes, the new project starts calling
-> this one.** Five migrations bake the live project's function URL and
-> publishable key into the text of two cron jobs and the chat push
+> this one.** Six migrations bake the live project's function URL and
+> publishable key into the text of three cron jobs and the chat push
 > trigger: `20260818155616_chat_messages_expire.sql`,
 > `20260818190952_chat_push_subscriptions.sql`,
 > `20260826041947_the_database_signs_its_own_calls.sql` (both the push and
-> the retention job), and `20260905080604_the_project_backs_itself_up.sql`.
+> the retention job), `20260905080604_the_project_backs_itself_up.sql` and
+> `20260906143757_the_office_hears_about_failures.sql`.
 > So a fresh project stands up a `backup-tick` job posting at *this*
 > project's `backup-run` every five minutes, a `chat-retention-nightly`
-> job posting at its `chat-retention`, and a trigger on `chat_messages`
+> job posting at its `chat-retention`, an `admin-digest-daily` job posting
+> at its `admin-digest` every morning, and a trigger on `chat_messages`
 > posting every insert at its `chat-push`. They are rejected — the
 > `x-internal-secret` is minted per project — but the requests are real
 > and the protection is one shared secret deep. Before anything else, run
 > `select cron.unschedule(jobid) from cron.job;` on the new project and
 > re-point the chat push trigger at the new project's own function URL,
-> then re-create the two jobs against it. (Reading the URL from a setting
+> then re-create the three jobs against it. (Reading the URL from a setting
 > the way `edge_shared_secret` already is would end this; it has not been
 > written yet.)
 >
@@ -385,6 +387,14 @@ will remove before the deletes.
   provider has withdrawn the app's access or the client secret has been
   rotated. Nothing backs up until it is reconnected; see "When a run fails"
   above.
+- **Somebody who left is back** — an account with tickets, JHAs or jobs on
+  file is locked rather than deleted when it is removed, so the records keep
+  their name. Users & access shows "Locked out" on that account, and
+  **Unlock account** on the same card is the way back: they sign in again
+  with the password they had, at the role they left at, with that role's
+  sections. If they have forgotten the password, **Email a set-password
+  link** once the account is unlocked. Neither one needs the Supabase
+  dashboard.
 - **Somebody deleted a job that should not have gone** — Admin → Automatic
   backup → Show backups → **Restore jobs** on the last backup that still
   had it. It puts back only what is missing and leaves everything else

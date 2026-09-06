@@ -26,12 +26,20 @@ Cloudflare Worker `solitary-snowflake-ee22` (assets + the `/approve` and
   without that it dies on its first statement in the fresh environment it
   exists for. Never apply the baseline to the live project; it is for fresh
   environments. Replaying the repo into a fresh project also stands up cron
-  jobs and a chat push trigger pointed at THIS project's functions (five
-  migrations bake the URL and publishable key in), so unschedule them and
+  jobs and a chat push trigger pointed at THIS project's functions (six
+  migrations bake the URL and publishable key in, `admin-digest-daily`
+  the latest), so unschedule them and
   re-point the trigger before anything else — HANDOVER.md's Path B says how. An unshipped
   DB fix waits as a draft under `supabase/handover/` (probes beside it) —
   a draft, not history, until it is applied and filed under migrations.
-  Nothing is waiting there now. The latest is
+  Nothing is waiting there now. The latest two are
+  `20260906143757_the_office_hears_about_failures.sql` — the pg_cron job
+  `admin-digest-daily` (13:00 UTC) calling the `admin-digest` function,
+  which mails every active Admin only when something needs attention — and
+  `20260906143715_the_tracker_knows_how_old_the_money_is.sql` —
+  `ticket_aging()`, invoker rights, counts for everyone and money for the
+  price roles, behind the tracker's aging tiles and By client view (probes
+  beside each under `supabase/handover/`). Before them,
   `20260906135356_a_worker_keeps_their_own_serials.sql` (probes in
   `supabase/handover/probes-20260906135356-a-worker-keeps-their-own-serials.sql`):
   `set_own_dosimetry(tld, drd, alarm)`, a definer RPC any signed-in, unlocked

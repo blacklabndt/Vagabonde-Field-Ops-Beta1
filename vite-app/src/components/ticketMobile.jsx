@@ -4,6 +4,7 @@ import { Db } from "../db.js";
 import { Blueprint, Btn, TagX, Field, ErrorBox, emailIn, NoJobSelected, QueuedPanel, NumField , Loading } from "./common.jsx";
 import { OfflineQueue } from "../offlineQueue.js";
 import { OfflineCache } from "../offlineCache.js";
+import { savingLabel, deviceOffline } from "../savingWords.js";
 
 // Stored ticket lines back into the two on-screen lists, matched by label
 // against the client's catalog — what's offered, in what order, at what
@@ -173,6 +174,18 @@ export function TicketMobileScreen({ job, jobRecord, currentUser, onSaved, ticke
   const [orphanLines, setOrphanLines] = useState([]);
   const [servicePick, setServicePick] = useState("");
   const [saving, setSaving] = useState(false);
+  // How long the save on screen has been waiting, which is what decides the
+  // button's wording (savingLabel). Measured from a start stamp rather than
+  // counted in ticks, because a phone that dims its screen throttles the
+  // interval and a tick count would report a wait shorter than it was. Up
+  // here with every other hook, above the early returns below.
+  const [savingMs, setSavingMs] = useState(0);
+  useEffect(() => {
+    if (!saving) { setSavingMs(0); return undefined; }
+    const startedAt = Date.now();
+    const id = setInterval(() => setSavingMs(Date.now() - startedAt), 250);
+    return () => clearInterval(id);
+  }, [saving]);
   const [saveError, setSaveError] = useState("");
   const [queued, setQueued] = useState(false);
   // Set once the ticket row exists, so a retry emails rather than re-inserts.
@@ -733,6 +746,63 @@ export function TicketMobileScreen({ job, jobRecord, currentUser, onSaved, ticke
     let savedId = ticketId;
     let inDb = created;
     let stage = "save";
+
+    // The outbox is reached two ways — the radio dropped the answer, or the
+    // device said up front there was no signal — and both want the same
+    // payload written the same way, so both come through here. It reads
+    // savedId, inDb and stage at the moment it is called, which is why they
+    // are declared above it. It ends the save either way — the queued panel,
+    // or the outbox's own refusal on screen — so every caller returns after
+    // it.
+    const queueThisTicket = async () => {
+      try {
+        await OfflineQueue.enqueue("ticket", {
+          // No ticketId on a ticket that was never created: the number is
+          // minted when this replays, so hours offline can't reserve a number
+          // somebody else has since been given.
+          ticketId: inDb ? savedId : null,
+          initials: initialsOf(currentUser.name),
+          jobDbId: job.dbId, technicianId: currentUser.id, workDate,
+          clientContact: { name: ticketClientContact || jobRecord.clientRep }, contractorContact: { name: ticketContractorContact || jobRecord.contractorRep },
+          lines: buildLines(), status: "Draft",
+          crew, delays, alreadyCreated: inDb, sendForApproval, approvalTo: to, clientKey,
+          // Marked when it was the SEND whose answer went missing, not the
+          // save — `stage` is "email" only once sendTicketApproval has been
+          // called. The send is what moves the row to Awaiting approval, so
+          // one that landed after the radio dropped the reply leaves this
+          // item looking exactly like a ticket the office sent out from
+          // under it: the next flush meets the refused update, sounds the
+          // alarm about billing nobody re-entered, and parks a ticket that
+          // was in fact complete. The queue sets the same flag on its own
+          // send for the same reason (App.jsx). Only a send the radio lost
+          // is ambiguous — a save that never left this device is not one.
+          sendAttempted: stage === "email"
+        });
+      } catch (queueErr) {
+        // The outbox is IndexedDB, and it can refuse — private browsing, a
+        // full disk, a wedged database. Unguarded, that threw straight out
+        // of save: the button stayed on "Saving…" for ever and nobody was
+        // told. The recovery copy stays put, so the day's figures are still
+        // here to try again with.
+        setSaving(false);
+        setSaveError("No signal, and this device couldn't hold the ticket either — stay on this screen and press Save again once you're in range.");
+        return;
+      }
+      // Queued counts as safe: the work is on the device in the outbox now,
+      // which is a better home for it than the recovery copy.
+      await OfflineCache.remove(wipKey);
+      setQueued(true);
+    };
+
+    // There is nothing to learn from asking a radio that is already off.
+    // Waiting for the answer took about eight seconds — a token refresh and
+    // then the request, each having to time out — and the form sat dimmed
+    // and silent for all of it before arriving at this same outbox, which in
+    // a truck reads as a hung app and gets the button pressed again. Nothing
+    // has been attempted at this point, so the ticket is neither created nor
+    // sent and the payload is the one this screen started with.
+    if (deviceOffline()) { await queueThisTicket(); return; }
+
     try {
       // Saved first, emailed second — and saved as a Draft either way.
       //
@@ -795,43 +865,7 @@ export function TicketMobileScreen({ job, jobRecord, currentUser, onSaved, ticke
       onSaved();
     } catch (e) {
       if (OfflineQueue.isNetworkError(e)) {
-        try {
-          await OfflineQueue.enqueue("ticket", {
-            // No ticketId on a ticket that was never created: the number is
-            // minted when this replays, so hours offline can't reserve a number
-            // somebody else has since been given.
-            ticketId: inDb ? savedId : null,
-            initials: initialsOf(currentUser.name),
-            jobDbId: job.dbId, technicianId: currentUser.id, workDate,
-            clientContact: { name: ticketClientContact || jobRecord.clientRep }, contractorContact: { name: ticketContractorContact || jobRecord.contractorRep },
-            lines: buildLines(), status: "Draft",
-            crew, delays, alreadyCreated: inDb, sendForApproval, approvalTo: to, clientKey,
-            // Marked when it was the SEND whose answer went missing, not the
-            // save — `stage` is "email" only once sendTicketApproval has been
-            // called. The send is what moves the row to Awaiting approval, so
-            // one that landed after the radio dropped the reply leaves this
-            // item looking exactly like a ticket the office sent out from
-            // under it: the next flush meets the refused update, sounds the
-            // alarm about billing nobody re-entered, and parks a ticket that
-            // was in fact complete. The queue sets the same flag on its own
-            // send for the same reason (App.jsx). Only a send the radio lost
-            // is ambiguous, and this branch is the network-error branch.
-            sendAttempted: stage === "email"
-          });
-        } catch (queueErr) {
-          // The outbox is IndexedDB, and it can refuse — private browsing, a
-          // full disk, a wedged database. Unguarded, that threw straight out
-          // of save: the button stayed on "Saving…" for ever and nobody was
-          // told. The recovery copy stays put, so the day's figures are still
-          // here to try again with.
-          setSaving(false);
-          setSaveError("No signal, and this device couldn't hold the ticket either — stay on this screen and press Save again once you're in range.");
-          return;
-        }
-        // Queued counts as safe: the work is on the device in the outbox now,
-        // which is a better home for it than the recovery copy.
-        await OfflineCache.remove(wipKey);
-        setQueued(true);
+        await queueThisTicket();
         return;
       }
       setSaving(false);
@@ -1241,7 +1275,7 @@ export function TicketMobileScreen({ job, jobRecord, currentUser, onSaved, ticke
           )}
           <Btn variant="primary" block style={{ minHeight: 56, fontSize: 15 }} onClick={() => save(true)} disabled={saving || !ticketId || total <= 0 || unpriced.length > 0}
             title={unpriced.length ? "An unpriced line is on this ticket — see the note above" : undefined}>
-            {saving ? "Saving…" : emailFailed ? "Retry approval email" : "Email for approval"}
+            {saving ? savingLabel(savingMs, "Saving…") : emailFailed ? "Retry approval email" : "Email for approval"}
           </Btn>
           {/* No total gate here, unlike sending: a draft with nothing on it
               yet is a legitimate placeholder for the day — it parks in the

@@ -1,5 +1,6 @@
 import React, { useState, useEffect, useRef } from "react";
 import { primaryContact, seesPrices as pricesFor } from "../data.js";
+import { attentionItems } from "../attention.js";
 import { Db } from "../db.js";
 import { OfflineQueue } from "../offlineQueue.js";
 import { tabList, Blueprint, Btn, TableScroll, TagX, Field, Dialog, ErrorBox, StatusTag, useMissingFields, RowsPerPage, useRowsPerPage, SearchSelect, RequiredLeft } from "./common.jsx";
@@ -38,6 +39,14 @@ const SEARCH_FIELDS = [
 // case where nothing searchable is left needs saying out loud.
 const searchableText = q => String(q || "").toLowerCase().replace(/[^a-z0-9]/g, "");
 
+// How much of the error log the attention strip reads to count a day's
+// failures. Enough that an ordinary bad night is counted exactly, and a
+// cap so a database having a very bad week does not send a thousand rows
+// to a board that only wants a number. A busier day than this is
+// understated, which is fine: the count is a prompt to go and look, not a
+// total to act on.
+const ERROR_SCAN = 100;
+
 // "On file" is the useful half of this chip; the date is a bonus. A contact
 // filed before `last_used_at` existed has none, and formatting null produced
 // the literal words "Invalid Date" next to the client's name.
@@ -73,6 +82,39 @@ export function HomeScreen({ onCreateJob, onOpenJob, onStartTicket, currentUser,
 
   const [cachedAt, setCachedAt] = useState(null);
   const [pageSize, setPageSize] = useRowsPerPage();
+
+  // The Admin's standing worries, read once when the board opens. A failed
+  // backup, a drive whose consent lapsed, a schedule nothing is picking up
+  // and yesterday's background errors are all recorded the moment they
+  // happen — and all four are invisible until somebody opens the Admin
+  // screen and looks, which for a one-person office can be weeks.
+  //
+  // Read once rather than on every filter or keystroke: this is a standing
+  // state, not a live feed. Both calls are Admin-only in the database and
+  // neither is worth an error box on the board — a refusal, a tablet out
+  // of range, or a project without the backup migration all mean the same
+  // thing here, which is say nothing. Settled rather than awaited
+  // together, so one failing read does not take the other's answer with
+  // it. The daily digest email says the same things when nobody is
+  // looking at all.
+  const [attention, setAttention] = useState([]);
+  const isAdmin = !!currentUser && currentUser.role === "Admin";
+  useEffect(() => {
+    if (!isAdmin) { setAttention([]); return; }
+    let live = true;
+    (async () => {
+      const [state, errors] = await Promise.allSettled([
+        Db.backupState(), Db.listFunctionErrors(ERROR_SCAN)
+      ]);
+      if (!live) return;
+      setAttention(attentionItems(
+        state.status === "fulfilled" ? state.value : null,
+        errors.status === "fulfilled" ? errors.value : null,
+        Date.now()
+      ));
+    })();
+    return () => { live = false; };
+  }, [isAdmin]);
 
   // A request token, so a slower earlier read can't land after a newer one.
   // Tapping through filters or pages fires overlapping, uncancelled reads;
@@ -155,6 +197,26 @@ export function HomeScreen({ onCreateJob, onOpenJob, onStartTicket, currentUser,
       <div style={{ marginBottom: 20 }}>
         <h2 style={{ fontSize: 34, margin: 0 }}>{today}</h2>
       </div>
+
+      {/* Only when there is something to say — an ordinary morning leaves
+          the board exactly as it was. Each line is the fact and then where
+          to go: Home cannot switch tabs for anybody (it is handed openers
+          for jobs and tickets and nothing else), so the step has to be a
+          sentence rather than a link. */}
+      {attention.length > 0 && (
+        <section aria-label="Needs attention" style={{
+          border: "1px solid var(--color-accent-700)", padding: "10px 12px",
+          marginBottom: 14, fontSize: 13, display: "grid", gap: 8
+        }}>
+          <strong style={{ fontFamily: "var(--font-heading)" }}>Needs attention</strong>
+          {attention.map(item => (
+            <div key={item.key}>
+              {item.text}
+              <div style={{ color: "color-mix(in srgb, var(--color-text) 65%, transparent)" }}>{item.where}</div>
+            </div>
+          ))}
+        </section>
+      )}
 
       {/* Filters, the new-work buttons, search and the count are one row:
           on a phone the buttons sit right beside the pills instead of

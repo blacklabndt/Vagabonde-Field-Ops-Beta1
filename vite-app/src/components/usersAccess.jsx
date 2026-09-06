@@ -50,6 +50,31 @@ export function UsersAccessScreen({ currentUser }) {
     setResetting(false);
   };
 
+  // Putting back an account delete-user locked (Admin only; the function
+  // checks). It is not destructive, so it is a secondary button — but it is
+  // still someone's way back into the app, so it asks first and says who it
+  // was about afterwards, in the same note the lock itself uses.
+  const [unlocking, setUnlocking] = useState(false);
+  const unlockAccount = async () => {
+    if (!account) return;
+    if (!confirm(`Unlock ${account.displayName}? They can sign in again with their old password and get the ${account.role} preset's screens.`)) return;
+    setUnlocking(true);
+    setNote("");
+    setError("");
+    try {
+      const res = await Db.unlockUserAccount(account.id);
+      // The list is reloaded before the note is written: load() clears the
+      // error box on its way past, and the account's own row has to lose its
+      // "Locked out" line for the note above it to make sense.
+      await load();
+      setNote([res && res.message, res && res.warning].filter(Boolean).join(" ") ||
+        `${account.displayName} can sign in again.`);
+    } catch (e) {
+      setError(e.message || "Couldn't unlock that account.");
+    }
+    setUnlocking(false);
+  };
+
   // Access writes send the whole tab array, so two of them landing out of
   // order would silently restore a tab the admin just removed. This chains
   // every access/role write onto the previous one, so they commit in click
@@ -242,7 +267,10 @@ export function UsersAccessScreen({ currentUser }) {
                   </Field>
                   {account.deactivated_at && (
                     <div style={{ fontSize: 12, color: "var(--color-accent-700)", margin: "6px 0 0" }}>
-                      Locked out {new Date(account.deactivated_at).toLocaleDateString("en-CA", { day: "2-digit", month: "short", year: "numeric" })} — this account can't sign in. Its name stays on past records; restoring it is done in the Supabase dashboard (Authentication → Users → unban).
+                      Locked out {new Date(account.deactivated_at).toLocaleDateString("en-CA", { day: "2-digit", month: "short", year: "numeric" })} — this account can't sign in. Its name stays on past records.{" "}
+                      {currentUser.role === "Admin"
+                        ? "“Unlock account” below puts it back: they sign in with the password they had, at the same role, with that role's sections."
+                        : "An Admin can put it back from this screen — the person then signs in with the password they had."}
                     </div>
                   )}
                   {currentUser.role === "Admin" && account.id === currentUser.id && (
@@ -255,6 +283,12 @@ export function UsersAccessScreen({ currentUser }) {
                   </div>
                   {resetNote && <div style={{ fontSize: 12, margin: "0 0 8px" }}>{resetNote}</div>}
                   <div style={{ display: "flex", flexDirection: "column", gap: 8, marginTop: 10 }}>
+                    {/* First in the stack, because on a locked account it is
+                        the only button that does anything the admin came
+                        here for. Secondary, not danger: nothing is destroyed. */}
+                    {currentUser.role === "Admin" && account.deactivated_at && (
+                      <Btn variant="secondary" disabled={unlocking} onClick={unlockAccount}>{unlocking ? "Unlocking…" : "Unlock account"}</Btn>
+                    )}
                     {currentUser.role === "Admin" && !account.deactivated_at && (
                       <Btn variant="secondary" disabled={resetting} onClick={sendReset}>{resetting ? "Sending…" : "Email a set-password link"}</Btn>
                     )}

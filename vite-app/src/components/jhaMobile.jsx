@@ -5,6 +5,7 @@ import { Blueprint, Btn, CheckBox, TagX, Field, Dialog, ErrorBox, Switch, splitC
 import { OfflineQueue } from "../offlineQueue.js";
 import { OfflineCache } from "../offlineCache.js";
 import { hasNoSerials, trimmedSerials, isMissingSetOwnDosimetry } from "../dosimetryPrompt.js";
+import { savingLabel, deviceOffline } from "../savingWords.js";
 
 // The JHA (FLHA) — filed at the start of the day, closed out at the end.
 //
@@ -69,6 +70,18 @@ export function JhaBuilderScreen({ job, jobRecord, contacts, currentUser, onSubm
   const [siteRep, setSiteRep] = useState(() => splitContact((jobRecord || {}).contractorRep).name);
   const [siteRepOther, setSiteRepOther] = useState("");
   const [saving, setSaving] = useState(false);
+  // How long the filing on screen has been waiting, which is what decides the
+  // button's wording (savingLabel). Measured from a start stamp rather than
+  // counted in ticks, because a phone that dims its screen throttles the
+  // interval and a tick count would report a wait shorter than it was. Up
+  // here with every other hook, above the early returns further down.
+  const [savingMs, setSavingMs] = useState(0);
+  useEffect(() => {
+    if (!saving) { setSavingMs(0); return undefined; }
+    const startedAt = Date.now();
+    const id = setInterval(() => setSavingMs(Date.now() - startedAt), 250);
+    return () => clearInterval(id);
+  }, [saving]);
   const [error, setError] = useState("");
   const [queued, setQueued] = useState(false);
   // An idempotency key for this one assessment (jhas.client_key), minted
@@ -451,26 +464,40 @@ export function JhaBuilderScreen({ job, jobRecord, contacts, currentUser, onSubm
       details: { site, equipment: equip },
       clientKey
     };
+    // The outbox is reached two ways — the radio dropped the answer, or the
+    // device said up front there was no signal — and both file the same
+    // payload the same way, so both come through here.
+    const queueThisJha = async () => {
+      try {
+        await OfflineQueue.enqueue("jha", jhaPayload);
+      } catch (queueErr) {
+        // The outbox is IndexedDB, and it can refuse — private browsing, a
+        // full disk, a wedged database. Unguarded, that threw straight out
+        // of submit: the button stayed on "Filing…" for ever and nobody was
+        // told. The recovery copy stays put, so the JHA is still here.
+        setSaving(false);
+        setError("No signal, and this device couldn't save it either — stay on this screen and try again once you're in range.");
+        return;
+      }
+      // In the outbox now, which is a better home than the recovery copy.
+      dropWip();
+      setQueued(true);
+    };
+
+    // There is nothing to learn from asking a radio that is already off.
+    // Waiting for the answer took about seven seconds — a token refresh and
+    // then the request, each having to time out — with the form dimmed and
+    // silent for all of it before arriving at this same outbox, which on a
+    // job site reads as a hung app and gets the button pressed again.
+    if (deviceOffline()) { await queueThisJha(); return; }
+
     try {
       await Db.createJha(jhaPayload);
       dropWip();
       onSubmitted();
     } catch (e) {
       if (OfflineQueue.isNetworkError(e)) {
-        try {
-          await OfflineQueue.enqueue("jha", jhaPayload);
-        } catch (queueErr) {
-          // The outbox is IndexedDB, and it can refuse — private browsing, a
-          // full disk, a wedged database. Unguarded, that threw straight out
-          // of submit: the button stayed on "Filing…" for ever and nobody was
-          // told. The recovery copy stays put, so the JHA is still here.
-          setSaving(false);
-          setError("No signal, and this device couldn't save it either — stay on this screen and try again once you're in range.");
-          return;
-        }
-        // In the outbox now, which is a better home than the recovery copy.
-        dropWip();
-        setQueued(true);
+        await queueThisJha();
         return;
       }
       setSaving(false);
@@ -700,7 +727,7 @@ export function JhaBuilderScreen({ job, jobRecord, contacts, currentUser, onSubm
           {/* Above the button rather than beside it — the button is the full
               width of the phone. */}
           <RequiredLeft count={requiredLeft} />
-          <Btn variant="primary" block style={{ minHeight: 56, fontSize: 15 }} onClick={submit} disabled={saving}>{saving ? "Filing…" : "File JHA"}</Btn>
+          <Btn variant="primary" block style={{ minHeight: 56, fontSize: 15 }} onClick={submit} disabled={saving}>{saving ? savingLabel(savingMs, "Filing…") : "File JHA"}</Btn>
           <Btn variant="ghost" block style={{ minHeight: 44, marginTop: 8 }} disabled={saving}
             onClick={() => { if (confirm("Discard this hazard assessment? Nothing has been filed yet.")) { dropWip(); onCancel(); } }}>
             Cancel

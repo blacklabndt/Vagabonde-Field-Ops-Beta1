@@ -5,6 +5,7 @@ import { Blueprint, Btn, TableScroll, StatusTag, TagX, ErrorBox, Dialog, downloa
 import { Toasts } from "../toastBus.js";
 import { runSendPool } from "../sendPool.js";
 import { planChase } from "../chasePlan.js";
+import { rollUpAging, isMissingTicketAging, AGING_BUCKETS } from "../ticketAging.js";
 
 const TRACKER_FILTERS = ["All", "Draft", "Awaiting approval", "Approved", "Invoiced", "Over 7 days"];
 
@@ -71,6 +72,15 @@ export function BillingTrackerScreen({ onOpenTicket, currentUser }) {
   const [filteredTotal, setFilteredTotal] = useState(null);
   const [loading, setLoading] = useState(true);
   const [stats, setStats] = useState(null);
+  // How old the outstanding money is and whose it is, rolled up by
+  // ticketAging.js. Null until the database answers; `agingOff` is the one
+  // answer that isn't a failure — a database without the ticket_aging
+  // migration, which the tracker carries on without.
+  const [aging, setAging] = useState(null);
+  const [agingOff, setAgingOff] = useState(false);
+  // The by-client view: the same outstanding money, one row per client
+  // instead of one per ticket.
+  const [byClient, setByClient] = useState(false);
   const [error, setError] = useState("");
   const [exporting, setExporting] = useState(false);
   const [chasing, setChasing] = useState(false);
@@ -100,7 +110,23 @@ export function BillingTrackerScreen({ onOpenTicket, currentUser }) {
   // tiles silently drifted from the table below them.)
   const loadStats = () =>
     Db.getTicketTrackerStats().then(setStats).catch(e => setError(e.message || "Couldn't load the tracker totals."));
-  useEffect(() => { loadStats(); }, [page, filter]);
+
+  // The aging buckets and the by-client rollup, from the one RPC that groups
+  // them in the database. A database without that migration — a fresh
+  // environment, or this one before it is applied — answers "no such
+  // routine", and the screen simply goes back to the tracker it has always
+  // been rather than showing an error about a tile. Anything else is a real
+  // failure and says so: silently blank money is worse than none.
+  const loadAging = () =>
+    Db.ticketAging()
+      .then(rows => { setAging(rollUpAging(rows)); setAgingOff(false); })
+      .catch(e => {
+        if (isMissingTicketAging(e)) { setAging(null); setAgingOff(true); setByClient(false); return; }
+        setError(e.message || "Couldn't work out how old the outstanding money is.");
+      });
+
+  const loadTiles = () => { loadStats(); loadAging(); };
+  useEffect(() => { loadTiles(); }, [page, filter]);
 
   // A request token, so a slow earlier page cannot land after a newer one.
   // Tapping through filters or pages fires overlapping reads, and whichever
@@ -180,6 +206,12 @@ export function BillingTrackerScreen({ onOpenTicket, currentUser }) {
   // at certain boundaries; summing cents and dividing once is exact.
   const sum = arr => arr.reduce((s, t) => s + Math.round(t.amount * 100), 0) / 100;
   const pageCount = Math.max(1, Math.ceil(total / pageSize));
+  // The aging row and the By client view stand or fall together: both are
+  // this one RPC. They are drawn while it is still loading — with the same
+  // "—" the stats row shows — and dropped only when the database says it has
+  // no such routine, which is a schema without that migration and not a
+  // failure the office can do anything about.
+  const showAging = !agingOff;
 
   // "Chased" is a fact about the ticket now (tickets.chased_at), not a memory
   // this page loses on reload. The flag does not send anything — "Chase all
@@ -274,7 +306,7 @@ export function BillingTrackerScreen({ onOpenTicket, currentUser }) {
       const n = invoiced ? await Db.markTicketsInvoiced(ids) : await Db.unmarkTicketsInvoiced(ids);
       if (n < ids.length) setError(`${ids.length - n} of ${ids.length} didn't change — ${invoiced ? "only approved tickets can be marked invoiced" : "only invoiced tickets can go back"}; the rest may have moved meanwhile.`);
       await fetchPage(page, filter);
-      loadStats();
+      loadTiles();
     } catch (e) {
       setError(e.message || "Couldn't update those tickets.");
     }
@@ -389,7 +421,7 @@ export function BillingTrackerScreen({ onOpenTicket, currentUser }) {
       // the table page and the tiles (and this button's own disabled
       // predicate, which reads stats.unsigned.count) are now stale.
       fetchPage(page, filter);
-      loadStats();
+      loadTiles();
     } catch (e) {
       setError(e.message || "Couldn't chase unsigned tickets.");
     }
@@ -444,25 +476,35 @@ export function BillingTrackerScreen({ onOpenTicket, currentUser }) {
         <div style={{ fontSize: 13, color: "color-mix(in srgb, var(--color-text) 65%, transparent)", marginBottom: 14 }}>{chaseResult}</div>
       )}
 
-      {/* All four tiles the same way round: the money is the big figure and
-          the count is the note. They used to disagree — dollars on Unsigned,
-          a count on the other three — so "$18,240 · 6 · 11 · 43" read left
-          to right as four amounts. Money is the one the tracker exists to
-          answer: how much is stuck at each stage, which is the question
-          behind chasing a signature and behind billing. A role that cannot
-          see prices gets the count in the big figure instead, because null
-          totals are all the database gives it. */}
-      <div style={{ display: "grid", gridTemplateColumns: "repeat(4, 1fr)", gap: 16, marginBottom: 20 }} className="grid-2col">
+      {/* Every tile the same way round: the money is the big figure and the
+          count is the note. They used to disagree — dollars on Unsigned, a
+          count on the others — so "$18,240 · 6 · 11 · 43" read left to right
+          as four amounts. Money is the one the tracker exists to answer: how
+          much is stuck at each stage, which is the question behind chasing a
+          signature and behind billing. A role that cannot see prices gets the
+          count in the big figure instead, because null totals are all the
+          database gives it.
+
+          The first row is where the money is stuck; the second is how long it
+          has been stuck, which is the other half of the Monday-morning
+          question and used to be one tile saying "over 7 days". Until
+          ticket_aging answers, the aging row is drawn with the same "—"
+          placeholders the stats row uses — the layout does not jump when it
+          lands. A database that has never had that migration drops the row
+          altogether and gets the tracker's old "Over 7 days" tile back. */}
+      <div style={{ display: "grid", gridTemplateColumns: showAging ? "repeat(3, 1fr)" : "repeat(4, 1fr)", gap: 16, marginBottom: showAging ? 16 : 20 }} className="grid-2col">
         <Blueprint className="stat-tile">
           <div className="stat-label">Unsigned</div>
           <div className="stat-figure" style={{ color: "var(--color-accent-700)" }}>{stats ? (priced ? money(stats.unsigned.total) : stats.unsigned.count) : "—"}</div>
           <div className="stat-note">{priced ? `${stats ? stats.unsigned.count : "…"} tickets awaiting signature` : "tickets awaiting signature"}</div>
         </Blueprint>
-        <Blueprint className="stat-tile">
-          <div className="stat-label">Over 7 days</div>
-          <div className="stat-figure">{stats ? (priced ? money(stats.over7.total) : stats.over7.count) : "—"}</div>
-          <div className="stat-note">{priced ? `${stats ? stats.over7.count : "…"} tickets unsigned for over a week` : "unsigned for over a week"}</div>
-        </Blueprint>
+        {!showAging && (
+          <Blueprint className="stat-tile">
+            <div className="stat-label">Over 7 days</div>
+            <div className="stat-figure">{stats ? (priced ? money(stats.over7.total) : stats.over7.count) : "—"}</div>
+            <div className="stat-note">{priced ? `${stats ? stats.over7.count : "…"} tickets unsigned for over a week` : "unsigned for over a week"}</div>
+          </Blueprint>
+        )}
         <Blueprint className="stat-tile">
           <div className="stat-label">Approved, not invoiced</div>
           <div className="stat-figure">{stats ? (priced ? money(stats.approved.total) : stats.approved.count) : "—"}</div>
@@ -475,12 +517,55 @@ export function BillingTrackerScreen({ onOpenTicket, currentUser }) {
         </Blueprint>
       </div>
 
+      {showAging && (<>
+        {/* Said in words, because "outstanding" is a word every office uses
+            slightly differently and this one has a definition: sent to the
+            client and not yet through. There is no Paid status in the app —
+            Invoiced is as far as a ticket goes — so an invoice the client
+            has settled is still counted here until somebody archives it. */}
+        <div style={{ fontSize: 12, color: "color-mix(in srgb, var(--color-text) 55%, transparent)", marginBottom: 8 }}>
+          Outstanding by age of the work date — awaiting approval, approved or invoiced, and not yet archived.
+        </div>
+        <div style={{ display: "grid", gridTemplateColumns: "repeat(4, 1fr)", gap: 16, marginBottom: 20 }} className="grid-2col">
+          {AGING_BUCKETS.map(b => {
+            const cell = aging ? aging.buckets[b.key] : null;
+            return (
+              <Blueprint key={b.key} className="stat-tile">
+                <div className="stat-label">{b.label}</div>
+                {/* The 90+ tile carries the accent the way Unsigned does:
+                    it is the one an office acts on, and a row of four
+                    identical tiles hides it. */}
+                <div className="stat-figure" style={b.key === "90" ? { color: "var(--color-accent-700)" } : undefined}>
+                  {cell ? (priced ? money(cell.total || 0) : cell.count) : "—"}
+                </div>
+                <div className="stat-note">{priced ? `${cell ? cell.count : "…"} tickets ${b.note}` : `tickets ${b.note}`}</div>
+              </Blueprint>
+            );
+          })}
+        </div>
+      </>)}
+
+      {/* The status pills, the search and the dates all narrow the ticket
+          table. The by-client rollup is not narrowed by any of them — it is
+          every outstanding ticket, grouped — so while it is showing, the
+          controls that would appear to be filtering it are not on screen at
+          all. Leaving them there would have the office reading a whole-book
+          figure under a filter that says "Approved, March". */}
       <div style={{ display: "flex", alignItems: "center", gap: 6, marginBottom: 10, flexWrap: "wrap" }}>
-        {TRACKER_FILTERS.map(f => (
+        {!byClient && TRACKER_FILTERS.map(f => (
           <button key={f} className={`pill${filter === f ? " active" : ""}`} onClick={() => setFilter(f)}>{f}</button>
         ))}
-        <RowsPerPage style={{ marginLeft: "auto" }} value={pageSize} onChange={n => { setPageSize(n); setPage(0); }} />
+        {showAging && (<>
+          {!byClient && <span aria-hidden="true" style={{ width: 1, height: 20, background: "var(--color-neutral-300)", margin: "0 4px" }} />}
+          <button className={`pill${byClient ? " active" : ""}`} aria-pressed={byClient}
+            onClick={() => setByClient(v => !v)}
+            title="One row per client: what each of them owes and how long it has been outstanding.">
+            By client
+          </button>
+        </>)}
+        {!byClient && <RowsPerPage style={{ marginLeft: "auto" }} value={pageSize} onChange={n => { setPageSize(n); setPage(0); }} />}
       </div>
+      {!byClient && (
       <div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 14, flexWrap: "wrap" }}>
         <input className="input" type="search" value={q} onChange={e => setQ(e.target.value)}
           placeholder="Search ticket, job, project, client or technician…" aria-label="Search tickets"
@@ -504,7 +589,12 @@ export function BillingTrackerScreen({ onOpenTicket, currentUser }) {
           </Btn>
         )}
       </div>
+      )}
 
+      {byClient ? (
+        <ClientRollup aging={aging} priced={priced}
+          onPick={name => { setQ(name); setByClient(false); setFilter("All"); }} />
+      ) : (
       <Blueprint style={{ padding: "6px 18px 14px" }}>
         {loading && <div style={{ padding: "12px 4px", fontSize: 13, color: "color-mix(in srgb, var(--color-text) 55%, transparent)" }}>Loading tickets…</div>}
         <TableScroll><table className="table table-wide">
@@ -640,6 +730,7 @@ export function BillingTrackerScreen({ onOpenTicket, currentUser }) {
           {flaggedCount > 0 && ` · ${flaggedCount} chased`}
         </div>
       </Blueprint>
+      )}
 
       {/* Both dialogs last, after the page they are asking about. Each names
           the address the email is going to, because a link sent to the wrong
@@ -660,6 +751,86 @@ export function BillingTrackerScreen({ onOpenTicket, currentUser }) {
         <ChaseDialog plan={chaseAsk} onClose={() => setChaseAsk(null)} onSend={() => runChase(chaseAsk)} />
       )}
     </div>
+  );
+}
+
+// Who owes what, and how long it has been — the Monday-morning question, in
+// one screen instead of a paged table read client by client.
+//
+// The grouping is the database's (ticket_aging), because "every outstanding
+// ticket" is thousands of rows and PostgREST caps a response at 1,000 without
+// saying so. This draws the rollup ticketAging.js shapes: one row per client,
+// biggest first, with the four buckets beside the total.
+//
+// Clicking a client goes back to the ticket table with the search set to
+// their name. That is deliberately the search box and not a new filter: the
+// search already matches the client name server-side, so the tickets come
+// back paged and priced the way every other view of them does, and the office
+// can widen or narrow from there. It matches on the name, so a job whose
+// project or technician happens to carry the same word comes with it — the
+// search box says what it did, which is the point of using it.
+function ClientRollup({ aging, priced, onPick }) {
+  if (!aging) {
+    return (
+      <Blueprint style={{ padding: "14px 18px" }}>
+        <div style={{ fontSize: 13, color: "color-mix(in srgb, var(--color-text) 55%, transparent)" }}>
+          Working out what each client owes…
+        </div>
+      </Blueprint>
+    );
+  }
+  const { clients, count, total } = aging;
+  // A role without prices gets the count in every money cell, exactly as it
+  // gets the count in the tiles: null totals are all the database gives it,
+  // and a column of "$0.00" against real work would be a lie.
+  const cell = c => priced ? money(c.total || 0) : c.count;
+  return (
+    <Blueprint style={{ padding: "6px 18px 14px" }}>
+      <TableScroll><table className="table table-wide">
+        <thead>
+          <tr>
+            <th>Client</th>
+            <th>Tickets</th>
+            {priced && <th>Outstanding</th>}
+            {AGING_BUCKETS.map(b => <th key={b.key}>{b.label}</th>)}
+          </tr>
+        </thead>
+        <tbody>
+          {!clients.length && (
+            <tr><td colSpan={priced ? 7 : 6} style={{ color: "color-mix(in srgb, var(--color-text) 55%, transparent)" }}>
+              Nothing is outstanding — every ticket is still a draft or has been archived.
+            </td></tr>
+          )}
+          {clients.map(c => (
+            <tr key={c.clientId || "none"}>
+              {/* The tickets behind the row, the same way the ticket number
+                  opens a ticket: a button in a cell, Enter or Space to
+                  follow. A group of jobs with no client on them has no name
+                  to search for, so that row is plain text. */}
+              {c.clientId
+                ? <td className="clickable" tabIndex={0} role="button"
+                    aria-label={`Show the tickets for ${c.name}`}
+                    title="Show this client's tickets"
+                    onKeyDown={e => { if (e.key === "Enter" || e.key === " ") { e.preventDefault(); onPick(c.name); } }}
+                    onClick={() => onPick(c.name)}>{c.name}</td>
+                : <td style={{ color: "color-mix(in srgb, var(--color-text) 60%, transparent)" }}>{c.name}</td>}
+              <td className="tabular">{c.count}</td>
+              {priced && <td className="tabular" style={{ fontWeight: 600 }}>{money(c.total || 0)}</td>}
+              {AGING_BUCKETS.map(b => (
+                <td key={b.key} className="tabular"
+                  style={b.key === "90" && c.buckets[b.key].count ? { color: "var(--color-accent-700)" } : undefined}>
+                  {c.buckets[b.key].count ? cell(c.buckets[b.key]) : "—"}
+                </td>
+              ))}
+            </tr>
+          ))}
+        </tbody>
+      </table></TableScroll>
+      <div style={{ fontSize: 12, color: "color-mix(in srgb, var(--color-text) 55%, transparent)", marginTop: 10 }}>
+        {clients.length} client{clients.length === 1 ? "" : "s"} · {count} outstanding ticket{count === 1 ? "" : "s"}
+        {priced ? ` · ${money(total || 0)} in total` : ""}
+      </div>
+    </Blueprint>
   );
 }
 

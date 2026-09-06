@@ -2403,6 +2403,32 @@ export const Db = {
     };
   },
 
+  // How old the outstanding money is, and whose. One row per client per
+  // aging bucket over every ticket that has been sent but not been through
+  // — the grouping is the database's, because "all of them" here is every
+  // ticket ever raised and PostgREST caps a response at 1,000 rows without
+  // saying so.
+  //
+  // The null total is kept as null: ticket_aging nulls the money for a role
+  // that may not see prices, and Number(null) is 0 — a figure, and one that
+  // reads as a client who owes nothing.
+  //
+  // A missing routine (PGRST202, or a message naming it) means the migration
+  // has not been applied here yet; the error goes back untouched and the
+  // tracker decides what to do about it — isMissingTicketAging in
+  // ticketAging.js is the test.
+  async ticketAging() {
+    const { data, error } = await sbClient.rpc("ticket_aging");
+    if (error) throw error;
+    return (data || []).map(r => ({
+      clientId: r.client_id || null,
+      client: r.client_name || "",
+      bucket: r.bucket,
+      count: Number(r.tickets || 0),
+      total: r.total == null ? null : Number(r.total)
+    }));
+  },
+
   // `q` matches the ticket number, job number, project, client or technician;
   // `from`/`to` bound the work date (YYYY-MM-DD, inclusive). All optional.
   async searchTickets({ page = 0, pageSize = 10, status = "All", q = "", from = null, to = null } = {}) {
@@ -3364,6 +3390,19 @@ export const Db = {
     invalidate("profiles");
     // { ok } when the account is gone; { ok, deactivated, message } when it
     // had work on file and was locked instead — the screen says which.
+    return data || {};
+  },
+
+  // The other side of that lock: lifts the Auth ban, clears deactivated_at
+  // and puts the role's tabs back, through the unlock-user Edge Function —
+  // the ban is the service role's to lift, so it can't be done from here.
+  // Comes back as { ok, user, message } and sometimes a warning; the role
+  // is untouched, so the person returns at the rank they left at.
+  async unlockUserAccount(userId) {
+    const { data, error } = await sbClient.functions.invoke("unlock-user", { body: { userId } });
+    if (error) throw await fnError(error);
+    if (data && data.error) throw new Error(data.error);
+    invalidate("profiles");
     return data || {};
   },
 

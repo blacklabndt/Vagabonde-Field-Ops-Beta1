@@ -474,3 +474,12 @@ verify_jwt = false
 
 [functions.backup-restore]
 verify_jwt = false
+
+# The morning digest, fired by the pg_cron job admin-digest-daily. Same
+# caller as chat-retention — pg_net, no user JWT — so verification has to be
+# off or the job gets a 401 every morning and nobody is ever told anything.
+# The function demands the same x-internal-secret the database signs its
+# calls with before it reads a byte, and mails only the addresses it finds
+# on active Admin profiles, never one from the request.
+[functions.admin-digest]
+verify_jwt = false

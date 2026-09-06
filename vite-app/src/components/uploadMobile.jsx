@@ -1,8 +1,9 @@
-import React, { useState } from "react";
+import React, { useState, useEffect } from "react";
 import { Db } from "../db.js";
 import { Blueprint, Btn, TagX, ErrorBox, emailIn, NoJobSelected, ConnectionBar, QueuedPanel } from "./common.jsx";
 import { fileSize, reportFileRefusal, MAX_REPORT_LABEL } from "../data.js";
 import { OfflineQueue } from "../offlineQueue.js";
+import { savingLabel, deviceOffline } from "../savingWords.js";
 
 export function UploadMobileScreen({ job, jobRecord, currentUser, onSent }) {
   const [items, setItems] = useState([]);
@@ -17,6 +18,19 @@ export function UploadMobileScreen({ job, jobRecord, currentUser, onSent }) {
   // render returned early, called one hook fewer, and React threw instead
   // of showing the queued panel.
   const [weldDraft, setWeldDraft] = useState({});
+  // How long the send on screen has been waiting, which is what decides the
+  // button's wording (savingLabel). Measured from a start stamp rather than
+  // counted in ticks, because a phone that dims its screen throttles the
+  // interval and a tick count would report a wait shorter than it was.
+  // Declared with the other hooks, above the early returns, for the same
+  // reason the weld draft is.
+  const [sendingMs, setSendingMs] = useState(0);
+  useEffect(() => {
+    if (!sending) { setSendingMs(0); return undefined; }
+    const startedAt = Date.now();
+    const id = setInterval(() => setSendingMs(Date.now() - startedAt), 250);
+    return () => clearInterval(id);
+  }, [sending]);
   if (queued) return <QueuedPanel what="the report" onDone={onSent} />;
   if (!job) return <NoJobSelected what="a report" />;
 
@@ -79,13 +93,30 @@ export function UploadMobileScreen({ job, jobRecord, currentUser, onSent }) {
     setError("");
     let failedAt = null;
     let queuedCount = 0;
+    // Asked once, at the press, rather than per file: the answer decides how
+    // this whole package is handled, and a radio flickering back for one file
+    // in the middle would split a package across two homes for no gain. A
+    // device that comes back into range mid-loop still uploads on the next
+    // press; one that drops mid-loop still lands in the outbox, by the
+    // network-error branch below.
+    const noSignal = deviceOffline();
     try {
       for (const it of items) {
+        // Stored on the server, or bound for the outbox — this file is
+        // accounted for either way, and how it got there decides nothing
+        // except which of the two happens next.
+        let toQueue = false;
         try {
-          // Each file leaves the list the moment it is safely stored (or
-          // queued), not when the whole loop finishes — a failure on the
-          // second file used to keep the first one in the list, and the
-          // retry filed it again, report row, email and all.
+          // There is nothing to learn from asking a radio that is already
+          // off: waiting for the answer cost about eight seconds a file — a
+          // token refresh and then the upload, each having to time out —
+          // with the screen dimmed and silent, before arriving at this same
+          // outbox. Straight to the outbox instead.
+          //
+          // Otherwise: each file leaves the list the moment it is safely
+          // stored (or queued), not when the whole loop finishes — a failure
+          // on the second file used to keep the first one in the list, and
+          // the retry filed it again, report row, email and all.
           // `send` stamps `sent_at` on the row; it does not send anything. This
           // screen used to pass `send: true` and no email, so every report from
           // a phone was recorded as delivered to the contractor while nothing
@@ -93,20 +124,27 @@ export function UploadMobileScreen({ job, jobRecord, currentUser, onSent }) {
           // The row's key doubles as the save's idempotency key: a lost
           // answer on the radio hands back the report that already landed
           // instead of filing it twice.
-          const report = await Db.uploadReport({
-            jobDbId: job.dbId, jobNumber: job.id, file: it.file,
-            welds: it.welds.join(", "), result: "Accept", interpretedBy: currentUser.name,
-            send: false, sendTo: recipient, clientKey: it.clientKey
-          });
-          if (recipient) {
-            try {
-              await Db.sendReportEmail({ reportId: report.id, to: recipient, cc: "", message: "" });
-            } catch (mailErr) {
-              failedAt = mailErr.message || "the email service didn't respond.";
+          if (noSignal) {
+            toQueue = true;
+          } else {
+            const report = await Db.uploadReport({
+              jobDbId: job.dbId, jobNumber: job.id, file: it.file,
+              welds: it.welds.join(", "), result: "Accept", interpretedBy: currentUser.name,
+              send: false, sendTo: recipient, clientKey: it.clientKey
+            });
+            if (recipient) {
+              try {
+                await Db.sendReportEmail({ reportId: report.id, to: recipient, cc: "", message: "" });
+              } catch (mailErr) {
+                failedAt = mailErr.message || "the email service didn't respond.";
+              }
             }
           }
         } catch (e) {
           if (!OfflineQueue.isNetworkError(e)) throw e;
+          toQueue = true;
+        }
+        if (toQueue) {
           try {
             await OfflineQueue.enqueue("report", {
               jobDbId: job.dbId, jobNumber: job.id, file: it.file,
@@ -199,7 +237,7 @@ export function UploadMobileScreen({ job, jobRecord, currentUser, onSent }) {
           </div>
           <ErrorBox>{error}</ErrorBox>
           <Btn variant="primary" block style={{ minHeight: 56, fontSize: 15 }} onClick={sendAll} disabled={sending || !items.length}>
-            {sending ? "Sending…" : `Send package (${items.length} files)`}
+            {sending ? savingLabel(sendingMs, "Sending…") : `Send package (${items.length} files)`}
           </Btn>
         </Blueprint>
 
