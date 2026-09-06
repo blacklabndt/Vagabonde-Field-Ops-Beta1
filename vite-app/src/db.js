@@ -1696,6 +1696,17 @@ export const Db = {
     return data;
   },
 
+  // The drawer's Feature request form, mailed to the owner by the function
+  // (which fixes the recipient itself). A direct call, never queued: it is
+  // a nice-to-have, and a form that fails offline says so and keeps its
+  // words in the dialog for another try.
+  async sendFeatureRequest({ title, details }) {
+    const { data, error } = await sbClient.functions.invoke("feature-request", { body: { title, details } });
+    if (error) throw await fnError(error);
+    if (data && data.error) throw new Error(data.error);
+    return data;
+  },
+
   // ── Automatic backup ───────────────────────────────────────────────────
   // Everything the panel is allowed to know, in one Admin-only definer RPC.
   // The refresh token and the three client secrets are in the same row and

@@ -5,6 +5,7 @@ import { Db } from "./db.js";
 import { tabList, Blueprint, Btn, ErrorBox, ErrorBoundary, TagX, Toast, Loading, Switch } from "./components/common.jsx";
 import { Toasts } from "./toastBus.js";
 import { QueueBadge, QueueDialog } from "./components/queuePanel.jsx";
+import { FeatureRequestDialog } from "./components/featureRequest.jsx";
 import { OfflineQueue } from "./offlineQueue.js";
 import { OfflineCache } from "./offlineCache.js";
 import { SwUpdates } from "./swUpdates.js";
@@ -204,6 +205,7 @@ export function App() {
   const [updateDeferred, setUpdateDeferred] = useState(false);
   useEffect(() => SwUpdates.subscribe(setUpdateReady), []);
   const [showQueue, setShowQueue] = useState(false);
+  const [showFeature, setShowFeature] = useState(false);
   const [egg, setEgg] = useState(false);
   // Every save in the app arrives here, from db.js by way of the toast bus.
   const [toast, setToast] = useState(null);
@@ -1165,6 +1167,13 @@ export function App() {
                 )}
               </button>
             ))}
+            {/* Not a screen: the last entry in the list opens a form that
+                mails the office. Set apart from the tabs above it — the
+                tabs are what the account may open; this is for everyone. */}
+            <button onClick={() => { setMenuOpen(false); setShowFeature(true); }}
+              style={{ marginTop: 10, borderTop: "1px solid var(--color-divider)", fontSize: 14, color: "color-mix(in srgb, var(--color-text) 70%, transparent)" }}>
+              Feature request
+            </button>
             <div className="drawer-foot">
               {/* Double-click your own name. Nothing announces it and nothing
                   depends on it; a double-click on a label is not something
@@ -1232,6 +1241,13 @@ export function App() {
           screen so every write is announced the same way and in the same
           place — and outside the ErrorBoundary and Suspense, so it survives a
           screen swap and isn't torn down mid-fade by a lazy chunk loading. */}
+      {/* After main, not before it: the dialog backdrop carries no z-index,
+          so it paints in tree order, and a dialog rendered ahead of main sat
+          under the jobs table — the table showed through the form and took
+          the click meant for Send. */}
+      {showFeature && (
+        <FeatureRequestDialog user={currentUser} onClose={() => setShowFeature(false)} />
+      )}
       {updateReady && !updateDeferred && <UpdateBanner onLater={() => setUpdateDeferred(true)} />}
       <Toast message={toast && toast.text} tone={toast && toast.tone} onDone={() => setToast(null)} />
     </div>

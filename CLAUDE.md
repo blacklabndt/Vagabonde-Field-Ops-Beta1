@@ -157,6 +157,14 @@ Cloudflare Worker `solitary-snowflake-ee22` (assets + the `/approve` and
   onboarding sender, which delivers only to the inbox the Resend account
   was created with — a send to anyone else is refused by Resend and
   mail.ts translates that refusal into a plain message naming the fix.
+- The drawer's "Feature request" entry (below the tabs, for every account)
+  mails the owner through the `feature-request` Edge Function: the
+  recipient is the function's own constant (`FEATURE_REQUEST_TO`), never
+  taken from the request, the reply-to is the sender's address, and the
+  body carries the sender's name and role above their words. A direct
+  call, not the offline queue — it fails soft and keeps the text in the
+  dialog. The dialog renders AFTER `<main>` in App.jsx on purpose: the
+  dialog backdrop has no z-index and paints in tree order.
 - Bulk sends go through `sendPool.js`, never a loop — "Chase all unsigned"
   is the caller, with thousands of emails to get out: 3 workers, a floor
   between starts, and a wait-and-retry for the two refusals mail.ts marks as
