@@ -1,6 +1,6 @@
 import React, { useState, useEffect, useRef } from "react";
 import { Db } from "../db.js";
-import { Blueprint, Btn, TagX, Field, Dialog, ErrorBox, Switch, emailIn, useMissingFields, SearchSelect , Loading } from "./common.jsx";
+import { Blueprint, Btn, TagX, Field, Dialog, ErrorBox, Switch, emailIn, useMissingFields, SearchSelect, Loading, RowsPerPage, useRowsPerPage } from "./common.jsx";
 
 // Contacts — the directory of people at each client and contractor. One
 // screen for both, because in the field they are asked for the same way
@@ -25,6 +25,11 @@ export function ContactsScreen({ currentUser }) {
   const [org, setOrg] = useState(null);
   const [mine, setMine] = useState([]);
   const [contactsLoading, setContactsLoading] = useState(false);
+  // Ten people a page by default, the same dropdown the board and the
+  // tracker carry. A big client's directory used to be one long column of
+  // cards; the page resets whenever the organisation changes.
+  const [pageSize, setPageSize] = useRowsPerPage();
+  const [page, setPage] = useState(0);
   const [adding, setAdding] = useState(false);
   const [showNewOrg, setShowNewOrg] = useState(false);
   const [error, setError] = useState("");
@@ -76,12 +81,17 @@ export function ContactsScreen({ currentUser }) {
     }
     if (seq === loadSeq.current) setContactsLoading(false);
   };
-  useEffect(() => { loadContacts(); }, [org ? org.key : null]);
+  useEffect(() => { loadContacts(); setPage(0); }, [org ? org.key : null]);
 
   // Primary first, then alphabetical — the list answers "who do I call?"
   // before it answers "who else is there?"
   const sorted = [...mine].sort((a, b) =>
     (b.is_primary ? 1 : 0) - (a.is_primary ? 1 : 0) || (a.name || "").localeCompare(b.name || ""));
+  // The page is clamped rather than reset: a contact removed off the last
+  // page leaves the person on the page that still exists.
+  const pageCount = Math.max(1, Math.ceil(sorted.length / pageSize));
+  const safePage = Math.min(page, pageCount - 1);
+  const shown = sorted.slice(safePage * pageSize, safePage * pageSize + pageSize);
 
   // Resolves true when the write landed, false when it did not — so a card
   // being edited stays open with the typed values when the save fails,
@@ -174,9 +184,12 @@ export function ContactsScreen({ currentUser }) {
         <div>
           {org && (
             <Blueprint style={{ padding: "18px 20px" }}>
-              <div style={{ display: "flex", alignItems: "center", gap: 10, marginBottom: 4 }}>
+              <div style={{ display: "flex", alignItems: "center", gap: 10, marginBottom: 4, flexWrap: "wrap" }}>
                 <h4 style={{ margin: 0, fontSize: 19 }}>{org.name}</h4>
                 <TagX variant={org.type === "client" ? "accent" : "outline"}>{org.type === "client" ? "Client" : "Contractor"}</TagX>
+                {sorted.length > 10 && (
+                  <RowsPerPage value={pageSize} onChange={n => { setPageSize(n); setPage(0); }} style={{ marginLeft: "auto" }} />
+                )}
               </div>
               <div style={{ fontSize: 12, color: "color-mix(in srgb, var(--color-text) 60%, transparent)", marginBottom: 16 }}>
                 {org.type === "client"
@@ -194,12 +207,22 @@ export function ContactsScreen({ currentUser }) {
                 <Loading />
               ) : (
                 <div style={{ display: "grid", gap: 12 }}>
-                  {sorted.map(c => (
+                  {shown.map(c => (
                     <ContactCard key={c.id} contact={c} orgName={org.name} canRemove={isAdmin}
                       onSave={form => saveContact(c.id, form)}
                       onMakePrimary={() => makePrimary(c)}
                       onRemove={() => removeContact(c)} />
                   ))}
+                </div>
+              )}
+
+              {!contactsLoading && pageCount > 1 && (
+                <div style={{ display: "flex", alignItems: "center", gap: 10, padding: "14px 0 0" }}>
+                  <Btn variant="secondary" onClick={() => setPage(p => Math.max(0, p - 1))} disabled={safePage === 0}>← Previous</Btn>
+                  <span style={{ fontSize: 13, color: "color-mix(in srgb, var(--color-text) 60%, transparent)" }}>
+                    Page {safePage + 1} of {pageCount} · {sorted.length} people
+                  </span>
+                  <Btn variant="secondary" onClick={() => setPage(p => Math.min(pageCount - 1, p + 1))} disabled={safePage >= pageCount - 1}>Next →</Btn>
                 </div>
               )}
 

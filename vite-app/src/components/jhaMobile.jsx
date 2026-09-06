@@ -31,10 +31,6 @@ const BLANK_EQUIP = {
   redSerial: "", redSurveyMr: "", collimator: false, emergencyKit: false
 };
 
-// The surface reading past which the exposure device is out of service. It is
-// on the paper form as a hard limit; here it is a question at filing time,
-// because the assessment still has to exist as the record of that reading.
-const RED_SURVEY_LIMIT_MR = 200;
 const BLANK_KIT = { unit: "", idCode: "", tld: "", drd: "", alarm: "" };
 
 // Who has already been offered the "keep these serials" panel this session.
@@ -391,12 +387,6 @@ export function JhaBuilderScreen({ job, jobRecord, contacts, currentUser, onSubm
   const onCount = selected.length;
   const helper = people.find(p => p.id === helperId);
 
-  // The surface survey as a number. Read once, here, so the warning under the
-  // box and the question at filing time can never disagree about what was
-  // typed — a comma decimal included ("0,5" is half a milliroentgen).
-  const surveyMr = Number(String(equip.redSurveyMr).replace(",", "."));
-  const surveyOverLimit = surveyMr > RED_SURVEY_LIMIT_MR;
-
   // Whether there is anything to keep yet. The offer's button waits on the
   // same condition filing does — one serial, whichever they're wearing.
   const w1HasSerial = !hasNoSerials(w1);
@@ -436,12 +426,6 @@ export function JhaBuilderScreen({ job, jobRecord, contacts, currentUser, onSubm
       return;
     }
     if (!job || !job.dbId) { setError("No job selected."); return; }
-    // The warning under the survey box says the device must not be used, and
-    // File JHA went ahead regardless — the sentence was stronger than the
-    // behaviour. Filing is still allowed, because the assessment is the record
-    // of the reading and refusing it would lose that, but not by accident.
-    if (surveyOverLimit
-        && !confirm(`The survey reads ${surveyMr} mR/h, over the ${RED_SURVEY_LIMIT_MR} limit. File it anyway?`)) return;
     miss.clear();
     setSaving(true);
     setError("");
@@ -653,11 +637,6 @@ export function JhaBuilderScreen({ job, jobRecord, contacts, currentUser, onSubm
             <input className="input" type="text" inputMode="decimal" value={equip.redSurveyMr}
               onChange={e => setEquip(p => ({ ...p, redSurveyMr: e.target.value.replace(/[^\d.,]/g, "") }))} />
           </Field>
-          {surveyOverLimit && (
-            <div style={{ fontSize: 12, color: "var(--color-accent-700)" }}>
-              Over the {RED_SURVEY_LIMIT_MR} mR/h surface limit — the device must not be used until this is resolved. Filing will ask you to confirm.
-            </div>
-          )}
           <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
             <Switch on={equip.collimator} label="Collimator available" onClick={() => setEquip(p => ({ ...p, collimator: !p.collimator }))} />
             <span style={{ fontSize: 13 }}>Collimator available</span>
