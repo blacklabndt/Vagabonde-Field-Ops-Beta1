@@ -140,6 +140,30 @@ for (const file of walk(root).filter(f => /\.(jsx?|mjs)$/.test(f))) {
   }
 }
 
+// A hook below an early return. It builds, it renders on the branch that
+// returns early, and it throws "Rendered more hooks than during the previous
+// render" on the other — the ticket screen shipped that way once, and the
+// lapsed-session sign-out captured a function declared below the shell's
+// returns a second time. Read per top-level component: the first
+// `  if (…) return` at two-space indent marks the returns, and any hook
+// call after it in the same function is reported.
+const HOOK_CALL = /^  (?:const |let )?.*\buse(?:State|Effect|Ref|Memo|Callback|LayoutEffect|Id|Reducer|Context|RowsPerPage|MissingFields|ScreenFoot|Debounced|ModalPanel|LabelFirstControl)\(/;
+for (const file of walk(root).filter(f => /\.jsx$/.test(f))) {
+  const lines = fs.readFileSync(file, "utf8").split(/\r?\n/);
+  let fn = null, firstReturn = null;
+  for (let i = 0; i < lines.length; i++) {
+    const l = lines[i];
+    const m = l.match(/^(?:export )?function ([A-Z]\w*)\(/);
+    if (m) { fn = m[1]; firstReturn = null; continue; }
+    if (!fn) continue;
+    if (/^}/.test(l)) { fn = null; continue; }
+    if (firstReturn === null && /^  if \(.*\) (?:return\b|\{[^}]*\breturn\b)/.test(l)) firstReturn = i + 1;
+    if (firstReturn !== null && HOOK_CALL.test(l)) {
+      report(file, `line ${i + 1}: a hook in ${fn} sits below the early return at line ${firstReturn}`);
+    }
+  }
+}
+
 if (problems.length) {
   for (const p of problems) console.log(p);
   console.log(`\n${problems.length} problem(s) — these build fine and crash on render.`);

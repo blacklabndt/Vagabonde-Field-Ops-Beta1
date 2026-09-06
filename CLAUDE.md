@@ -7,7 +7,10 @@ Cloudflare Worker `solitary-snowflake-ee22` (assets + the `/approve` and
 
 ## Commands
 
-- Test: `npm --prefix vite-app test` (render-name scan + node --test)
+- Test: `npm --prefix vite-app test` (render-name scan + node --test). The
+  scan also refuses a hook below a component's first early return — the
+  mistake that crashed the ticket screen and, once, the lapsed-session
+  sign-out; `appShape.test.mjs` pins App.jsx's own ordering.
 - Build: `npm --prefix vite-app run build`
 - Deploy: `npm run build && npx wrangler deploy` (from repo root)
 - Dev server: use the `.claude/launch.json` `beta1-dev` config, not Bash
