@@ -32,6 +32,11 @@ Cloudflare Worker `solitary-snowflake-ee22` (assets + the `/approve` and
   DB fix waits as a draft under `supabase/handover/` (probes beside it) —
   a draft, not history, until it is applied and filed under migrations.
   Nothing is waiting there now. The latest is
+  `20260906033223_the_error_log_can_be_cleared.sql` (probes in
+  `supabase/handover/probes-20260906033223-the-error-log-can-be-cleared.sql`):
+  `clear_function_errors()`, an Admin-only definer RPC behind the Admin
+  screen's Clear button, empties the whole log — signed-in accounts hold no
+  delete grant on the table. Before it,
   `20260905222931_the_wipe_deletes_a_batch_at_a_time.sql` (probes in
   `supabase/handover/probes-20260905222931-the-wipe-deletes-a-batch-at-a-time.sql`):
   `restore_wipe_batch(table, limit, keep_id)`, the service role's alone,

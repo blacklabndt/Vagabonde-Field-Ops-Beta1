@@ -3217,6 +3217,14 @@ export const Db = {
     return data;
   },
 
+  // The Admin screen's Clear button. A definer RPC, Admin-only inside the
+  // database — signed-in accounts hold no delete grant on the log.
+  async clearFunctionErrors() {
+    const { data, error } = await sbClient.rpc("clear_function_errors");
+    if (error) throw error;
+    return data;
+  },
+
   // The people who can be put on a crew or a JHA today: everyone whose
   // account is not locked. Users & access keeps using listProfiles, which
   // includes the locked ones so they can be seen and their history kept.

@@ -282,17 +282,39 @@ function RecentErrorsPanel() {
   const [loading, setLoading] = useState(true);
   const [err, setErr] = useState("");
 
+  const [clearing, setClearing] = useState(false);
+
   const load = () => {
     setLoading(true);
     Db.listFunctionErrors().then(setErrors).catch(e => setErr(e.message || "Couldn't load recent errors.")).finally(() => setLoading(false));
   };
   useEffect(() => { load(); }, []);
 
+  // The whole log, not the twenty on screen: the list shows the newest
+  // twenty, and clearing only those would leave older rows to surface as
+  // "recent" the moment it was pressed.
+  const clear = async () => {
+    if (!window.confirm("Clear every logged background error? They cannot be brought back.")) return;
+    setClearing(true);
+    setErr("");
+    try {
+      await Db.clearFunctionErrors();
+      setErrors([]);
+    } catch (e) {
+      setErr(e.message || "Couldn't clear the log.");
+    } finally {
+      setClearing(false);
+    }
+  };
+
   return (
     <Blueprint style={{ padding: "18px 20px", minWidth: 0 }}>
-      <div style={{ display: "flex", alignItems: "center", gap: 10, marginBottom: 4 }}>
+      <div style={{ display: "flex", alignItems: "center", gap: 10, marginBottom: 4, flexWrap: "wrap" }}>
         <div style={{ ...SECTION_TITLE, marginBottom: 0 }}>Recent background errors</div>
-        <Btn variant="secondary" style={{ marginLeft: "auto" }} onClick={load} disabled={loading}>{loading ? "Loading…" : "Refresh"}</Btn>
+        <span style={{ marginLeft: "auto", display: "flex", gap: 8 }}>
+          <Btn variant="secondary" onClick={load} disabled={loading || clearing}>{loading ? "Loading…" : "Refresh"}</Btn>
+          <Btn variant="secondary" onClick={clear} disabled={loading || clearing || !errors.length}>{clearing ? "Clearing…" : "Clear"}</Btn>
+        </span>
       </div>
       <div style={{ fontSize: 12, color: "color-mix(in srgb, var(--color-text) 60%, transparent)", marginBottom: 14 }}>
         Failures in report emails, ticket approvals, PDF rendering, and account removal — logged here so they don't go unnoticed.
