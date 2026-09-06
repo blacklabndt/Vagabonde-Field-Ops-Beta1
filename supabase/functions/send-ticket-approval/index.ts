@@ -41,7 +41,9 @@ Deno.serve(async (req) => {
 
   try {
     const { ticketId, to, cc } = await req.json();
-    if (!ticketId) throw new Error("ticketId is required");
+    // A guard against a client bug, so it should never fire — but whoever
+    // reads it pressed a button, and a variable name tells them nothing.
+    if (!ticketId) throw new Error("This request didn't say which ticket to send. Reload the app and try again.");
     const toList = recipients(to, "to");
     const ccList = optionalRecipients(cc, "cc");
 

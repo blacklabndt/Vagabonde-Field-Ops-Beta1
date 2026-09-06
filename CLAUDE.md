@@ -168,8 +168,32 @@ Cloudflare Worker `solitary-snowflake-ee22` (assets + the `/approve` and
   taken from the request, the reply-to is the sender's address, and the
   body carries the sender's name and role above their words. A direct
   call, not the offline queue — it fails soft and keeps the text in the
-  dialog. The dialog renders AFTER `<main>` in App.jsx on purpose: the
-  dialog backdrop has no z-index and paints in tree order.
+  dialog. Dialogs render after `<main>` in App.jsx and `.dialog-backdrop`
+  carries z-index 100 (above the bar, banner and drawer; below the egg
+  overlay at 200 and the toast at 300) — one rendered ahead of main once
+  sat under the jobs table and took no clicks.
+- The screen is in the address bar: `vite-app/src/route.js` (pure, node-
+  tested) spells `#/board`, `#/chat`, `#/job/S-10113` and
+  `#/job/S-10113/ticket`; App.jsx pushes one history entry per screen
+  change and answers popstate, so Back steps back a screen and a reload stays
+  put. A ticket/JHA/upload address degrades to its job (`landingRoute`) —
+  the address never said which draft. Our hashes always start with `/`;
+  Auth's recovery hash never does, and `recovery.js` now also demands an
+  access_token before showing the set-password screen. Anything that
+  rewrites the URL (the `?goto=` and `?backup=` strips) must keep the hash.
+- `NumField` refuses a keystroke that would leave an invalid number instead
+  of dropping it (`numberInput.js`, tested) and honours `step`: a whole step
+  takes no decimal point, so `CATALOG_STEP` in db.js names the units billed
+  in fractions (h and days by the half, km by the tenth). A minus sign is
+  refused, never silently made positive.
+- `saveCrewForTicket` upserts on (ticket_id, profile_id) then deletes the
+  rest — two devices saving one draft used to collide on the unique key and
+  drop one side's hours. Keep it upsert-first: a failure leaves a person
+  too many, never an empty crew.
+- The JHA opens with nothing ticked (`SEED_HAZARDS` all `on: false`); the
+  ticket editor asks once (`SANE_QUANTITY_*`, `SANE_CREW_HOURS` in data.js)
+  before saving a figure that looks like a typo, and remembers the answer for
+  that ticket session.
 - Bulk sends go through `sendPool.js`, never a loop — "Chase all unsigned"
   is the caller, with thousands of emails to get out: 3 workers, a floor
   between starts, and a wait-and-retry for the two refusals mail.ts marks as

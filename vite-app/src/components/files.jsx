@@ -1,6 +1,6 @@
 import React, { useState, useEffect, useRef } from "react";
 import { Db } from "../db.js";
-import { Blueprint, Btn, TableScroll, ErrorBox , Loading } from "./common.jsx";
+import { Blueprint, Btn, TableScroll, ErrorBox , Loading, openMinted } from "./common.jsx";
 
 // Files — a shared drive for the crew: procedures, certificates, client
 // specs, anything that isn't a report or a ticket.
@@ -19,10 +19,12 @@ function fileSize(bytes) {
 
 export function FilesScreen({ currentUser }) {
   // Every role has the files tab, and the bucket's delete policy follows the
-  // tab — so a whole folder (the procedures library, say) was one mis-tap
-  // from anyone. Single files stay everyone's; folders are an Admin's or
-  // Coordinator's.
-  const canDeleteFolders = !!currentUser && (currentUser.role === "Admin" || currentUser.role === "Coordinator");
+  // tab — so the procedures library was one mis-tap from anyone. Deleting is
+  // an Admin's or a Coordinator's, folder or single file: the drive holds the
+  // RT procedure and the report template, one confirm() is the whole guard,
+  // and there is no undo. The gate was on folders alone, which left the two
+  // files that matter most reachable by the row × beside them.
+  const canDelete = !!currentUser && (currentUser.role === "Admin" || currentUser.role === "Coordinator");
   const [prefix, setPrefix] = useState("");
   const [folders, setFolders] = useState([]);
   const [files, setFiles] = useState([]);
@@ -92,23 +94,25 @@ export function FilesScreen({ currentUser }) {
     } catch (e) { setError(e.message || "Couldn't create the folder."); }
   };
 
+  // The link is minted inside the tap and pointed at a tab claimed before the
+  // await — see openMinted in common.jsx for why the old window.open with
+  // `noopener` navigated this tab as well as opening the file.
   const open = async path => {
     setError("");
     try {
-      const url = await Db.sharedFileUrl(path);
-      const win = window.open(url, "_blank", "noopener");
-      if (!win) window.location.href = url;
+      await openMinted(() => Db.sharedFileUrl(path));
     } catch (e) { setError(e.message || "Couldn't open that file."); }
   };
 
   const removeFile = async f => {
+    if (!canDelete) { setError("Deleting a file is an Admin's or Coordinator's — ask one."); return; }
     if (!confirm(`Delete “${f.name}”? This can't be undone.`)) return;
     try { await Db.deleteSharedFile(f.path); await load(); }
     catch (e) { setError(e.message || "Couldn't delete that file."); }
   };
 
   const removeFolder = async f => {
-    if (!canDeleteFolders) { setError("Deleting a whole folder is an Admin's or Coordinator's — ask one, or delete the files inside it one by one."); return; }
+    if (!canDelete) { setError("Deleting a whole folder is an Admin's or Coordinator's — ask one."); return; }
     if (!confirm(`Delete the folder “${f.name}” and everything inside it? This can't be undone.`)) return;
     setBusy("Deleting…");
     try { await Db.deleteFolder(f.path); await load(); }
@@ -117,6 +121,10 @@ export function FilesScreen({ currentUser }) {
   };
 
   const q = query.trim().toLowerCase();
+  // The empty state quotes the search back so it is clear what was asked, but
+  // a pasted paragraph filled the whole table cell with it. Sixty characters
+  // is enough to recognise your own search in.
+  const shortQuery = query.length > 60 ? query.slice(0, 60) + "…" : query;
   const shownFolders = folders.filter(f => !q || f.name.toLowerCase().includes(q));
   const shownFiles = files.filter(f => !q || f.name.toLowerCase().includes(q));
   const empty = !loading && !shownFolders.length && !shownFiles.length;
@@ -230,7 +238,7 @@ export function FilesScreen({ currentUser }) {
             <tbody>
               {empty && (
                 <tr><td colSpan={4} style={{ color: "color-mix(in srgb, var(--color-text) 55%, transparent)" }}>
-                  {q ? `Nothing here matches “${query}”.` : "This folder is empty — drop files onto this table, or use Upload files."}
+                  {q ? `Nothing here matches “${shortQuery}”.` : "This folder is empty — drop files onto this table, or use Upload files."}
                 </td></tr>
               )}
 
@@ -260,7 +268,7 @@ export function FilesScreen({ currentUser }) {
                   <td style={{ textAlign: "right" }}>
                     {/* Stopped here, or the click that deletes a folder also
                         opens it. */}
-                    {canDeleteFolders && <button onClick={e => { e.stopPropagation(); removeFolder(f); }} aria-label={`Delete folder ${f.name}`} className="row-x">×</button>}
+                    {canDelete && <button onClick={e => { e.stopPropagation(); removeFolder(f); }} aria-label={`Delete folder ${f.name}`} className="row-x">×</button>}
                   </td>
                 </tr>
               ))}
@@ -278,7 +286,7 @@ export function FilesScreen({ currentUser }) {
                     {f.at ? new Date(f.at).toLocaleString("en-CA", { day: "2-digit", month: "short", hour: "2-digit", minute: "2-digit", hour12: false }) : ""}
                   </td>
                   <td style={{ textAlign: "right" }}>
-                    <button onClick={() => removeFile(f)} aria-label={`Delete ${f.name}`} className="row-x">×</button>
+                    {canDelete && <button onClick={() => removeFile(f)} aria-label={`Delete ${f.name}`} className="row-x">×</button>}
                   </td>
                 </tr>
               ))}

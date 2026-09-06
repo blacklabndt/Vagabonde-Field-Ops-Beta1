@@ -36,7 +36,9 @@ Deno.serve(async (req) => {
 
   try {
     const { userId } = await req.json();
-    if (!userId) throw new Error("userId is required");
+    // A guard against a client bug, so it should never fire — but whoever
+    // reads it pressed a button, and a variable name tells them nothing.
+    if (!userId) throw new Error("This request didn't say which account to send the link to. Reload the app and try again.");
 
     const { data: callerProfile } = await asUser.from("profiles").select("role").eq("id", user.id).single();
     if (!callerProfile || callerProfile.role !== "Admin") {

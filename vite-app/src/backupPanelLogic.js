@@ -110,6 +110,19 @@ const clamp = (value, low, high, fallback) => {
   return Math.min(high, Math.max(low, n));
 };
 
+// What a save would actually write into "keep this many", which is not the
+// same as the characters in the box: an emptied box is 14, a typed 0 is 1
+// and 9000 is 365. The sentence under the box used to read the box back
+// verbatim, so it promised numbers no save was going to write.
+export const keepToSave = value => clamp(value, 1, 365, 14);
+
+// The same number said in English. "the 14 most recents" pluralised the
+// wrong word, and one kept backup is not "1 most recent" either.
+export function keepPhrase(value) {
+  const keep = keepToSave(value);
+  return keep === 1 ? "the most recent one" : `the ${keep} most recent`;
+}
+
 // A Google client id copied off the console page comes with company: the
 // first connection attempt saved 131 characters that began with the id and
 // ended with "view or download the client", and Google answered the consent
@@ -137,7 +150,7 @@ export function backupSettingsPatch(form, nowMs) {
   const frequency = FREQUENCIES.includes(f.frequency) ? f.frequency : "daily";
   const weekday = clamp(f.weekday, 0, 6, 0);
   const hour = clamp(f.hour, 0, 23, 0);
-  const keep = clamp(f.keep, 1, 365, 14);
+  const keep = keepToSave(f.keep);
 
   const patch = {
     id: true,

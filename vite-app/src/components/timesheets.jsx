@@ -319,7 +319,11 @@ export function TimesheetsScreen({ currentUser }) {
     <div className="page">
       <div style={{ display: "flex", alignItems: "flex-end", gap: 16, marginBottom: 20, flexWrap: "wrap" }}>
         <div>
-          <div className="kicker">Admin · Hours</div>
+          {/* A technician's own timesheet is not an admin screen — it shows
+              their hours and nobody else's, the way Open tickets shows their
+              own drafts. The literal "Admin · Hours" headed it as if it
+              belonged to someone else's job. */}
+          <div className="kicker">{isAdmin ? "Admin · Hours" : "Your hours"}</div>
           <h2 style={{ fontSize: 34, margin: "2px 0 0" }}>Timesheets</h2>
         </div>
         {view === "period" && <div style={{ marginLeft: "auto", display: "flex", gap: 8, alignItems: "center", flexWrap: "wrap" }}>
@@ -530,7 +534,7 @@ export function TimesheetsScreen({ currentUser }) {
                   <Stat label="Dose this period" value={hours(person.dose)} unit="mR" />
                   {showMileage && <Stat label="Mileage" value={person.mileage.toFixed(0)} unit="km" />}
                 </div>
-                <div style={{ fontSize: 11, color: "color-mix(in srgb, var(--color-text) 50%, transparent)", marginTop: 10 }}>
+                <div style={{ fontSize: 11, color: "color-mix(in srgb, var(--color-text) 65%, transparent)", marginTop: 10 }}>
                   Total paid hours {hours(person.straight + person.ot)}{showSolo ? " — solo hours are a rate distinction within those, not additional time." : "."}
                 </div>
               </Blueprint>
@@ -562,7 +566,7 @@ export function TimesheetsScreen({ currentUser }) {
                         <td>{e.ticketStatus ? <StatusTag status={e.ticketStatus} /> : "—"}</td>
                         <td>
                           <div>{e.project}</div>
-                          <div style={{ fontSize: 11, color: "color-mix(in srgb, var(--color-text) 50%, transparent)" }}>{e.job} · {e.client}</div>
+                          <div style={{ fontSize: 11, color: "color-mix(in srgb, var(--color-text) 65%, transparent)" }}>{e.job} · {e.client}</div>
                         </td>
                         <td className="tabular">{hours(e.straight)}</td>
                         <td className="tabular">{hours(e.ot)}</td>
@@ -575,8 +579,14 @@ export function TimesheetsScreen({ currentUser }) {
                     <tr>
                       {/* Says "all N entries" once there is more than one page,
                           so a total larger than the rows above it reads as the
-                          period's figure rather than a mistake. */}
-                      <td colSpan={3} style={{ fontWeight: 600 }}>
+                          period's figure rather than a mistake.
+                          Four, not three: Date, Ticket, Status and Job · project
+                          all sit before Reg. The Status column was added after
+                          this row was written and the span was not moved with
+                          it, so every figure printed one heading to the left —
+                          period hours under OT, and a dose reading under
+                          Mileage, on a payroll screen. */}
+                      <td colSpan={4} style={{ fontWeight: 600 }}>
                         Period total{entryPageCount > 1 ? ` · all ${entryCount} entries` : ""}
                       </td>
                       <td className="tabular" style={{ fontWeight: 600 }}>{hours(person.straight)}</td>
@@ -599,7 +609,7 @@ export function TimesheetsScreen({ currentUser }) {
                 )}
               </Blueprint>
 
-              <p style={{ fontSize: 11, color: "color-mix(in srgb, var(--color-text) 50%, transparent)", margin: 0 }}>
+              <p style={{ fontSize: 11, color: "color-mix(in srgb, var(--color-text) 65%, transparent)", margin: 0 }}>
                 Hours come from the crew on each billing ticket — to correct one, edit the ticket rather than this page.
                 Dose is recorded per person per ticket in mR.
               </p>

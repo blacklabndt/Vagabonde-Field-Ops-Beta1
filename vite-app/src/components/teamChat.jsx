@@ -4,7 +4,7 @@ import { initialsOf } from "../data.js";
 // The merge every message path funnels through — see chatMerge.js,
 // where the regression tests hold the door on the "Someone" bug.
 import { mergeIn, reconcileWindow } from "../chatMerge.js";
-import { Blueprint, Btn, Dialog, ErrorBox, Loading, Switch } from "./common.jsx";
+import { Blueprint, Btn, Dialog, ErrorBox, Loading, Switch, openMinted } from "./common.jsx";
 
 // Team chat — one room for the whole crew.
 //
@@ -147,10 +147,12 @@ function ChatAudio({ audioKey }) {
 
 // The GIF search. Opens on what's trending, then searches as you type —
 // straight against KLIPY from this browser, as their terms require; the
-// Edge Function only hands over the app key (see Db.searchGifs). Tapping
-// a GIF sends it on its own; whatever is typed in the composer stays
-// there.
+// Edge Function only hands over the app key (see Db.searchGifs). Tapping a
+// GIF chooses it and shows it whole; a second tap sends it. Every tile used
+// to be a send, on a grid of thumbnails a thumb scrolls past, with no undo
+// once it was in the room. Whatever is typed in the composer stays there.
 function GifPicker({ onPick, onClose, busy }) {
+  const [chosen, setChosen] = useState(null);
   const [term, setTerm] = useState("");
   const [gifs, setGifs] = useState([]);
   const [searching, setSearching] = useState(true);
@@ -169,6 +171,18 @@ function GifPicker({ onPick, onClose, busy }) {
     }, term ? 350 : 0);
     return () => clearTimeout(timer);
   }, [term]);
+
+  if (chosen) {
+    return (
+      <Dialog title="Send this GIF?" maxWidth={440} onClose={onClose} actions={<>
+        <Btn variant="secondary" onClick={() => setChosen(null)} disabled={busy}>Pick another</Btn>
+        <Btn variant="primary" onClick={() => onPick(chosen)} disabled={busy}>{busy ? "Sending…" : "Send GIF"}</Btn>
+      </>}>
+        <img src={chosen} alt="The GIF about to be sent"
+          style={{ display: "block", margin: "0 auto", maxWidth: "100%", maxHeight: "46vh", objectFit: "contain" }} />
+      </Dialog>
+    );
+  }
 
   return (
     <Dialog title="Send a GIF" maxWidth={560} onClose={onClose}>
@@ -196,9 +210,9 @@ function GifPicker({ onPick, onClose, busy }) {
           {gifs.map(g => (
             <button
               key={g.id}
-              onClick={() => onPick(g.full)}
+              onClick={() => setChosen(g.full)}
               disabled={busy}
-              aria-label="Send this GIF"
+              aria-label="Choose this GIF"
               style={{ padding: 0, border: "1px solid var(--color-divider)", background: "transparent", cursor: "pointer" }}
             >
               {/* KLIPY's blurred stand-in paints the cell instantly; the
@@ -226,7 +240,10 @@ function GifPicker({ onPick, onClose, busy }) {
 // Browse the Files page's shared bucket and pick one file to link into
 // the room. The chat only ever references these files — the Files page
 // keeps custody, so nothing here uploads, moves or deletes anything.
+// Picking names the file and waits: tapping a row used to post it, and the
+// rows are a list of filenames a thumb scrolls through.
 function FilePickerDialog({ onPick, onClose, busy }) {
+  const [chosen, setChosen] = useState(null);
   const [prefix, setPrefix] = useState("");
   const [listing, setListing] = useState({ folders: [], files: [] });
   const [loading, setLoading] = useState(true);
@@ -249,6 +266,20 @@ function FilePickerDialog({ onPick, onClose, busy }) {
     font: "inherit", color: "inherit", textAlign: "left"
   };
 
+  if (chosen) {
+    return (
+      <Dialog title="Share this file?" maxWidth={440} onClose={onClose} actions={<>
+        <Btn variant="secondary" onClick={() => setChosen(null)} disabled={busy}>Cancel</Btn>
+        <Btn variant="primary" onClick={() => onPick(chosen)} disabled={busy}>{busy ? "Sending…" : "Send"}</Btn>
+      </>}>
+        <div style={{ fontWeight: 600, overflowWrap: "anywhere" }}>{chosen.name}</div>
+        <div style={{ fontSize: 12, color: "color-mix(in srgb, var(--color-text) 55%, transparent)" }}>
+          The message carries a link to it in Files, not a copy.
+        </div>
+      </Dialog>
+    );
+  }
+
   return (
     <Dialog title="Share a file" maxWidth={520} onClose={onClose}>
       <div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 8, fontSize: 12, color: "color-mix(in srgb, var(--color-text) 55%, transparent)" }}>
@@ -258,7 +289,7 @@ function FilePickerDialog({ onPick, onClose, busy }) {
             <span style={{ overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{prefix}</span>
           </>
         ) : (
-          "Everything from the Files page. Tap a file to share it."
+          "Everything from the Files page. Tap a file to choose it."
         )}
       </div>
       {error ? (
@@ -278,7 +309,7 @@ function FilePickerDialog({ onPick, onClose, busy }) {
             </button>
           ))}
           {listing.files.map(f => (
-            <button key={f.path} onClick={() => onPick({ path: f.path, name: f.name })} disabled={busy} style={rowStyle}>
+            <button key={f.path} onClick={() => setChosen({ path: f.path, name: f.name })} disabled={busy} style={rowStyle}>
               <span style={{ flex: "none", fontSize: 9, fontWeight: 700, letterSpacing: ".06em", padding: "3px 5px", border: "1px solid color-mix(in srgb, var(--color-accent) 55%, transparent)", color: "var(--color-accent)" }}>
                 {(f.name.split(".").pop() || "file").toUpperCase().slice(0, 4)}
               </span>
@@ -401,6 +432,20 @@ function Lightbox({ src, onClose }) {
   );
 }
 
+// The composer text outlives the screen. Team chat unmounts the moment the
+// drawer takes you to Files or a job, and the draft went with it — checking a
+// job number halfway through a message cost the message (2,005 characters of
+// it, in beta testing). Held here rather than in OfflineCache because an
+// unsent line is not work the queue owes anyone: it lives as long as the tab
+// does and no longer. Keyed by account so a shared tablet never hands the next
+// technician the last one's half-written message.
+const heldDrafts = new Map();
+
+// Past this many characters the composer starts counting down to the 4,000
+// the column accepts, so the limit is not something you meet by surprise.
+const DRAFT_MAX = 4000;
+const DRAFT_WARN_FROM = 3500;
+
 export function TeamChatScreen({ currentUser, onOpenJob, onRead }) {
   const [messages, setMessages] = useState([]);
   const [pins, setPins] = useState([]);
@@ -408,7 +453,7 @@ export function TeamChatScreen({ currentUser, onOpenJob, onRead }) {
   const [loading, setLoading] = useState(true);
   const [loadingOlder, setLoadingOlder] = useState(false);
   const [loadError, setLoadError] = useState("");
-  const [draft, setDraft] = useState("");
+  const [draft, setDraft] = useState(() => heldDrafts.get(currentUser.id) || "");
   const [attach, setAttach] = useState(null);   // { file, url } awaiting send
   const [gifOpen, setGifOpen] = useState(false);
   const [sending, setSending] = useState(false);
@@ -449,6 +494,9 @@ export function TeamChatScreen({ currentUser, onOpenJob, onRead }) {
   // A voice note in progress: { startedAt } while the mic is hot.
   const [recording, setRecording] = useState(null);
   const [recElapsed, setRecElapsed] = useState(0);
+  // A finished recording waiting to be listened to and sent: { file, url }.
+  // Nothing reaches the room from the microphone without passing through here.
+  const [voiceNote, setVoiceNote] = useState(null);
   // "↓ new messages" — shown when something lands while scrolled up.
   const [jumpChip, setJumpChip] = useState(false);
   // Crewmates with the room open right now (never includes yourself).
@@ -837,6 +885,33 @@ export function TeamChatScreen({ currentUser, onOpenJob, onRead }) {
     });
   };
 
+  // Keep the held copy in step with the box, including the emptying a send
+  // does — nothing should be offered back once it has gone out.
+  useEffect(() => {
+    if (draft) heldDrafts.set(currentUser.id, draft);
+    else heldDrafts.delete(currentUser.id);
+  }, [draft, currentUser.id]);
+
+  // Grow the composer with the message instead of scrolling a two-line slot:
+  // 2,005 characters used to be typed through a 55 px window with a
+  // scrollHeight of 763. Capped at about eight rows so the conversation above
+  // never disappears behind the box; past that the textarea scrolls itself.
+  const composerRef = useRef(null);
+  useLayoutEffect(() => {
+    const el = composerRef.current;
+    if (!el) return;
+    const cs = window.getComputedStyle(el);
+    const line = parseFloat(cs.lineHeight) || 21;
+    const frame = ["paddingTop", "paddingBottom", "borderTopWidth", "borderBottomWidth"]
+      .reduce((sum, p) => sum + (parseFloat(cs[p]) || 0), 0);
+    const max = Math.round(line * 8 + frame);
+    // Measured from scratch each time, or deleting a paragraph leaves the box
+    // as tall as the paragraph was.
+    el.style.height = "auto";
+    el.style.height = Math.min(el.scrollHeight, max) + "px";
+    el.style.overflowY = el.scrollHeight > max ? "auto" : "hidden";
+  }, [draft, recording, voiceNote]);
+
   const send = async () => {
     const text = draft.trim();
     if ((!text && !attach) || sending) return;
@@ -865,8 +940,8 @@ export function TeamChatScreen({ currentUser, onOpenJob, onRead }) {
     setSending(false);
   };
 
-  // A GIF goes on its own the moment it's tapped; whatever is typed in
-  // the composer stays there for its own send.
+  // A GIF goes on its own once it has been chosen and confirmed; whatever
+  // is typed in the composer stays there for its own send.
   const sendGif = async gifUrl => {
     if (sending) return;
     setSending(true);
@@ -960,14 +1035,12 @@ export function TeamChatScreen({ currentUser, onOpenJob, onRead }) {
     setSending(false);
   };
 
-  // Opening a shared file mints its link at tap time, like the PDFs do.
+  // Opening a shared file mints its link at tap time, like the PDFs do —
+  // into a tab claimed before the await. See openMinted in common.jsx for
+  // why the old window.open with `noopener` also navigated the room away.
   const openSharedFile = async m => {
     try {
-      const url = await Db.sharedFileUrl(m.fileKey);
-      // Opened after an await, so some browsers treat this as a non-user
-      // gesture and block it — fall back to same-tab navigation.
-      const win = window.open(url, "_blank", "noopener");
-      if (!win) window.location.href = url;
+      await openMinted(() => Db.sharedFileUrl(m.fileKey));
     } catch (e) {
       setSendError(e.message || "Couldn't open that file — it may have been deleted from Files.");
     }
@@ -992,13 +1065,14 @@ export function TeamChatScreen({ currentUser, onOpenJob, onRead }) {
   };
 
   // ── Voice notes ───────────────────────────────────────────────────────
-  // Typing with gloves on is miserable; talking isn't. Tap Mic, talk,
-  // send — capped at two minutes, which is a radio call, not a podcast.
+  // Typing with gloves on is miserable; talking isn't. Tap Mic, talk, stop,
+  // hear it back, send — capped at two minutes, which is a radio call, not
+  // a podcast.
   const canRecord = typeof MediaRecorder !== "undefined" &&
     !!(navigator.mediaDevices && navigator.mediaDevices.getUserMedia);
 
   const startRecording = async () => {
-    if (recording || sending) return;
+    if (recording || sending || voiceNote) return;
     setSendError("");
     try {
       const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
@@ -1016,11 +1090,17 @@ export function TeamChatScreen({ currentUser, onOpenJob, onRead }) {
     }
   };
 
+  // Stopping never sends. The recording becomes a file sitting in the
+  // composer with its own player, and Send is a second, deliberate tap.
+  // Before this the two-minute ceiling called stopRecording(true) and the
+  // note went out on its own: a tablet left recording in a pocket posted two
+  // minutes of whatever it heard to the whole crew and push-notified every
+  // phone, and deleting it afterwards does not un-buzz them.
   const stopRecording = keep => {
     const r = recRef.current;
     if (!r) return;
     r.discard = !keep;
-    r.rec.onstop = async () => {
+    r.rec.onstop = () => {
       r.stream.getTracks().forEach(t => t.stop());
       setRecording(null);
       recRef.current = null;
@@ -1028,25 +1108,43 @@ export function TeamChatScreen({ currentUser, onOpenJob, onRead }) {
       const type = (r.rec.mimeType || "audio/webm").split(";")[0];
       const ext = { "audio/webm": "webm", "audio/mp4": "m4a", "audio/mpeg": "mp3", "audio/ogg": "ogg" }[type] || "webm";
       const file = new File([new Blob(r.chunks, { type })], "voice-note." + ext, { type });
-      setSending(true);
-      setSendError("");
-      try {
-        const sent = await Db.sendChatMessage(currentUser.id, "", {
-          audioFile: file, replyTo: replyTarget ? replyTarget.id : null
-        });
-        setReplyTarget(null);
-        stickToBottom.current = true;
-        setMessages(prev => mergeIn(prev, [sent]));
-        buzz();
-      } catch (e) {
-        setSendError(e.message || "Couldn't send the voice note — check the connection and try again.");
-      }
-      setSending(false);
+      setVoiceNote({ file, url: URL.createObjectURL(file) });
     };
     try { r.rec.stop(); } catch (_) { setRecording(null); recRef.current = null; }
   };
 
-  // The elapsed readout, and the two-minute ceiling.
+  const dropVoiceNote = () => setVoiceNote(null);
+
+  const sendVoiceNote = async () => {
+    if (!voiceNote || sending) return;
+    setSending(true);
+    setSendError("");
+    try {
+      const sent = await Db.sendChatMessage(currentUser.id, "", {
+        audioFile: voiceNote.file, replyTo: replyTarget ? replyTarget.id : null
+      });
+      setVoiceNote(null);
+      setReplyTarget(null);
+      stickToBottom.current = true;
+      setMessages(prev => mergeIn(prev, [sent]));
+      buzz();
+    } catch (e) {
+      // The note stays in the composer, so a failed send is a retry rather
+      // than a recording to make again.
+      setSendError(e.message || "Couldn't send the voice note — check the connection and try again.");
+    }
+    setSending(false);
+  };
+
+  // One place that lets a note's object URL go: the cleanup runs when the
+  // note is replaced, discarded, sent, or the screen closes over it.
+  useEffect(() => {
+    if (!voiceNote) return undefined;
+    return () => URL.revokeObjectURL(voiceNote.url);
+  }, [voiceNote]);
+
+  // The elapsed readout, and the two-minute ceiling — which stops the
+  // microphone and holds what it has.
   useEffect(() => {
     if (!recording) return;
     const t = setInterval(() => {
@@ -1284,10 +1382,18 @@ export function TeamChatScreen({ currentUser, onOpenJob, onRead }) {
                 reactions are for everyone; moderation — pin and delete —
                 is an Admin's job. A tech's own messages stand as sent
                 until the 30-day sweep takes them. */}
+            {/* The glyph stays quiet; the target does not. This is the only
+                way to reach Reply, and it was 16 × 18 px — six of them down a
+                390 px screen, none of them hittable with gloves on. The
+                padding is the hit area, not the mark. */}
             <button onClick={() => setMenuFor(menuFor === m.id ? null : m.id)}
               aria-label="Message actions" title="Message actions"
               aria-expanded={menuFor === m.id}
-              style={{ ...tinyBtn, fontSize: 14, fontWeight: 700, flex: "none" }}>
+              style={{
+                ...tinyBtn, fontSize: 14, fontWeight: 700, flex: "none",
+                width: 44, height: 44, padding: 0,
+                display: "inline-flex", alignItems: "center", justifyContent: "center"
+              }}>
               ⋯
             </button>
           </div>
@@ -1482,14 +1588,24 @@ export function TeamChatScreen({ currentUser, onOpenJob, onRead }) {
               <button onClick={() => setReplyTarget(null)} aria-label="Cancel the reply" title="Cancel the reply" style={{ ...tinyBtn, fontSize: 15 }}>×</button>
             </div>
           )}
+          {/* A finished recording, with the player it is listened back on.
+              Send is a separate tap from Stop on purpose: what goes into the
+              room buzzes every phone in the crew. */}
+          {voiceNote && !recording && (
+            <div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 8, flexWrap: "wrap" }}>
+              <audio controls src={voiceNote.url} style={{ height: 36, flex: "1 1 190px", minWidth: 150 }} />
+              <Btn variant="secondary" onClick={dropVoiceNote} disabled={sending}>Discard</Btn>
+              <Btn variant="primary" onClick={sendVoiceNote} disabled={sending}>{sending ? "Sending…" : "Send voice note"}</Btn>
+            </div>
+          )}
           {recording ? (
             <div style={{ display: "flex", gap: 8, alignItems: "center" }}>
               <span style={{ color: "var(--color-accent)", fontWeight: 600, fontVariantNumeric: "tabular-nums", flex: "none" }}>
                 ● {Math.floor(recElapsed / 60)}:{String(recElapsed % 60).padStart(2, "0")}
               </span>
-              <span style={{ fontSize: 12, color: muted, flex: 1 }}>Recording — up to two minutes.</span>
+              <span style={{ fontSize: 12, color: muted, flex: 1 }}>Recording — stops itself at two minutes, and waits for you to send it.</span>
               <Btn variant="secondary" onClick={() => stopRecording(false)}>Cancel</Btn>
-              <Btn variant="primary" onClick={() => stopRecording(true)}>Send</Btn>
+              <Btn variant="primary" onClick={() => stopRecording(true)}>Stop</Btn>
             </div>
           ) : (
             <div style={{ display: "flex", gap: 8, alignItems: "flex-end", flexWrap: "wrap" }}>
@@ -1507,12 +1623,13 @@ export function TeamChatScreen({ currentUser, onOpenJob, onRead }) {
                 <IconClip />
               </Btn>
               {canRecord && (
-                <Btn variant="secondary" onClick={startRecording} disabled={sending}
+                <Btn variant="secondary" onClick={startRecording} disabled={sending || !!voiceNote}
                   title="Record a voice note" aria-label="Record a voice note" style={{ padding: "10px 12px" }}>
                   <IconMic />
                 </Btn>
               )}
               <textarea
+                ref={composerRef}
                 value={draft}
                 onChange={e => setDraft(e.target.value)}
                 onKeyDown={e => {
@@ -1521,7 +1638,7 @@ export function TeamChatScreen({ currentUser, onOpenJob, onRead }) {
                 }}
                 placeholder="Message the crew…"
                 rows={2}
-                maxLength={4000}
+                maxLength={DRAFT_MAX}
                 className="input"
                 style={{ flex: 1, minWidth: 160, resize: "none", minHeight: 46, lineHeight: 1.45 }}
               />
@@ -1531,6 +1648,15 @@ export function TeamChatScreen({ currentUser, onOpenJob, onRead }) {
               </Btn>
             </div>
           )}
+          {/* Quiet until the limit is close: a counter on every message is
+              noise, but running into 4,000 with nothing said is a box that
+              stops taking keys for no visible reason. Always rendered and
+              hidden, like ErrorBox, because a node that appears out of
+              nothing is announced less reliably than one that changes. */}
+          <div aria-live="polite" hidden={!!recording || draft.length <= DRAFT_WARN_FROM}
+            style={{ fontSize: 11, color: "var(--color-accent-700)", marginTop: 6 }}>
+            {DRAFT_MAX - draft.length} characters left.
+          </div>
           {/* Said here because history quietly ending mid-scroll would
               otherwise read as a bug, not a policy — and likewise a live
               feed that is down reconnecting should say so, not just go

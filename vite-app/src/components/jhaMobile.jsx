@@ -20,11 +20,19 @@ import { OfflineCache } from "../offlineCache.js";
 const COMM_PRESETS = ["Phone", "Road Radio"];
 const HOSPITAL_DEFAULT = "Grande Prairie Regional Hospital — 11205 110 St, Grande Prairie, AB";
 const BLANK_SITE = { weather: "", temperature: "", communication: "", commOther: false, muster: "", hospital: HOSPITAL_DEFAULT, firstAid: "" };
+// PPE opens unticked, like the hazards do (SEED_HAZARDS in data.js). Hard hat,
+// glasses and boots used to arrive already ticked, so the equipment record
+// claimed three pieces of PPE nobody had confirmed they had on.
 const BLANK_EQUIP = {
-  ppe: { hardHat: true, glasses: true, boots: true, fr: false, gloves: false },
+  ppe: { hardHat: false, glasses: false, boots: false, fr: false, gloves: false },
   h2sSerial: "", h2sBumpTest: false,
   redSerial: "", redSurveyMr: "", collimator: false, emergencyKit: false
 };
+
+// The surface reading past which the exposure device is out of service. It is
+// on the paper form as a hard limit; here it is a question at filing time,
+// because the assessment still has to exist as the record of that reading.
+const RED_SURVEY_LIMIT_MR = 200;
 const BLANK_KIT = { unit: "", idCode: "", tld: "", drd: "", alarm: "" };
 
 const PPE_CHECKS = [
@@ -185,10 +193,10 @@ export function JhaBuilderScreen({ job, jobRecord, contacts, currentUser, onSubm
   // remembered ratings, a derived kit and what the last assessment prefilled
   // are not.
   const sameAs = (a, b) => JSON.stringify(a) === JSON.stringify(b);
-  // Against the seed, not "anything ticked": the standard hazards open
-  // ticked, so `some(on)` was true on an untouched form, every open of the
-  // screen stored a phantom copy, and the phantom's `entered` flag then
-  // switched the prefill-from-last-assessment off for good on that job.
+  // Against the seed, not "anything ticked". The two answer the same on an
+  // untouched form now that the standard hazards open unticked, and they part
+  // company again the moment a hazard is unticked after being ticked — which
+  // is an edit, and a form with edits on it is worth keeping.
   const entered = !sameAs(hazards, SEED_HAZARDS) || extra.length > 0
     || !sameAs(ratings, remembered)
     || !sameAs(site, baseline.current.site)
@@ -293,6 +301,12 @@ export function JhaBuilderScreen({ job, jobRecord, contacts, currentUser, onSubm
   const onCount = selected.length;
   const helper = people.find(p => p.id === helperId);
 
+  // The surface survey as a number. Read once, here, so the warning under the
+  // box and the question at filing time can never disagree about what was
+  // typed — a comma decimal included ("0,5" is half a milliroentgen).
+  const surveyMr = Number(String(equip.redSurveyMr).replace(",", "."));
+  const surveyOverLimit = surveyMr > RED_SURVEY_LIMIT_MR;
+
   // The four conditions submit() refuses on, counted as the form is filled
   // in rather than reported after the button is pressed. Kept in step with
   // the checks below — they are the same four, in the same order.
@@ -315,17 +329,25 @@ export function JhaBuilderScreen({ job, jobRecord, contacts, currentUser, onSubm
     const siteRepJoined = [siteRep.trim(), siteRepOther.trim()].filter(Boolean).join(" & ");
     if (!w1.tld.trim() && !w1.drd.trim() && !w1.alarm.trim()) {
       miss.flag("w1tld", "w1drd", "w1alarm");
-      setError("Nuclear energy worker (1) has no dosimetry recorded — fill in at least one serial, or set them up in Users & access.");
+      // Not "set them up in Users & access": a technician has no users tab,
+      // so half that advice was a door they cannot open.
+      setError("Nuclear energy worker (1) has no dosimetry recorded — fill in at least one serial, or ask an admin to add them to your profile.");
       return;
     }
     // The second worker is a nuclear energy worker too; a helper filed with
     // three blank serials is a dose record that names nobody's dosimeter.
     if (helper && !w2.tld.trim() && !w2.drd.trim() && !w2.alarm.trim()) {
       miss.flag("w2tld", "w2drd", "w2alarm");
-      setError(`${helper.displayName} has no dosimetry recorded — fill in at least one serial for nuclear energy worker (2), or set them up in Users & access.`);
+      setError(`${helper.displayName} has no dosimetry recorded — fill in at least one serial for nuclear energy worker (2), or ask an admin to add them to that profile.`);
       return;
     }
     if (!job || !job.dbId) { setError("No job selected."); return; }
+    // The warning under the survey box says the device must not be used, and
+    // File JHA went ahead regardless — the sentence was stronger than the
+    // behaviour. Filing is still allowed, because the assessment is the record
+    // of the reading and refusing it would lose that, but not by accident.
+    if (surveyOverLimit
+        && !confirm(`The survey reads ${surveyMr} mR/h, over the ${RED_SURVEY_LIMIT_MR} limit. File it anyway?`)) return;
     miss.clear();
     setSaving(true);
     setError("");
@@ -519,9 +541,9 @@ export function JhaBuilderScreen({ job, jobRecord, contacts, currentUser, onSubm
             <input className="input" type="text" inputMode="decimal" value={equip.redSurveyMr}
               onChange={e => setEquip(p => ({ ...p, redSurveyMr: e.target.value.replace(/[^\d.,]/g, "") }))} />
           </Field>
-          {Number(String(equip.redSurveyMr).replace(",", ".")) > 200 && (
+          {surveyOverLimit && (
             <div style={{ fontSize: 12, color: "var(--color-accent-700)" }}>
-              Over the 200 mR/h surface limit — the device must not be used until this is resolved.
+              Over the {RED_SURVEY_LIMIT_MR} mR/h surface limit — the device must not be used until this is resolved. Filing will ask you to confirm.
             </div>
           )}
           <div style={{ display: "flex", alignItems: "center", gap: 10 }}>

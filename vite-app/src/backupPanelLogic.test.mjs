@@ -12,7 +12,8 @@ import { readFileSync } from "node:fs";
 import {
   BACKUP_PROVIDERS, PROVIDER_LABEL,
   redirectUriFor, backupSettingsPatch, readBackupOutcome, cleanClientId,
-  BEFORE_RESTORE_PREFIX, isBeforeRestore, restoreNameMatches, failedRunAdvice
+  BEFORE_RESTORE_PREFIX, isBeforeRestore, restoreNameMatches, failedRunAdvice,
+  keepToSave, keepPhrase
 } from "./backupPanelLogic.js";
 
 // ── The redirect URI ─────────────────────────────────────────────────────
@@ -97,6 +98,25 @@ test("nonsense in the number boxes lands on the defaults rather than on NaN", ()
   assert.equal(patch.backup_weekday, 0);
   assert.equal(patch.backup_hour, 0);
   assert.equal(patch.backup_keep, 14);
+});
+
+test("the sentence under the keep box says the number the save would write", () => {
+  // The box and the save are read through the same clamp, so the three
+  // cases that used to disagree cannot any more.
+  assert.equal(keepToSave(""), 14);
+  assert.equal(keepToSave("0"), 1);
+  assert.equal(keepToSave("9000"), 365);
+  assert.equal(keepToSave("30"), 30);
+  for (const typed of ["", "0", "9000", "30"]) {
+    assert.equal(backupSettingsPatch({ ...FORM, keep: typed }, 0).backup_keep, keepToSave(typed));
+  }
+});
+
+test("one kept backup is “the most recent one”, not “the 1 most recents”", () => {
+  assert.equal(keepPhrase(1), "the most recent one");
+  assert.equal(keepPhrase(14), "the 14 most recent");
+  assert.equal(keepPhrase(""), "the 14 most recent");
+  assert.equal(keepPhrase("0"), "the most recent one");
 });
 
 test("the four frequencies the schedule knows all survive", () => {

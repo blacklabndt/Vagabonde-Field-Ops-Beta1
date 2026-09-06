@@ -80,7 +80,12 @@ export async function openJobFromBoard(page, jobNumber) {
 // table's row to go is waiting for the real thing — "the ticket list has
 // arrived" — where the old sleep only hoped 1.2 s was enough.
 export async function settledJobDetail(page) {
-  await expect(page.getByText("Job detail")).toBeVisible({ timeout: 15_000 });
+  // The section name in the top bar, and only that. A bare
+  // getByText("Job detail") also matched the ticket editor's "Go to Job
+  // detail" button, which the editor grows whenever the job has an open
+  // assessment — so on those jobs the helper died of a strict-mode
+  // violation instead of waiting.
+  await expect(page.locator(".topbar-section")).toHaveText("Job detail", { timeout: 15_000 });
   const billing = page.locator("table").filter({
     has: page.getByRole("columnheader", { name: "Ticket", exact: true })
   });

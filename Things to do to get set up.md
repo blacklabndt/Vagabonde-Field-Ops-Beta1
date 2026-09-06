@@ -286,18 +286,27 @@ Same for the client and contractor contacts — the seeded ones are invented.
 
 ## Where things stand
 
-**Done and working:** sign-in, jobs, JHAs, report upload to private storage,
-billing tickets and rate schedules, the billing tracker, user accounts and
-per-tab permissions. All of it against a real database with row-level
-security.
+**Done and working:** sign-in, jobs, JHAs and their close-out, report upload
+to private storage, billing tickets and rate schedules, the billing tracker,
+user accounts and per-tab permissions, and the offline queue behind the three
+field screens — a JHA, report or ticket raised with no signal is kept on the
+device and replays itself when the truck is back in range. All of it against
+a real database with row-level security.
 
-**Waiting on this checklist:** sending email (steps 1–4). The functions and
-the public approval page are written and in `supabase/` — they just need your
-Resend key and a deploy.
+**Sending email is done too.** The Resend key and the sending addresses are
+no longer secrets you set from a terminal: they live on the **Admin** screen,
+along with the app's own address and a **Send a test email** button. Steps
+1–4 below are still how the account and the deploy get made; the key itself
+is typed into the app.
 
-**Built since:** the offline queue for the three field screens. A JHA, report
-or ticket raised with no signal is stored in the browser's IndexedDB and
-replays automatically the moment the device is back in range; the top bar
-shows a count of anything still waiting. It only ever queues a genuine
-connectivity failure — a real error (a completed job, a missing rate
-schedule) still surfaces on the spot.
+**Also here since this list was written:** the year/date-range **archive**
+(build a zip of every job raised in a period, check the download, then clear
+those jobs), **team chat** with pictures, voice notes and push, **equipment**
+with calibration dates, **timesheets** with the Excel export and the dose
+ledger, and **automatic backup**.
+
+**The step that is not on this list, and matters most:** connect a backup
+drive. Admin → Automatic backup → register one drive app (Google Drive,
+OneDrive or Dropbox), connect it, set the hour and press **Back up now**.
+Until that is done, this database is the only copy of everything the other
+steps set up. HANDOVER.md's "Connecting a backup drive" has the walk-through.

@@ -24,7 +24,9 @@ export async function sendSetPasswordLink(admin: any, email: string, name: strin
   });
   if (error) throw error;
   const link: string | undefined = data?.properties?.action_link;
-  if (!link) throw new Error("Auth returned no link.");
+  // Read by the Admin who pressed the button, so it says what happened and
+  // what to do rather than naming the service that let them down.
+  if (!link) throw new Error("No set-password link came back, so nothing could be emailed. Try again in a moment.");
 
   const first = String(name || "").trim().split(/\s+/)[0] || "";
   const greeting = `Hi${first ? " " + first : ""},`;

@@ -45,12 +45,15 @@ Deno.serve(async (req) => {
 
   try {
     const { email, password, name, role, cert, invite } = await req.json();
-    if (!email) throw new Error("email is required");
+    // These three guard against a client that sent the wrong shape, so they
+    // should never fire — but if one does, it is read by whoever pressed
+    // Create account, not by whoever wrote the call.
+    if (!email) throw new Error("No email address came through for the new account. Fill in the Email box and press Create account again.");
     // An invited account gets a password nobody knows; the person chooses
     // their own from the set-password link mailed below.
     const secret = invite ? crypto.randomUUID() + crypto.randomUUID() : password;
-    if (!secret) throw new Error("email and password are required");
-    if (!VALID_ROLES.includes(role)) throw new Error("role must be one of: " + VALID_ROLES.join(", "));
+    if (!secret) throw new Error("No password came through, and this account wasn't set to be emailed a set-password link. Type a temporary password, or tick “Email them a link to set their own password”.");
+    if (!VALID_ROLES.includes(role)) throw new Error("That isn't a role this app knows. Pick one of: " + VALID_ROLES.join(", ") + ".");
 
     // Only an Admin may create an account — checked against the caller's
     // own profile, read through RLS, exactly as delete-user does it.
@@ -75,27 +78,41 @@ Deno.serve(async (req) => {
     // it deliberately caps metadata roles to the field ones — the real
     // rank is written here, by the path that proved its caller is an
     // Admin. tabs_for_role keeps the tab set in step with the rank.
+    //
+    // Neither of these is a failed account: the Auth user and the trigger's
+    // profile both exist by now, at the trigger's capped rank. Both used to
+    // throw, which came back as a 400 — the dialog stayed open, the list was
+    // never reloaded, and pressing Create again answered "email already
+    // registered" about an account nobody could see. They travel the same
+    // way the invitation's failure does: the account, and a warning that
+    // names what to put right on it.
+    let warning = "";
     const { data: tabs, error: tErr } = await admin.rpc("tabs_for_role", { _role: role });
-    if (tErr) throw new Error("Account created, but its tabs could not be derived: " + tErr.message);
-    const { error: pErr } = await admin.from("profiles")
-      .update({ role, tab_access: tabs }).eq("id", userId);
-    if (pErr) throw new Error("Account created, but its role could not be set: " + pErr.message);
+    if (tErr) {
+      warning = `The account was created, but the sections a ${role} should see couldn't be worked out (${tErr.message}), so it has the ones a new account starts with. Open the account in the list and set its role again.`;
+    } else {
+      const { error: pErr } = await admin.from("profiles")
+        .update({ role, tab_access: tabs }).eq("id", userId);
+      if (pErr) {
+        warning = `The account was created, but its role couldn't be set to ${role} (${pErr.message}), so it is still the rank a new account starts at. Open the account in the list and change the role there.`;
+      }
+    }
 
-    // The invitation. A mail failure is not a failed account — it exists
-    // and is provisioned — so it comes back as a warning that names the
-    // way out (the set-password button on the account's page).
+    // The invitation. A mail failure is not a failed account either — so it
+    // joins whatever is already outstanding rather than replacing it.
     if (invite) {
       try {
         await sendSetPasswordLink(admin, email, name, "invite");
       } catch (e) {
-        return json({
-          ok: true, user: { id: userId, email },
-          warning: `The account was created, but the invitation email didn't go out (${(e as Error).message}). Open the account in the list and press "Email a set-password link".`
-        });
+        const why = `the invitation email didn't go out (${(e as Error).message})`;
+        const howToFix = `Open the account in the list and press "Email a set-password link".`;
+        warning = warning
+          ? `${warning} Also, ${why}. ${howToFix}`
+          : `The account was created, but ${why}. ${howToFix}`;
       }
     }
 
-    return json({ ok: true, user: { id: userId, email }, invited: !!invite });
+    return json({ ok: true, user: { id: userId, email }, invited: !!invite, ...(warning ? { warning } : {}) });
   } catch (e) {
     await logError("create-user", (e as Error).message);
     return json({ error: (e as Error).message }, 400);

@@ -34,7 +34,9 @@ Deno.serve(async (req) => {
 
   try {
     const { userId } = await req.json();
-    if (!userId) throw new Error("userId is required");
+    // A guard against a client bug, so it should never fire — but whoever
+    // reads it pressed a button, and a variable name tells them nothing.
+    if (!userId) throw new Error("This request didn't say which account to remove. Reload the app and try again.");
 
     // Only an Admin may remove an account — checked against the caller's own
     // profile, read through RLS so this can't be spoofed by a non-admin JWT.

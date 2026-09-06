@@ -18,7 +18,9 @@ import assert from "node:assert/strict";
 import { readdirSync, readFileSync } from "node:fs";
 import {
   money, todayLocal, tabList, UNIVERSAL_TABS,
-  primaryContact, crewRoleFor, seesPrices, ROLE_PRESETS, ticketStatusWriteRefusal
+  primaryContact, crewRoleFor, seesPrices, ROLE_PRESETS, ticketStatusWriteRefusal,
+  fileSize, reportFileRefusal, MAX_REPORT_BYTES, saneQuantityCeiling,
+  SANE_QUANTITY_DEFAULT, SEED_HAZARDS
 } from "./data.js";
 
 // ── money ────────────────────────────────────────────────────────────────
@@ -222,6 +224,79 @@ test("an ordinary draft save is not refused", () => {
   // would strand a ticket with nothing on screen to explain it.
   assert.equal(ticketStatusWriteRefusal("Queried", "Draft", "KK-1"), null);
   assert.equal(ticketStatusWriteRefusal(null, "Draft", "KK-1"), null);
+});
+
+// ── fileSize ─────────────────────────────────────────────────────────────
+// The phone upload screen printed every attachment in MB to one decimal, so
+// an interpreted report under a megabyte read "0.0 MB" and looked like a
+// failed attachment.
+
+test("fileSize names the unit the file is actually in", () => {
+  assert.equal(fileSize(340_000), "340 KB");
+  assert.equal(fileSize(999_999), "1000 KB");
+  assert.equal(fileSize(1_200_000), "1.2 MB");
+  assert.equal(fileSize(31_400_000), "31.4 MB");
+  // A few hundred bytes is not "0 KB": that reads as nothing attached.
+  assert.equal(fileSize(512), "512 bytes");
+  assert.equal(fileSize(0), "0 bytes");
+});
+
+// ── reportFileRefusal ────────────────────────────────────────────────────
+// `accept="application/pdf"` on a file input is a picker filter and no more:
+// a drag-and-drop, a share sheet, or "All files" in the picker hands over
+// whatever was chosen. Both upload screens ask this one question so they
+// refuse the same things in the same words.
+
+const pretendFile = (name, type, size) => ({ name, type, size });
+
+test("a non-PDF is refused by name, and says what to do", () => {
+  const said = reportFileRefusal(pretendFile("scan.txt", "text/plain", 900));
+  assert.match(said, /^scan\.txt isn't a PDF/);
+  assert.match(said, /export it as one/);
+});
+
+test("a PDF the browser gave no type for is still a PDF", () => {
+  // Files picked out of a cloud drive on a phone arrive with an empty type.
+  assert.equal(reportFileRefusal(pretendFile("RT-0812.PDF", "", 900)), "");
+  assert.equal(reportFileRefusal(pretendFile("report.pdf", "application/pdf", 900)), "");
+});
+
+test("an oversized PDF is refused with its own size and the limit", () => {
+  const said = reportFileRefusal(pretendFile("big.pdf", "application/pdf", 31_400_000));
+  assert.match(said, /big\.pdf is 31\.4 MB, over the 25 MB limit/);
+  // Exactly at the ceiling is fine — the limit is what it says it is.
+  assert.equal(reportFileRefusal(pretendFile("big.pdf", "application/pdf", MAX_REPORT_BYTES)), "");
+});
+
+test("no file is not a refusal", () => {
+  // Clearing the picker is not an error, and neither screen should shout.
+  assert.equal(reportFileRefusal(null), "");
+  assert.equal(reportFileRefusal(undefined), "");
+});
+
+// ── saneQuantityCeiling ──────────────────────────────────────────────────
+// The figure past which the ticket screen asks once whether that is really
+// what was worked. Per unit, because 200 km is an ordinary drive out of
+// Grande Prairie and 200 hours is a month.
+
+test("the sanity ceiling is per unit, with a default for anything new", () => {
+  assert.equal(saneQuantityCeiling("weld"), 200);
+  assert.equal(saneQuantityCeiling("h"), 24);
+  // Mileage has to be generous or every second ticket would be questioned.
+  assert.ok(saneQuantityCeiling("km") > 1000);
+  // A unit added to the rate card tomorrow still gets an answer.
+  assert.equal(saneQuantityCeiling("box"), SANE_QUANTITY_DEFAULT);
+  assert.equal(saneQuantityCeiling(undefined), SANE_QUANTITY_DEFAULT);
+});
+
+// ── SEED_HAZARDS ─────────────────────────────────────────────────────────
+
+test("the JHA's standing hazards open unticked", () => {
+  // Ticked, "tick at least one hazard before filing" can never fire: an
+  // assessment files in three taps claiming all twelve with no severity,
+  // probability or frequency on any of them.
+  assert.ok(SEED_HAZARDS.length);
+  assert.deepEqual(SEED_HAZARDS.filter(h => h.on), []);
 });
 
 // ── ROLE_PRESETS against the database ────────────────────────────────────

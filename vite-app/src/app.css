@@ -33,6 +33,24 @@
   --ease-exit: cubic-bezier(.55, .06, .68, .19);
 }
 
+/* The light theme's accent, darkened. The design system's #5980a6 measured
+   3.71:1 on the #f2f2f3 page and 3.42:1 on the #e9e9ea panel — under AA both
+   ways, and it is the same number in both directions, so it failed as link
+   and label text AND as the ground under every primary button's white
+   caption ("+ Job", "+ Ticket", the active pill, the active segment). The
+   dark theme's accent already measures 8.95:1 and is left exactly as it is.
+   #4a6c8e takes the light theme to 4.91:1 on the page and 4.52:1 on a panel.
+   The token is overridden here rather than in _ds/…/styles.css so the design
+   system stays the system; :not([data-theme="dark"]) both outranks the DS's
+   bare :root and cannot touch the dark block above, whatever order a bundler
+   emits them in. --color-accent-600 moves with it because that is the
+   primary button's hover, and a hover lighter than its own rest state reads
+   as the button switching off under the pointer. */
+:root:not([data-theme="dark"]) {
+  --color-accent: #4a6c8e;
+  --color-accent-600: #3d5a76;
+}
+
 html, body, #root { min-height: 100%; }
 *, *::before, *::after { box-sizing: border-box; }
 body {
@@ -72,7 +90,7 @@ input[type=range] { accent-color: var(--color-accent); }
 .seg-theme button {
   background: transparent; border: none; cursor: pointer; padding: 6px 10px;
   font-size: 12px; font-family: var(--font-heading); font-weight: 600;
-  color: color-mix(in srgb, var(--color-text) 60%, transparent);
+  color: color-mix(in srgb, var(--color-text) 65%, transparent);
 }
 .seg-theme button:not(.active):hover { background: color-mix(in srgb, var(--color-text) 7%, transparent); }
 .seg-theme button.active { background: var(--color-accent); color: var(--color-bg); }
@@ -103,14 +121,47 @@ input[type=range] { accent-color: var(--color-accent); }
 .seg-opt:not(.active):hover { background: color-mix(in srgb, var(--color-text) 7%, transparent); }
 .seg-opt:focus-visible { outline: 2px solid var(--color-accent); outline-offset: -2px; }
 
-/* — status tags helper — dashed tag variant, not in the DS — */
-.tag-dashed { border: 1px dashed color-mix(in srgb, var(--color-text) 45%, transparent); color: color-mix(in srgb, var(--color-text) 55%, transparent); }
+/* — a button that is not available yet —
+   The design system draws a disabled button as the enabled one at 45%
+   opacity, which in the light theme measures 2.75:1 and reads as merely
+   faint rather than as off: "Export period summary" greyed out while the
+   screen was still loading looked like a button worth tapping. Two signals
+   say it now. The fill loses its colour, so a disabled primary is grey where
+   an enabled one is blue — that difference survives sunlight in a way a
+   difference in weight does not — and the border goes dashed, which is
+   already this app's mark for something not settled (.tag-dashed below).
+   The opacity is lifted at the same time so the caption stays legible. */
+.btn:disabled {
+  opacity: .6;
+  filter: grayscale(1);
+  border-style: dashed;
+}
+
+/* — a button that destroys something —
+   Not in the design system, which carries one accent and no red. Restrained
+   on purpose: an outline in the same weight as every other button, so a
+   delete sits in a row without shouting, and a fill only under the pointer,
+   where the intent is already there. Each theme gets its own tone, because a
+   red dark enough to read on paper-white disappears on the dark ground:
+   #9a3324 is 6.53:1 on the light page, #e8927c is 7.49:1 on the dark one. */
+.btn-danger { color: #9a3324; border-color: #9a3324; background: transparent; }
+.btn-danger:hover { background: #9a3324; border-color: #9a3324; color: #f2f2f3; }
+.btn-danger:active { background: #7d2a1e; border-color: #7d2a1e; color: #f2f2f3; }
+:root[data-theme="dark"] .btn-danger { color: #e8927c; border-color: #b4563f; }
+:root[data-theme="dark"] .btn-danger:hover { background: #e8927c; border-color: #e8927c; color: #16181a; }
+:root[data-theme="dark"] .btn-danger:active { background: #d07f6a; border-color: #d07f6a; color: #16181a; }
+
+/* — status tags helper — dashed tag variant, not in the DS —
+   The text was 55% of the ink colour, which is 3.64:1 on the light page.
+   65% takes it to 4.93:1; the border stays where it was, being decoration
+   rather than something anybody has to read. */
+.tag-dashed { border: 1px dashed color-mix(in srgb, var(--color-text) 45%, transparent); color: color-mix(in srgb, var(--color-text) 65%, transparent); }
 
 /* — pdf glyph, drawn not imaged — */
 .pdf-glyph {
   display: inline-flex; align-items: flex-end; justify-content: center;
   border: 1px solid var(--color-divider); font-size: 6px; font-weight: 700;
-  letter-spacing: .02em; color: color-mix(in srgb, var(--color-text) 60%, transparent);
+  letter-spacing: .02em; color: color-mix(in srgb, var(--color-text) 65%, transparent);
   padding-bottom: 2px; flex: none;
 }
 
@@ -153,11 +204,24 @@ tbody tr.clickable { cursor: pointer; }
 .dialog-field-grid > * { min-width: 0; }
 
 /* Heavier scrim than the design system's 50% default: these dialogs sit over
-   dense tables, and a light scrim left the page competing with the form. */
+   dense tables, and a light scrim left the page competing with the form.
+
+   The z-index is the other half of a bug that has now been found twice. The
+   design system gives the backdrop no stacking order, and every card on
+   every screen is `position: relative` with none either — so two positioned
+   boxes at `auto` paint in tree order and whichever is later in the DOM wins.
+   A dialog rendered before <main> therefore sat UNDER the page: the table
+   showed through the form and took the clicks meant for its buttons. Moving
+   each offender after <main> fixes that dialog; a z-index fixes the class.
+   100 clears everything the shell puts over the page — the top bar, the
+   update banner at 55, the drawer at 60 — and stays under the easter egg's
+   own overlay at 200 and the toast at 300, which must be readable over a
+   dialog because it is how a save reports itself. */
 .dialog-backdrop {
   background: color-mix(in srgb, var(--color-neutral-900) 82%, transparent);
   backdrop-filter: blur(2px);
   animation: backdrop-in .26s ease both;
+  z-index: 100;
 }
 /* Every dialog arrives with a small zoom: the scrim fades up and the
    panel scales in from 95% with a touch of rise. One rule here covers
@@ -197,21 +261,28 @@ tbody tr.clickable { cursor: pointer; }
 .row-x {
   width: 24px; height: 24px; border: 1px solid var(--color-divider);
   background: transparent; cursor: pointer; font-size: 14px; line-height: 1;
-  color: color-mix(in srgb, var(--color-text) 55%, transparent);
+  color: color-mix(in srgb, var(--color-text) 65%, transparent);
 }
 .row-x:hover { border-color: var(--color-accent); color: var(--color-accent); }
+/* The small × that deletes a rate line wears the danger tone too. Both
+   selectors are one class deep, so this one has to be two: .row-x is written
+   below .btn-danger and would otherwise win on order alone. */
+.row-x.btn-danger { color: #9a3324; border-color: #9a3324; }
+.row-x.btn-danger:hover { background: #9a3324; color: #f2f2f3; }
+:root[data-theme="dark"] .row-x.btn-danger { color: #e8927c; border-color: #b4563f; }
+:root[data-theme="dark"] .row-x.btn-danger:hover { background: #e8927c; border-color: #e8927c; color: #16181a; }
 
 /* — summary strip — */
 .strip { display: grid; gap: 1px; background: var(--color-divider); border: 1px solid var(--color-divider); }
 .strip > div { background: var(--color-bg); padding: 12px 14px; }
-.strip .strip-label { font-size: 10px; text-transform: uppercase; letter-spacing: .08em; color: color-mix(in srgb, var(--color-text) 55%, transparent); }
+.strip .strip-label { font-size: 10px; text-transform: uppercase; letter-spacing: .08em; color: color-mix(in srgb, var(--color-text) 65%, transparent); }
 .strip .strip-value { font-family: var(--font-heading); font-weight: 600; font-size: 20px; font-variant-numeric: tabular-nums; }
 
 /* — stat tiles — */
 .stat-tile { padding: 16px 18px; display: flex; flex-direction: column; gap: 4px; }
-.stat-label { font-size: 10px; text-transform: uppercase; letter-spacing: .08em; color: color-mix(in srgb, var(--color-text) 55%, transparent); }
+.stat-label { font-size: 10px; text-transform: uppercase; letter-spacing: .08em; color: color-mix(in srgb, var(--color-text) 65%, transparent); }
 .stat-figure { font-family: var(--font-heading); font-weight: 600; font-size: 30px; font-variant-numeric: tabular-nums; }
-.stat-note { font-size: 12px; color: color-mix(in srgb, var(--color-text) 55%, transparent); }
+.stat-note { font-size: 12px; color: color-mix(in srgb, var(--color-text) 65%, transparent); }
 
 .tabular { font-variant-numeric: tabular-nums; }
 .error-box[hidden] { display: none; }
@@ -320,6 +391,13 @@ tbody tr.clickable { cursor: pointer; }
    it rather than fighting it for the same auto margin. */
 .drawer-foot:first-of-type { margin-top: auto; }
 
+/* Who is signed in, at phone width. The full name has nowhere to go below
+   760px and used to be dropped altogether, which left the drawer as the only
+   place to find out — two taps to answer a question worth one glance, on
+   tablets that get handed between crew members. The initials take its place
+   there; on a wider bar the name itself is still what shows. */
+.topbar-initials { display: none; }
+
 @media (max-width: 760px) {
 
   /* Thumb-sized where a thumb does the work: the row × that deletes a
@@ -335,9 +413,17 @@ tbody tr.clickable { cursor: pointer; }
   .topbar-section { flex: 1 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
   /* The hazard list rides the page's own scroll on a phone. */
   .hazard-list { max-height: none; overflow: visible; }
-  /* The bar keeps only what a thumb needs: menu, mark, theme. Name and sign
-     out live in the drawer, where there is room for them. */
-  .topbar-who { display: none; }
+  /* The bar keeps only what a thumb needs: menu, mark, theme, and who is
+     holding the tablet, shortened to initials. Signing out lives in the
+     drawer, where there is room for it. */
+  .topbar-name { display: none; }
+  .topbar-initials {
+    display: inline-flex; align-items: center; justify-content: center;
+    min-width: 30px; height: 30px; padding: 0 6px; flex: none;
+    border: 1px solid var(--color-divider);
+    font-family: var(--font-heading); font-weight: 600; font-size: 12px;
+    letter-spacing: .04em;
+  }
 
 
   .col-opt { display: none !important; }
@@ -420,7 +506,7 @@ label.field-label-missing {
    like a screen that has hung. */
 .loading {
   display: flex; flex-direction: column; gap: 8px;
-  font-size: 13px; color: color-mix(in srgb, var(--color-text) 55%, transparent);
+  font-size: 13px; color: color-mix(in srgb, var(--color-text) 65%, transparent);
 }
 .loading-bar {
   position: relative; height: 3px; overflow: hidden;
@@ -483,7 +569,7 @@ label.field-label-missing {
 .egg-head, .egg-foot {
   display: flex; align-items: center; gap: 10px;
   padding: 9px 12px; font-size: 12px;
-  color: color-mix(in srgb, var(--color-text) 62%, transparent);
+  color: color-mix(in srgb, var(--color-text) 65%, transparent);
 }
 .egg-head { border-bottom: 1px solid var(--color-divider); }
 .egg-head strong { font-family: var(--font-heading); font-size: 15px; color: var(--color-text); }

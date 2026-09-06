@@ -9,9 +9,18 @@ export function UsersAccessScreen({ currentUser }) {
   const [showNew, setShowNew] = useState(false);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState("");
+  // Something that went the way it was meant to and still needs saying —
+  // an account locked rather than deleted, which is the designed outcome
+  // for someone with work on file. It is kept out of `error` because that
+  // box is an alert, and announcing a correct outcome as a failure sends
+  // the admin looking for something to fix.
+  const [note, setNote] = useState("");
 
   const load = async () => {
     setLoading(true);
+    // A read that failed once used to leave its red box up through every
+    // later success.
+    setError("");
     try { setUsers(await Db.listProfiles()); }
     catch (e) { setError(e.message || "Couldn't load accounts."); }
     setLoading(false);
@@ -24,7 +33,9 @@ export function UsersAccessScreen({ currentUser }) {
   // and clears when another account is picked.
   const [resetting, setResetting] = useState(false);
   const [resetNote, setResetNote] = useState("");
-  useEffect(() => { setResetNote(""); }, [selected]);
+  // Both notes name the account they are about, so picking another one is
+  // the end of them.
+  useEffect(() => { setResetNote(""); setNote(""); }, [selected]);
   const sendReset = async () => {
     if (!account) return;
     if (!confirm(`Email ${account.name} a link to set a new password? The link works once.`)) return;
@@ -106,6 +117,7 @@ export function UsersAccessScreen({ currentUser }) {
   const removeAccount = async () => {
     if (!account) return;
     if (account.id === currentUser.id) { setError("You can't remove your own account."); return; }
+    setNote("");
     if (!confirm(`Remove ${account.displayName}'s account? They will no longer be able to sign in — this can't be undone. (An account with tickets or JHAs on file is locked rather than deleted, so the records keep their name.)`)) return;
     try {
       const res = await Db.deleteUserAccount(account.id);
@@ -113,7 +125,7 @@ export function UsersAccessScreen({ currentUser }) {
         // Locked, not deleted: the row stays, with no tabs and a stamp, so
         // the list shows what happened rather than pretending it vanished.
         setUsers(p => p.map(u => u.id === account.id ? { ...u, tab_access: [], deactivated_at: new Date().toISOString() } : u));
-        setError(res.message || `${account.displayName}'s account was locked instead of deleted: they can no longer sign in.`);
+        setNote(res.message || `${account.displayName}'s account was locked instead of deleted: they can no longer sign in.`);
         return;
       }
       setUsers(p => p.filter(u => u.id !== account.id));
@@ -129,6 +141,9 @@ export function UsersAccessScreen({ currentUser }) {
         <Btn variant="primary" style={{ marginLeft: "auto" }} onClick={() => setShowNew(true)}>+ New user</Btn>
       </div>
       <ErrorBox>{error}</ErrorBox>
+      {note && (
+        <div role="status" style={{ fontSize: 13, marginBottom: 12, color: "color-mix(in srgb, var(--color-text) 70%, transparent)" }}>{note}</div>
+      )}
 
       {loading ? (
         <Loading />
@@ -244,7 +259,7 @@ export function UsersAccessScreen({ currentUser }) {
                       <Btn variant="secondary" disabled={resetting} onClick={sendReset}>{resetting ? "Sending…" : "Email a set-password link"}</Btn>
                     )}
                     <Btn variant="secondary" onClick={resetPreset}>Reset to role preset</Btn>
-                    <Btn variant="secondary" onClick={removeAccount}>Remove account</Btn>
+                    <Btn variant="danger" onClick={removeAccount}>Remove account</Btn>
                   </div>
                 </div>
               </div>
@@ -256,7 +271,11 @@ export function UsersAccessScreen({ currentUser }) {
       {/* The dialog closes on a created account whether or not everything
           after it landed; anything that didn't is said up here, where it
           stays readable next to the list the admin now has to use. */}
-      {showNew && <NewUserDialog onClose={() => setShowNew(false)} onCreated={async warning => { setShowNew(false); setError(warning || ""); await load(); }} />}
+      {/* The list is reloaded first and the warning written after it: load()
+          clears the error box on its way past, so the other order left the
+          admin with the new account and nothing said about what didn't
+          land with it. */}
+      {showNew && <NewUserDialog onClose={() => setShowNew(false)} onCreated={async warning => { setShowNew(false); await load(); setError(warning || ""); }} />}
     </div>
   );
 }

@@ -13,7 +13,32 @@
 // subscription exists before the event can possibly fire.
 import { sbClient } from "./config.js";
 
-let pending = typeof window !== "undefined" && window.location.hash.includes("type=recovery");
+// What a genuine reset landing looks like: Auth puts the whole recovery
+// session in the hash — `#access_token=…&refresh_token=…&type=recovery` —
+// and both halves are required here.
+//
+// `type=recovery` on its own is just a word anybody can put in a URL, and it
+// used to be enough: loading `…/#type=recovery` while somebody was signed in
+// opened the real "Set a new password" screen over their live session, with
+// no token involved at any point. Save behind it would have changed that
+// account's password. Team chat linkifies URLs, so a message carrying that
+// address and a plausible sentence showed the app's own password screen —
+// an induced password change made to look native. With no token there is no
+// recovery session and nothing to set a password with, so it is not one.
+function readRecoveryHash() {
+  if (typeof window === "undefined") return false;
+  const p = new URLSearchParams((window.location.hash || "").replace(/^#/, ""));
+  return p.get("type") === "recovery" && !!p.get("access_token");
+}
+let pending = readRecoveryHash();
+// A bare `type=recovery` is also taken out of the address bar. Nothing else
+// reads it, and leaving it there means a bookmark or a forwarded link keeps
+// asking the same question on every load.
+if (typeof window !== "undefined" && !pending
+    && new URLSearchParams((window.location.hash || "").replace(/^#/, "")).get("type") === "recovery"
+    && window.history && window.history.replaceState) {
+  window.history.replaceState(null, "", (window.location.pathname || "") + (window.location.search || ""));
+}
 const listeners = new Set();
 
 // A link that has expired, or has already been used once, never becomes a

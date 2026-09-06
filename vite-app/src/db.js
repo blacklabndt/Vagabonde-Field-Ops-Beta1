@@ -1,5 +1,5 @@
 import { sbClient, VAPID_PUBLIC_KEY } from "./config.js";
-import { todayLocal, localDate, dayMonth, ticketDateStamp, primaryContact, ageInDays, storageKeySafe, STANDARD_RATE_LINES, nonNegative, lineTotal, decimalString, ticketStatusWriteRefusal } from "./data.js";
+import { money, todayLocal, localDate, dayMonth, ticketDateStamp, primaryContact, ageInDays, storageKeySafe, STANDARD_RATE_LINES, nonNegative, lineTotal, decimalString, ticketStatusWriteRefusal } from "./data.js";
 import { OfflineCache } from "./offlineCache.js";
 import { Toasts } from "./toastBus.js";
 import { OfflineQueue, isNetworkError } from "./offlineQueue.js";
@@ -228,8 +228,11 @@ const totalOf = lines => lines.reduce((s, l) => s + Math.round(lineTotal(l.quant
 const MAX_TICKET_TOTAL = 99999999.99;
 const assertBillable = total => {
   if (total > MAX_TICKET_TOTAL) {
+    // Through the app's one money formatter, like every other amount on a
+    // screen. It used to quote the figure with no cents, which made the
+    // refusal the one place in the app that named a total to the dollar.
     throw new Error(
-      `This ticket adds up to $${total.toLocaleString("en-CA")}, which cannot be right — check the quantities and rates against what was actually worked.`
+      `This ticket adds up to ${money(total)}, which cannot be right — check the quantities and rates against what was actually worked.`
     );
   }
 };
@@ -386,6 +389,9 @@ function shapeCrew(c) {
 let _lastDetailPrefetch = 0;
 const DETAIL_PREFETCH_GAP_MS = 60000;
 
+// Quantity granularity per catalog unit; see getPublishedRatesForClient.
+const CATALOG_STEP = { h: 0.5, day: 0.5, days: 0.5, km: 0.1 };
+
 export const Db = {
   // The three reference lists every screen pre-fills from. Two layers: the
   // 30-second in-memory cache kills repeat round trips inside a session, and
@@ -448,11 +454,24 @@ export const Db = {
       }));
   },
 
+  // One organisation's people, all of them. Paged for the same reason
+  // _allRows above is: this was a plain select, and PostgREST answers at most
+  // 1,000 rows without saying so — a client with more contacts than that had
+  // its directory quietly end partway through the alphabet, and the Contacts
+  // screen and the pickers behind it had no way to know. Ordered by name then
+  // id so a page boundary landing inside a run of one name cannot drop or
+  // double anybody.
   async listContactsForOrg(orgType, orgId) {
-    const { data, error } = await sbClient.from("contacts").select("*")
-      .eq("org_type", orgType).eq("org_id", orgId).order("name");
-    if (error) throw error;
-    return data;
+    return fetchAllPages(async (page, size) => {
+      const { data, error, count } = await sbClient
+        .from("contacts")
+        .select("*", page === 0 ? { count: "exact" } : {})
+        .eq("org_type", orgType).eq("org_id", orgId)
+        .order("name").order("id")
+        .range(page * size, page * size + size - 1);
+      if (error) throw error;
+      return { rows: data || [], total: count ?? (data || []).length };
+    });
   },
 
   async searchOrgDirectory({ page = 0, pageSize = 20, scope = "All", search = "" } = {}) {
@@ -1346,8 +1365,21 @@ export const Db = {
     // reports success having changed nothing. Without this check the dialog
     // closed cleanly and the assessment stayed Open, with nothing to explain
     // why — so ask for the row back and treat silence as the failure it is.
+    //
+    // Silence has two causes, though, and this used to report both as the
+    // same one: a permissions problem, naming a migration that is long since
+    // applied, when the ordinary cause is the assessment having been deleted
+    // on another device between opening the dialog and pressing the button.
+    // updateTicket looks again before it blames anybody; so does this now.
     if (!updated || !updated.length) {
-      throw new Error("That assessment wasn't updated — your account doesn't have permission to close out a JHA. Run the JHA close-out policy in Supabase (migration 20260812040000).");
+      await assertSessionAlive();
+      const { data: still, error: rErr } = await sbClient
+        .from("jhas").select("id").eq("id", jhaId).maybeSingle();
+      if (rErr) throw rErr;
+      if (!still) {
+        throw plainError("That assessment no longer exists — it was deleted on another device, so there is nothing to close out.");
+      }
+      throw plainError("That assessment wasn't updated — your account isn't allowed to close out this JHA. Ask an admin to close it out, or to give your account the access.");
     }
     // The stored PDF now has end readings on it — redraw it. Awaited here,
     // unlike on filing: close-out is the version anyone files or sends on.
@@ -2198,39 +2230,43 @@ export const Db = {
     // Replace rather than diff: a ticket's crew is small and edited as a
     // whole, and this keeps removals from needing their own bookkeeping.
     //
-    // Delete-then-insert with the old rows held back, exactly like
-    // updateTicket does for the billing lines: crew rows carry the hours,
-    // dose and mileage that drive payroll and the dosimetry record, so a
-    // refused insert (RLS, a deactivated profile's FK, a constraint, a
-    // timeout after the delete lands) must not leave the ticket with no
-    // crew at all. If the replacement fails, the originals go back.
-    const { data: oldCrew, error: oErr } = await sbClient
-      .from("ticket_crew")
-      .select("profile_id, crew_role, straight_hours, ot_hours, solo_hours, solo_ot_hours, dose_mr, mileage_km")
-      .eq("ticket_id", ticketId);
-    if (oErr) throw oErr;
-
-    const { error: dErr } = await sbClient.from("ticket_crew").delete().eq("ticket_id", ticketId);
-    if (dErr) throw dErr;
-    if (!crew.length) return;
-    const { error } = await sbClient.from("ticket_crew").insert(
-      crew.map(c => ({
-        ticket_id: ticketId, profile_id: c.profileId, crew_role: c.role || "Technician",
-        // Hours and mileage bill exactly like a quantity does, and dose is a
-        // physical reading — none of them go below zero.
-        straight_hours: nonNegative(c.straight), ot_hours: nonNegative(c.ot),
-        solo_hours: nonNegative(c.solo), solo_ot_hours: nonNegative(c.soloOt),
-        dose_mr: nonNegative(c.dose), mileage_km: nonNegative(c.mileage)
-      }))
-    );
-    if (error) {
-      if (oldCrew && oldCrew.length) {
-        await sbClient.from("ticket_crew")
-          .insert(oldCrew.map(r => ({ ticket_id: ticketId, ...r })))
-          .then(() => {}, () => {});
-      }
-      throw error;
+    // Written as an upsert on (ticket_id, profile_id), then a delete of
+    // whoever is no longer on the crew. It used to be delete-then-insert with
+    // the old rows held back, the shape updateTicket still keeps for the
+    // billing lines. Two devices saving one draft in the same instant
+    // interleaved as A-delete, B-delete, A-insert, B-insert, and B's insert
+    // collided on the unique key: the technician read the raw constraint name
+    // and B's hours were dropped. An upsert cannot collide, so the race is a
+    // plain last-write-wins — what the lines already do.
+    //
+    // The order is the other half of it. The upsert goes first, so a failure
+    // anywhere leaves the ticket with a person too many rather than with no
+    // crew at all, and the rollback the old shape needed goes with it: crew
+    // rows are payroll and the dosimetry record, and an empty crew is the one
+    // outcome that must not be reachable.
+    if (crew.length) {
+      const { error } = await sbClient.from("ticket_crew").upsert(
+        crew.map(c => ({
+          ticket_id: ticketId, profile_id: c.profileId, crew_role: c.role || "Technician",
+          // Hours and mileage bill exactly like a quantity does, and dose is a
+          // physical reading — none of them go below zero.
+          straight_hours: nonNegative(c.straight), ot_hours: nonNegative(c.ot),
+          solo_hours: nonNegative(c.solo), solo_ot_hours: nonNegative(c.soloOt),
+          dose_mr: nonNegative(c.dose), mileage_km: nonNegative(c.mileage)
+        })),
+        { onConflict: "ticket_id,profile_id" }
+      );
+      if (error) throw humanizeError(error);
     }
+    // Whoever came off the crew. This method is not in SAVE_MESSAGES — it is
+    // part of saving a ticket, not its own action — so nothing above it
+    // translates a refusal into words, which is how the constraint name
+    // reached the screen in the first place.
+    let gone = sbClient.from("ticket_crew").delete().eq("ticket_id", ticketId);
+    const keep = crew.map(c => c.profileId).filter(Boolean);
+    if (keep.length) gone = gone.not("profile_id", "in", `("${keep.join('","')}")`);
+    const { error: dErr } = await gone;
+    if (dErr) throw humanizeError(dErr);
   },
 
   // Every crew entry in a pay period, with the ticket and job behind it —
@@ -2993,7 +3029,11 @@ export const Db = {
       .filter(l => l.kind === "expense" || l.kind === "custom_expense")
       .map(l => ({
         key: l.kind + ":" + l.label, label: l.label, rate: Number(l.rate),
-        unit: l.unit || "ea", step: l.unit === "h" ? 0.5 : 1
+        // The quantity box honours this step now (a whole step takes no
+        // decimal point at all), so the units that are really measured in
+        // fractions have to say so here: hours by the half, days by the
+        // half, kilometres by the tenth. Everything else is counted.
+        unit: l.unit || "ea", step: CATALOG_STEP[l.unit] || 1
       }));
     return { welds, others };
   },
@@ -3921,6 +3961,15 @@ for (const [method, message] of Object.entries(SAVE_MESSAGES)) {
 export function humanizeError(e) {
   if (!e || e.plain || e.ticketGone || isNetworkError(e)) return e;
   const code = String(e.code || "");
+  // A duplicate key on ticket_crew is not "the number or name is taken" — it
+  // is two devices saving one ticket's crew in the same second, and the
+  // person needs to be told whose hours are on the ticket now rather than to
+  // go looking for a name they never typed. saveCrewForTicket upserts, so
+  // this should no longer be reachable from there; it stays because the
+  // sentence below it is worse than useless for these rows.
+  if (code === "23505" && /ticket_crew/.test(`${e.message || ""} ${e.details || ""}`)) {
+    return plainError("Another device saved this ticket's crew at the same moment. Open the ticket again to see the hours that landed, and re-enter yours if they're missing.");
+  }
   const said = {
     "42501": "Your account isn't allowed to do that. An admin can grant the access in Users & access.",
     "23505": "That already exists — the number or name is taken. Check the list and try a different one.",

@@ -333,6 +333,14 @@ export function BillingTrackerScreen({ onOpenTicket, currentUser }) {
         <div style={{ fontSize: 13, color: "color-mix(in srgb, var(--color-text) 65%, transparent)", marginBottom: 14 }}>{chaseResult}</div>
       )}
 
+      {/* All four tiles the same way round: the money is the big figure and
+          the count is the note. They used to disagree — dollars on Unsigned,
+          a count on the other three — so "$18,240 · 6 · 11 · 43" read left
+          to right as four amounts. Money is the one the tracker exists to
+          answer: how much is stuck at each stage, which is the question
+          behind chasing a signature and behind billing. A role that cannot
+          see prices gets the count in the big figure instead, because null
+          totals are all the database gives it. */}
       <div style={{ display: "grid", gridTemplateColumns: "repeat(4, 1fr)", gap: 16, marginBottom: 20 }} className="grid-2col">
         <Blueprint className="stat-tile">
           <div className="stat-label">Unsigned</div>
@@ -341,18 +349,18 @@ export function BillingTrackerScreen({ onOpenTicket, currentUser }) {
         </Blueprint>
         <Blueprint className="stat-tile">
           <div className="stat-label">Over 7 days</div>
-          <div className="stat-figure">{stats ? stats.over7.count : "—"}</div>
-          <div className="stat-note">{priced ? `${stats ? money(stats.over7.total) : "…"} at risk` : "unsigned for over a week"}</div>
+          <div className="stat-figure">{stats ? (priced ? money(stats.over7.total) : stats.over7.count) : "—"}</div>
+          <div className="stat-note">{priced ? `${stats ? stats.over7.count : "…"} tickets unsigned for over a week` : "unsigned for over a week"}</div>
         </Blueprint>
         <Blueprint className="stat-tile">
           <div className="stat-label">Approved, not invoiced</div>
-          <div className="stat-figure">{stats ? stats.approved.count : "—"}</div>
-          <div className="stat-note">{priced ? `${stats ? money(stats.approved.total) : "…"} ready to bill` : "signed, not yet invoiced"}</div>
+          <div className="stat-figure">{stats ? (priced ? money(stats.approved.total) : stats.approved.count) : "—"}</div>
+          <div className="stat-note">{priced ? `${stats ? stats.approved.count : "…"} tickets ready to bill` : "signed, not yet invoiced"}</div>
         </Blueprint>
         <Blueprint className="stat-tile">
           <div className="stat-label">Invoiced</div>
-          <div className="stat-figure">{stats ? stats.invoiced.count : "—"}</div>
-          <div className="stat-note">{priced ? `${stats ? money(stats.invoiced.total) : "…"} out the door` : "invoiced"}</div>
+          <div className="stat-figure">{stats ? (priced ? money(stats.invoiced.total) : stats.invoiced.count) : "—"}</div>
+          <div className="stat-note">{priced ? `${stats ? stats.invoiced.count : "…"} tickets out the door` : "invoiced"}</div>
         </Blueprint>
       </div>
 

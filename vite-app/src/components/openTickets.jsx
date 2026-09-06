@@ -1,5 +1,5 @@
-import React from "react";
-import { Blueprint, Btn, TableScroll, StatusTag } from "./common.jsx";
+import React, { useState } from "react";
+import { Blueprint, Btn, TableScroll, StatusTag, RowsPerPage, useRowsPerPage } from "./common.jsx";
 import { money, seesPrices } from "../data.js";
 
 // Open tickets — the tickets this person still has to send out to the
@@ -19,6 +19,27 @@ export function OpenTicketsScreen({ tickets, loading, onOpenTicket, currentUser,
   // refuses them everywhere else.
   const showAmounts = seesPrices(currentUser);
   const oldest = open.reduce((m, t) => Math.max(m, t.age || 0), 0);
+
+  // The same pager every sibling screen has (Home, Timesheets, Contacts, the
+  // tracker) and the same remembered rows-per-page. This was the one screen
+  // without it: a seeded account with 155 drafts rendered thirteen screens of
+  // table in one go, and it is the screen a technician opens most.
+  const [pageSize, setPageSize] = useRowsPerPage();
+  const [page, setPage] = useState(0);
+  // Over the list already in hand, not a server search — these are this
+  // person's own drafts, they are all here, and a draft list is worth
+  // narrowing by the job you were on rather than by scrolling.
+  const [filter, setFilter] = useState("");
+  const needle = filter.trim().toLowerCase();
+  const shown = needle
+    ? open.filter(t => [t.job, t.project, t.client, t.id].some(v => String(v || "").toLowerCase().includes(needle)))
+    : open;
+  const pageCount = Math.max(1, Math.ceil(shown.length / pageSize));
+  // Clamped rather than reset: deleting the last row of the last page, or
+  // typing another letter into the filter, would otherwise leave the table
+  // empty on a page that no longer exists.
+  const safePage = Math.min(page, pageCount - 1);
+  const pageRows = shown.slice(safePage * pageSize, safePage * pageSize + pageSize);
 
   return (
     <div className="page">
@@ -73,6 +94,19 @@ export function OpenTicketsScreen({ tickets, loading, onOpenTicket, currentUser,
         </Blueprint>
       )}
 
+      {/* The tiles above stay the whole list's figures — "still to send" is
+          about every draft, not about whatever is typed in the box. */}
+      <div style={{ display: "flex", alignItems: "center", gap: 10, marginBottom: 12, flexWrap: "wrap" }}>
+        <input className="input" value={filter} aria-label="Filter your drafts"
+          placeholder="Filter by job, project or client…"
+          style={{ flex: 1, minWidth: 200, maxWidth: 340, minHeight: 38 }}
+          onChange={e => { setFilter(e.target.value); setPage(0); }} />
+        <RowsPerPage value={pageSize} onChange={n => { setPageSize(n); setPage(0); }} />
+        <span style={{ fontSize: 13, color: "color-mix(in srgb, var(--color-text) 60%, transparent)", whiteSpace: "nowrap" }}>
+          {needle ? `${shown.length} of ${open.length} shown` : `${open.length} draft${open.length === 1 ? "" : "s"}`}
+        </span>
+      </div>
+
       <Blueprint style={{ padding: "6px 18px 14px" }}>
         {loading && <div style={{ padding: "12px 4px", fontSize: 13, color: "color-mix(in srgb, var(--color-text) 55%, transparent)" }}>Loading your tickets…</div>}
         <TableScroll><table className="table table-wide">
@@ -80,12 +114,14 @@ export function OpenTicketsScreen({ tickets, loading, onOpenTicket, currentUser,
             <tr><th>Ticket</th><th>Date</th><th>Age</th><th>Job</th><th>Project + client</th>{showAmounts && <th>Amount</th>}<th>Status</th><th></th></tr>
           </thead>
           <tbody>
-            {!loading && !open.length && (
+            {!loading && !shown.length && (
               <tr><td colSpan={showAmounts ? 8 : 7} style={{ color: "color-mix(in srgb, var(--color-text) 55%, transparent)" }}>
-                Nothing to send — every ticket you've raised has gone out to the client.
+                {open.length
+                  ? `No draft matches "${filter.trim()}" — clear the filter to see all ${open.length}.`
+                  : "Nothing to send — every ticket you've raised has gone out to the client."}
               </td></tr>
             )}
-            {!loading && open.map(t => (
+            {!loading && pageRows.map(t => (
               <tr key={t.id}>
                 {/* The way into a ticket, and it answered only to a mouse.
                     Same shape as the ticket rows on Job detail: a button in
@@ -108,6 +144,16 @@ export function OpenTicketsScreen({ tickets, loading, onOpenTicket, currentUser,
             ))}
           </tbody>
         </table></TableScroll>
+        {/* Hidden at one page, exactly as on the board and the tracker. */}
+        {!loading && pageCount > 1 && (
+          <div style={{ display: "flex", alignItems: "center", gap: 10, padding: "12px 4px 4px" }}>
+            <Btn variant="secondary" onClick={() => setPage(p => Math.max(0, p - 1))} disabled={safePage === 0}>← Previous</Btn>
+            <span style={{ fontSize: 13, color: "color-mix(in srgb, var(--color-text) 60%, transparent)" }}>
+              Page {safePage + 1} of {pageCount}
+            </span>
+            <Btn variant="secondary" onClick={() => setPage(p => Math.min(pageCount - 1, p + 1))} disabled={safePage >= pageCount - 1}>Next →</Btn>
+          </div>
+        )}
       </Blueprint>
     </div>
   );

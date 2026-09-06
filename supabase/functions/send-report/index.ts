@@ -32,7 +32,9 @@ Deno.serve(async (req) => {
 
   try {
     const { reportId, to, cc, message } = await req.json();
-    if (!reportId) throw new Error("reportId is required");
+    // A guard against a client bug, so it should never fire — but whoever
+    // reads it pressed a button, and a variable name tells them nothing.
+    if (!reportId) throw new Error("This request didn't say which report to send. Reload the app and try again.");
     // The caller check above proves who is asking, not who receives — the
     // link this email carries opens a private PDF for 14 days.
     const toList = recipients(to, "to");

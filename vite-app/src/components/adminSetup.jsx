@@ -286,6 +286,9 @@ function RecentErrorsPanel() {
 
   const load = () => {
     setLoading(true);
+    // The reason the last read failed is not the reason for this one, and
+    // leaving it up made every later Refresh look like it had failed too.
+    setErr("");
     Db.listFunctionErrors().then(setErrors).catch(e => setErr(e.message || "Couldn't load recent errors.")).finally(() => setLoading(false));
   };
   useEffect(() => { load(); }, []);
@@ -313,7 +316,7 @@ function RecentErrorsPanel() {
         <div style={{ ...SECTION_TITLE, marginBottom: 0 }}>Recent background errors</div>
         <span style={{ marginLeft: "auto", display: "flex", gap: 8 }}>
           <Btn variant="secondary" onClick={load} disabled={loading || clearing}>{loading ? "Loading…" : "Refresh"}</Btn>
-          <Btn variant="secondary" onClick={clear} disabled={loading || clearing || !errors.length}>{clearing ? "Clearing…" : "Clear"}</Btn>
+          <Btn variant="danger" onClick={clear} disabled={loading || clearing || !errors.length}>{clearing ? "Clearing…" : "Clear"}</Btn>
         </span>
       </div>
       <div style={{ fontSize: 12, color: "color-mix(in srgb, var(--color-text) 60%, transparent)", marginBottom: 14 }}>
@@ -330,7 +333,11 @@ function RecentErrorsPanel() {
               <div style={{ display: "flex", gap: 8, alignItems: "center" }}>
                 <TagX variant="outline">{e.function_name}</TagX>
                 <span style={{ fontSize: 11, color: "color-mix(in srgb, var(--color-text) 55%, transparent)", marginLeft: "auto" }}>
-                  {new Date(e.created_at).toLocaleString("en-CA", { day: "2-digit", month: "short", hour: "numeric", minute: "2-digit" })}
+                  {/* With the year left off, an error from last September
+                      read exactly like one from this morning — which is the
+                      one thing this line has to settle after a quiet spell,
+                      when the newest twenty are all old. */}
+                  {new Date(e.created_at).toLocaleString("en-CA", { day: "2-digit", month: "short", year: "numeric", hour: "numeric", minute: "2-digit" })}
                 </span>
               </div>
               <div style={{ marginTop: 4, whiteSpace: "pre-wrap", overflowWrap: "anywhere" }}>{e.message}</div>

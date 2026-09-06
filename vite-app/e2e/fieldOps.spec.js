@@ -100,7 +100,7 @@ const SCREEN_LANDMARK = {
   "Equipment": p => p.getByRole("heading", { name: "Equipment" }),
   "Timesheets": p => p.getByRole("heading", { name: "Timesheets" }),
   // The screen calls itself by what it holds, not by its menu label.
-  "Rate admin": p => p.getByRole("heading", { name: "Billing rates" }),
+  "Rate admin": p => p.getByRole("heading", { name: "Rate admin" }),
   "Billing tracker": p => p.getByRole("heading", { name: "Billing tracker" }),
   "Users & access": p => p.getByRole("heading", { name: "Users & access" }),
   "Admin": p => p.getByRole("heading", { name: "Admin", exact: true })
@@ -126,7 +126,7 @@ test("every drawer screen this account has opens and renders", { tag: "@desktop"
   // eleven screens and called itself "every". Direct children of the nav are
   // the tab buttons; the footer's name and Sign out live in a div below them.
   await page.getByRole("button", { name: "Sections" }).click();
-  const drawer = page.getByRole("navigation", { name: "Sections" });
+  const drawer = page.getByRole("dialog", { name: "Sections" });
   await expect(drawer.locator("> button").first()).toBeVisible({ timeout: 15_000 });
   // The unread badge rides inside the button's text ("Team chat3"), so trim a
   // trailing count off before matching the label.
@@ -246,7 +246,7 @@ test("Create ticket on Job detail opens the editor without filing a draft", { ta
 
   // Walk away without saving: nothing was filed, the job's list is as it was.
   await page.getByRole("button", { name: "Sections" }).click();
-  await page.getByRole("navigation", { name: "Sections" }).getByRole("button", { name: "Home" }).first().click();
+  await page.getByRole("dialog", { name: "Sections" }).getByRole("button", { name: "Home" }).first().click();
   await openJobFromBoard(page, jobNumber);
   await expect(page.locator("tr", { hasText: rx })).toHaveCount(before);
 });

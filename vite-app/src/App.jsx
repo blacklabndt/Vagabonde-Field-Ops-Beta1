@@ -10,6 +10,7 @@ import { OfflineQueue } from "./offlineQueue.js";
 import { OfflineCache } from "./offlineCache.js";
 import { SwUpdates } from "./swUpdates.js";
 import { restoreSession, IDENTITY_KEY } from "./session.js";
+import { parseRoute, formatRoute, landingRoute } from "./route.js";
 
 // How long a device may keep opening the app as its last signed-in person
 // with no signal to check — the "12 h" the sign-in screen promises.
@@ -46,6 +47,63 @@ const Flappy880 = lazy(() => import("./components/flappy880.jsx").then(m => ({ d
 const ScreenFallback = () => (
   <div className="page"><Loading /></div>
 );
+
+// The address this load arrived on, read once at import. It has to be read
+// here and not in an effect: the ?goto= handler below rewrites the URL to the
+// bare path as soon as the app mounts, and the recovery gate rewrites it
+// again, so by the time a component could look there may be nothing left to
+// find. A recovery hash is not a route and parseRoute refuses it — see
+// route.js for the one character that separates the two.
+const LANDING_ROUTE = typeof window !== "undefined" ? landingRoute(parseRoute(window.location.hash)) : null;
+
+// Two letters for the top bar on a phone, where the full name is hidden. One
+// word gives one letter rather than a doubled one, because "Kyle" as "KK" is
+// a different person to anyone reading quickly.
+function initialsOf(name) {
+  const parts = String(name || "").trim().split(/\s+/).filter(Boolean);
+  if (!parts.length) return "?";
+  const last = parts.length > 1 ? parts[parts.length - 1][0] : "";
+  return (parts[0][0] + last).toUpperCase();
+}
+
+// Focus, Tab and the page's scroll while a panel covers the screen. Dialog
+// (common.jsx) has done all three properly for a long while and the drawer
+// did none of them: focus stayed on the hamburger behind it, Tab walked
+// straight into the page underneath, and the page scrolled under the open
+// menu. This is the same treatment written out inline, because the drawer is
+// not a Dialog — it slides, it has no title, and it stays mounted through its
+// own exit animation.
+function useModalPanel(open, ref) {
+  useEffect(() => {
+    if (!open) return undefined;
+    const opener = document.activeElement;
+    const prevOverflow = document.body.style.overflow;
+    document.body.style.overflow = "hidden";
+    const focusable = () => Array.from(ref.current
+      ? ref.current.querySelectorAll('input, select, textarea, button, a[href], [tabindex]:not([tabindex="-1"])')
+      : []).filter(el => !el.disabled && el.offsetParent !== null);
+    const first = focusable()[0];
+    if (first) first.focus();
+    const onKey = e => {
+      if (e.key !== "Tab") return;
+      const items = focusable();
+      if (!items.length) return;
+      const edge = e.shiftKey ? items[0] : items[items.length - 1];
+      if (document.activeElement === edge) {
+        e.preventDefault();
+        (e.shiftKey ? items[items.length - 1] : items[0]).focus();
+      }
+    };
+    window.addEventListener("keydown", onKey);
+    return () => {
+      window.removeEventListener("keydown", onKey);
+      document.body.style.overflow = prevOverflow;
+      // Back to the control that opened it, not to the top of the document —
+      // otherwise closing the menu loses a keyboard user their place.
+      if (opener && opener.focus) opener.focus();
+    };
+  }, [open]);
+}
 
 // The page entrance, with the transform taken back off afterwards. The
 // class must not linger: an animated transform makes this wrapper the
@@ -137,9 +195,19 @@ export function App() {
   // tapping "Kyle — Team chat" opens the room, not the board. The
   // service worker sends both the closed and the already-open app
   // through this same URL (see public/push-sw.js).
-  const [screen, setScreen] = useState(() =>
-    new URLSearchParams(window.location.search).get("goto") === "chat" ? "chat" : "board"
-  );
+  //
+  // Otherwise: whatever section the address named, so a reload stays where
+  // you were. A job route is not settled here — it needs a read and an
+  // account to make it for — so it waits in pendingRoute below.
+  const [screen, setScreen] = useState(() => {
+    if (new URLSearchParams(window.location.search).get("goto") === "chat") return "chat";
+    return LANDING_ROUTE && !LANDING_ROUTE.job ? LANDING_ROUTE.screen : "board";
+  });
+  // The landing address, still to be honoured, and cleared the moment it is.
+  // It outlives the URL on purpose: signing in happens on a screen that has
+  // already rewritten the address bar, and a deep link followed while signed
+  // out should still open its job once there is somebody to open it for.
+  const pendingRoute = useRef(LANDING_ROUTE);
   // The goto parameter is a one-time instruction, consumed above — left
   // in the URL it would re-route every later manual reload to the chat.
   useEffect(() => {
@@ -153,6 +221,12 @@ export function App() {
   // Every existing setMenuOpen(false) keeps working untouched.
   const [menuVisible, setMenuVisible] = useState(false);
   useEffect(() => { if (menuOpen) setMenuVisible(true); }, [menuOpen]);
+  // Focus, Tab and the page's scroll while the drawer is over the screen.
+  // Keyed on both flags because the panel is mounted by the second one: on
+  // menuOpen alone the effect would run a render too early, with nothing in
+  // the ref to move focus into.
+  const drawerRef = useRef(null);
+  useModalPanel(menuOpen && menuVisible, drawerRef);
   const [theme, setTheme] = useState(() => Store.load("theme", "light"));
   // Motion is the app's own choice, not the OS's: Windows machines with
   // animation effects off were silently flattening every animation, and
@@ -454,6 +528,47 @@ export function App() {
     return () => window.removeEventListener("online", recheck);
   }, []);
 
+  // A job named by an address rather than tapped on the board: a link pasted
+  // into chat, a bookmark, or a reload of the job somebody was standing on.
+  // It goes through the same read Home uses, so a cold start reaches the job
+  // exactly as a warm one does; a job that cannot be read leaves the person
+  // on the screen they landed on with the reason said out loud, the way
+  // openJobByNumber does. Nothing points the app at a job it never loaded.
+  const openLandingJob = async number => {
+    try {
+      const job = await Db.getJobByNumber(number);
+      setActiveJob(job);
+      setContextScreen("job");
+      setScreen("job");
+    } catch (e) {
+      console.error("Couldn't open the job that link names:", e.message);
+      Toasts.show(`Couldn't open ${number}: ${e.message || "try again."}`, "error");
+    }
+  };
+
+  // The first screen of a session, in order of who has the better claim: the
+  // address this load arrived on, then the push notification's ?goto=chat,
+  // then this account's own first section. A section the account no longer
+  // holds is not honoured — hiding a tab is a permission, and an address is
+  // not a way around it — but a job always is, because the contextual screens
+  // open from a job whether or not that section is in anybody's menu.
+  const landOn = user => {
+    const tabs = tabList(user.tabs);
+    const first = tabs.filter(t => !CONTEXT_TABS.includes(t))[0] || "board";
+    const route = pendingRoute.current;
+    pendingRoute.current = null;
+    if (route && route.job) {
+      setScreen(first);
+      openLandingJob(route.job);
+      return;
+    }
+    if (route && tabs.includes(route.screen)) { setScreen(route.screen); return; }
+    // Overwriting the chat seed here sent every notification tap on a
+    // restored session to the board instead of the room — exactly what the
+    // goto handling above exists to prevent.
+    setScreen(s => (s === "chat" && tabs.includes("chat")) ? "chat" : first);
+  };
+
   // Restore an existing session on load. Bounded at every step and tolerant of
   // having no network — see session.js for why each of those matters.
   //
@@ -577,15 +692,10 @@ export function App() {
       }
       if (user) {
         setCurrentUser(user);
-        // First screen: the first real tab — never a contextual one
-        // (job/ticket screens open from a job, and there is no job
-        // yet) — unless the URL already seeded the chat, which is how
-        // a tapped push notification cold-starts the installed app.
-        // Overwriting that seed here sent every notification tap on a
-        // restored session to the board instead of the room — exactly
-        // what the goto handling above exists to prevent.
-        const first = tabList(user.tabs).filter(t => !CONTEXT_TABS.includes(t))[0] || "board";
-        setScreen(s => (s === "chat" && tabList(user.tabs).includes("chat")) ? "chat" : first);
+        // Where this session opens: the address, the notification, or this
+        // account's own first section — never a contextual screen without
+        // the job behind it. See landOn.
+        landOn(user);
       }
     } catch (e) {
       console.error("Couldn't restore the session:", e.message);
@@ -596,6 +706,85 @@ export function App() {
     if (Recovery.pending()) { setCheckingSession(false); return; }
     bootSession();
   }, []);
+
+  // The screen, written into the address bar.
+  //
+  // One effect rather than a pushState beside every setScreen: a screen is
+  // arrived at half a dozen ways — a drawer tab, a job tapped on the board,
+  // a ticket opened from the tracker, the tab-permission redirect above, a
+  // deleted job sending you somewhere else — and they all pass through this
+  // same pair of states, so they all get the same address for nothing.
+  const routeWritten = useRef(false);
+  useEffect(() => {
+    if (!currentUser) {
+      // A session that ends takes its address with it: a shared tablet should
+      // not sit on the sign-in screen with the last crew member's open job
+      // still in the bar. Only an address this app wrote is cleared — a
+      // recovery hash belongs to Auth and is never touched.
+      if (routeWritten.current && parseRoute(window.location.hash)) {
+        window.history.replaceState({}, "", window.location.pathname + window.location.search);
+      }
+      routeWritten.current = false;
+      return;
+    }
+    const next = formatRoute({ screen, job: activeJob ? activeJob.id : null });
+    // A contextual screen with no job has no address (route.js); leave the
+    // last good one in the bar rather than writing something meaningless.
+    if (!next) return;
+    // Nothing to do when the address already says this, which is what a
+    // Back looks like from here: the handler below puts the bar right before
+    // it moves the app, so a pop never pushes a duplicate of the entry it
+    // just returned to.
+    if (window.location.hash === next) { routeWritten.current = true; return; }
+    // The first address of a session replaces the entry the app loaded on,
+    // so Back from the opening screen still leaves the app rather than
+    // stepping through a duplicate of it first.
+    if (routeWritten.current) window.history.pushState({}, "", next);
+    else window.history.replaceState({}, "", next);
+    routeWritten.current = true;
+  }, [currentUser, screen, activeJob]);
+
+  // The Back gesture. On an installed Android app it is the most-used control
+  // on the device, and with the open screen held only in React state it used
+  // to leave the app altogether. Every entry in the history is one of the
+  // app's own screens now, so going back is a matter of reading the address
+  // and standing there again.
+  //
+  // A ticket, a JHA or a report upload is not restored, only the job under it
+  // (landingRoute): those screens are half-entered work living in the editor,
+  // and the address never said which draft. Going back out of a ticket lands
+  // on its job, which is where the ticket is opened from anyway.
+  useEffect(() => {
+    if (!currentUser) return undefined;
+    const onPop = () => {
+      const route = landingRoute(parseRoute(window.location.hash));
+      const tabs = tabList(currentUser.tabs);
+      const first = tabs.filter(t => !CONTEXT_TABS.includes(t))[0] || "board";
+      // An address for a section this account no longer holds is not a way
+      // into it — the same rule the drawer's goto keeps. A job always is,
+      // because a job opens from a link the way it opens from the board.
+      const target = route && route.job ? route
+        : { screen: route && tabs.includes(route.screen) ? route.screen : first, job: null };
+      // The bar is put back in step here rather than left to the effect
+      // above, because a Back can land on the screen already showing — a
+      // ticket stepping back to its own job — and then no state changes, the
+      // effect never runs, and the ticket's address would sit there for the
+      // next navigation to push over.
+      const settled = formatRoute(target);
+      if (settled && window.location.hash !== settled) window.history.replaceState({}, "", settled);
+      if (target.job) {
+        // Already the open job: nothing to read, and nothing about it can
+        // have changed on the way back to it.
+        if (activeJob && activeJob.id === target.job) { setContextScreen("job"); setScreen("job"); return; }
+        openLandingJob(target.job);
+        return;
+      }
+      setContextScreen("");
+      setScreen(target.screen);
+    };
+    window.addEventListener("popstate", onPop);
+    return () => window.removeEventListener("popstate", onPop);
+  }, [currentUser, activeJob]);
 
   const loadReferenceData = async () => {
     setLoadError("");
@@ -738,7 +927,10 @@ export function App() {
     // The banner rides along here too: a shared tablet parked on the
     // sign-in screen is exactly the device nobody ever updates.
     return <>
-      <SignInScreen notice={bootError} onSignIn={u => { setCurrentUser(u); setScreen(tabList(u.tabs).filter(t => !CONTEXT_TABS.includes(t))[0] || "board"); }} />
+      {/* landOn, not just the first tab: somebody who followed a link to a
+          job while signed out should arrive at that job once they are in,
+          not at the board with the address quietly thrown away. */}
+      <SignInScreen notice={bootError} onSignIn={u => { setCurrentUser(u); landOn(u); }} />
       {updateReady && !updateDeferred && <UpdateBanner onLater={() => setUpdateDeferred(true)} />}
     </>;
   }
@@ -1135,11 +1327,18 @@ export function App() {
           </button>
         )}
         {/* Just who is signed in. Signing out lives in the drawer, which is
-            the only place it exists on a phone anyway — `.topbar-who` is
-            hidden at that width — so having it in both was a second button
-            for the same job on exactly one screen size. */}
+            the only place it exists on a phone anyway, so having it in both
+            was a second button for the same job on exactly one screen size.
+            Below 760px the name has nowhere to go and becomes initials
+            rather than nothing: these are shared tablets, and "am I still
+            signed in as the last shift?" was two taps to answer. The chip
+            carries the full name for anything reading the page aloud. */}
         <div className="topbar-who" style={{ fontSize: 13, display: "flex", alignItems: "center", marginLeft: "auto" }}>
-          <span>{currentUser.name}</span>
+          <span className="topbar-name">{currentUser.name}</span>
+          <span className="topbar-initials" role="img" aria-label={`Signed in as ${currentUser.name}`}
+            title={currentUser.name}>
+            {initialsOf(currentUser.name)}
+          </span>
         </div>
       </header>
 
@@ -1152,7 +1351,13 @@ export function App() {
           onClick={() => setMenuOpen(false)}
           onAnimationEnd={() => { if (!menuOpen) setMenuVisible(false); }}
         >
-          <nav className="drawer" aria-label="Sections" onClick={e => e.stopPropagation()}>
+          {/* A modal that says so. It covers the screen and takes Escape and
+              a backdrop tap like a dialog, so it carries a dialog's promises
+              too: focus moves in, Tab stays inside, focus goes back to the
+              hamburger on the way out and the page behind stops scrolling —
+              all of it in useModalPanel above. */}
+          <nav className="drawer" ref={drawerRef} role="dialog" aria-modal="true" aria-label="Sections"
+            onClick={e => e.stopPropagation()}>
             <div className="topbar-brand" aria-hidden="true" style={{ margin: "18px auto 8px" }} />
             {allowedTabs.map(t => (
               <button key={t.key} className={screen === t.key ? "active" : ""}
@@ -1201,8 +1406,12 @@ export function App() {
             {/* Which build this device is on — name, commit, day — so "is
                 everyone on the same version?" is a glance at each drawer,
                 not a guess. Pinned to the drawer's bottom edge (the auto
-                margin takes the slack), clear of the controls above. */}
-            <div style={{ marginTop: "auto", padding: "12px 16px 0", textAlign: "center", fontSize: 10.5, color: "color-mix(in srgb, var(--color-text) 40%, transparent)" }}>
+                margin takes the slack), clear of the controls above.
+                65% of the ink, not 40%: at 40% this measured 3.44:1 in dark
+                and 2.41:1 in light, and it is the one line somebody is asked
+                to read out loud over the radio. 65% is 4.93:1 light,
+                6.99:1 dark. */}
+            <div style={{ marginTop: "auto", padding: "12px 16px 0", textAlign: "center", fontSize: 10.5, color: "color-mix(in srgb, var(--color-text) 65%, transparent)" }}>
               Version {typeof __APP_VERSION__ !== "undefined" ? __APP_VERSION__ : "dev"}
             </div>
           </nav>
@@ -1221,9 +1430,6 @@ export function App() {
           <ErrorBox>{loadError}</ErrorBox>
         </div>
       )}
-      {showQueue && (
-        <QueueDialog items={queued} onRetry={retryQueue} onClose={() => setShowQueue(false)} />
-      )}
       <main>
         {/* Keyed on the screen so switching tabs clears a crash rather than
             leaving the app stuck on the boundary's fallback. */}
@@ -1240,10 +1446,20 @@ export function App() {
           screen so every write is announced the same way and in the same
           place — and outside the ErrorBoundary and Suspense, so it survives a
           screen swap and isn't torn down mid-fade by a lazy chunk loading. */}
-      {/* After main, not before it: the dialog backdrop carries no z-index,
-          so it paints in tree order, and a dialog rendered ahead of main sat
-          under the jobs table — the table showed through the form and took
-          the click meant for Send. */}
+      {/* After main, not before it: a dialog rendered ahead of main sat under
+          the jobs table — the table showed through the form and took the
+          click meant for Send. The outbox panel was the same bug found a
+          second time, still sitting above <main> while the fix for it was
+          three lines below: on Job detail the record's own labels printed
+          across the panel and the loading bar took the taps meant for Close
+          and Try again now, which is the worst screen in the app to have
+          unusable, since it is the one a technician opens when they are
+          worried about unsent work. Both live here now, and .dialog-backdrop
+          has a z-index (app.css) so the class of bug is shut rather than the
+          two instances of it. */}
+      {showQueue && (
+        <QueueDialog items={queued} onRetry={retryQueue} onClose={() => setShowQueue(false)} />
+      )}
       {showFeature && (
         <FeatureRequestDialog onClose={() => setShowFeature(false)} />
       )}

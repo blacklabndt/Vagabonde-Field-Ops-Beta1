@@ -1,5 +1,5 @@
 import React, { useState, useEffect, useRef } from "react";
-import { money, todayLocal, localDate, dayMonth, initialsOf, ticketDateStamp, lastNumbers, JOB_FIELDS, EMPTY_JOB_RECORD, seesPrices as pricesFor } from "../data.js";
+import { money, todayLocal, localDate, dayMonth, initialsOf, ticketDateStamp, lastNumbers, JOB_FIELDS, EMPTY_JOB_RECORD, seesPrices as pricesFor, fileSize, reportFileRefusal, MAX_REPORT_LABEL } from "../data.js";
 import { Db } from "../db.js";
 import { OfflineCache } from "../offlineCache.js";
 import { OfflineQueue } from "../offlineQueue.js";
@@ -1361,6 +1361,10 @@ function UploadReportDialog({ job, jobRecord, currentUser, onClose, onSubmit }) 
     if (!file) { miss.flag("file"); setError("Attach the interpreted PDF first."); return; }
     if (!welds.trim()) { miss.flag("welds"); setError("Note which welds this report covers."); return; }
     if (sent && !emailIn(to)) { miss.flag("to"); setError("Add an email address to send to, or use Upload only."); return; }
+    // The To box arrives pre-filled from the job's contractor rep, so pressing
+    // send is one tap away from mailing an interpretation to an address nobody
+    // read. Name it once, before anything leaves the building.
+    if (sent && !confirm(`Send this report to ${to.trim()}${cc.trim() ? `, cc ${cc.trim()}` : ""}?`)) return;
     miss.clear();
     setSaving(true);
     setError("");
@@ -1417,10 +1421,16 @@ function UploadReportDialog({ job, jobRecord, currentUser, onClose, onSubmit }) 
   };
 
   return (
+    // Cancel, like every other dialog here: the only ways out were Escape,
+    // which a phone has not got, and a tap on the backdrop, which throws the
+    // attachment away without saying so. And "Upload only" is the primary now
+    // — on a phone the primary is the easy thumb target, and the other one
+    // emails the interpretation to the contractor.
     <Dialog title="Upload report" maxWidth={540} onClose={onClose}
       actions={<>
-        <Btn variant="secondary" onClick={() => submit(false)} disabled={!!saving}>Upload only</Btn>
-        <Btn variant="primary" onClick={() => submit(true)} disabled={!!saving}>{saving === true ? "Uploading…" : saving || "Upload & send"}</Btn>
+        <Btn variant="secondary" onClick={onClose} disabled={!!saving}>Cancel</Btn>
+        <Btn variant="secondary" onClick={() => submit(true)} disabled={!!saving}>{saving && saving !== true ? saving : "Upload & send"}</Btn>
+        <Btn variant="primary" onClick={() => submit(false)} disabled={!!saving}>{saving === true ? "Uploading…" : "Upload only"}</Btn>
       </>}>
       <ErrorBox>{error}</ErrorBox>
       {/* The drop zone is not an .input, so it takes the same ring by hand
@@ -1434,19 +1444,25 @@ function UploadReportDialog({ job, jobRecord, currentUser, onClose, onSubmit }) 
         } : null)
       }}>
         <i className="corner tl" /><i className="corner tr" /><i className="corner bl" /><i className="corner br" />
-        <div style={{ fontSize: 13, color: "color-mix(in srgb, var(--color-text) 60%, transparent)" }}>Drop the interpreted PDF here, or click to browse</div>
+        <div style={{ fontSize: 13, color: "color-mix(in srgb, var(--color-text) 60%, transparent)" }}>Drop the interpreted PDF here, or click to browse — up to {MAX_REPORT_LABEL}</div>
         <input type="file" accept="application/pdf" aria-label="Interpreted PDF" aria-invalid={miss.is("file") || undefined}
           style={{ position: "absolute", inset: 0, opacity: 0, cursor: "pointer" }}
           onChange={e => {
             const f = e.target.files[0] || null;
+            e.target.value = "";
+            // `accept=` is only what the picker offers; a drop, or "All files",
+            // hands over whatever was chosen. The attachment on screen stays
+            // as it was, so a mis-drop costs nothing already attached.
+            const refused = reportFileRefusal(f);
+            if (refused) { miss.flag("file"); setError(refused); return; }
             miss.fixed("file");
+            setError("");
             setFile(f);
             storedReport.current = null;
             uploadKey.current = newClientKey();
             if (f) scanForNumbers(f);
-            e.target.value = "";
           }} />
-        {file && <div style={{ marginTop: 8, fontSize: 12 }}><PdfGlyph /> {file.name}</div>}
+        {file && <div style={{ marginTop: 8, fontSize: 12 }}><PdfGlyph /> {file.name} · {fileSize(file.size)}</div>}
       </div>
       <Field label="Last numbers" missing={miss.is("welds")}>
         <input {...miss.props("welds")} value={welds} onChange={e => { miss.fixed("welds"); setWelds(e.target.value); }} placeholder="XF-47 to XF-54, MT-1 to MT-15" />

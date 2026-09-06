@@ -39,7 +39,7 @@ let sweepAfter = null;
 // the backdrop swallows the click forever.
 const drawerGo = async (page, label) => {
   await page.getByRole("button", { name: "Sections" }).click();
-  await page.getByRole("navigation", { name: "Sections" }).getByRole("button", { name: label }).first().click();
+  await page.getByRole("dialog", { name: "Sections" }).getByRole("button", { name: label }).first().click();
 };
 
 // Sign out lives in the same drawer, below the sections. Its name is unique
@@ -298,13 +298,14 @@ test("a half-built JHA survives a reload", async ({ page }) => {
   await page.getByRole("button", { name: "+ New JHA" }).click();
   await expect(musterBox(page)).toBeVisible({ timeout: 15_000 });
 
-  // Every hazard starts on the sheet, so the edit that proves anything is
-  // taking one off — that plus a muster point covers both halves of what the
-  // draft carries: the worksheet and the site information.
+  // Nothing is ticked when the sheet opens (a pre-ticked safety form is a
+  // form to tap past), so the edit that proves anything is putting one on —
+  // that plus a muster point covers both halves of what the draft carries:
+  // the worksheet and the site information.
   const driving = page.getByRole("checkbox", { name: "Driving" });
-  await expect(driving).toHaveAttribute("aria-checked", "true");
-  await driving.click();
   await expect(driving).toHaveAttribute("aria-checked", "false");
+  await driving.click();
+  await expect(driving).toHaveAttribute("aria-checked", "true");
   await musterBox(page).fill(MUSTER);
   await expect(async () => {
     expect(await jhaDraftOnDisk(page, MUSTER)).toBe(true);
@@ -312,19 +313,20 @@ test("a half-built JHA survives a reload", async ({ page }) => {
 
   // The tab goes and comes back — nothing was filed, so the server has never
   // heard of any of this.
+  // The address names the job now (route.js), so the reload comes back to
+  // Job detail itself rather than to Home — the builder is one tap away.
   await page.reload();
-  await expect(page.getByRole("button", { name: "+ Ticket" })).toBeVisible({ timeout: 20_000 });
-  await openJobFromBoard(page, jobNumber);
+  await expect(page.getByRole("button", { name: "+ New JHA" })).toBeVisible({ timeout: 20_000 });
   await page.getByRole("button", { name: "+ New JHA" }).click();
 
   await expect(page.getByText("Brought back the assessment you were building")).toBeVisible({ timeout: 15_000 });
   await expect(musterBox(page)).toHaveValue(MUSTER);
-  await expect(page.getByRole("checkbox", { name: "Driving" })).toHaveAttribute("aria-checked", "false");
+  await expect(page.getByRole("checkbox", { name: "Driving" })).toHaveAttribute("aria-checked", "true");
 
   // Offered back, not forced back: Start empty throws it away and leaves a
   // blank form. Nothing here is ever filed.
   await page.getByRole("button", { name: "Start empty" }).click();
   await expect(page.getByText("Brought back the assessment you were building")).toHaveCount(0);
   await expect(musterBox(page)).toHaveValue("");
-  await expect(page.getByRole("checkbox", { name: "Driving" })).toHaveAttribute("aria-checked", "true");
+  await expect(page.getByRole("checkbox", { name: "Driving" })).toHaveAttribute("aria-checked", "false");
 });

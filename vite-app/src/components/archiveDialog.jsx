@@ -170,6 +170,20 @@ export function ArchiveDialog({ mode, currentUser, onClose, onCleared }) {
     }
   };
 
+  // The two accidental ways out of the dialog — the grey backdrop and
+  // Escape — ask first once there is something to lose. At "built" the
+  // manifest, the summary and the zip's name are held here and nowhere
+  // else, so closing takes with them the only thing the downloaded zip can
+  // be checked against: the file stays on disk, the check can never be
+  // satisfied, and the way back is another build, which on a busy year is
+  // another hour of reading. The buttons are somebody deciding and are left
+  // alone — "Keep the jobs" says what it does.
+  const requestClose = () => {
+    if (stage === "built" &&
+      !confirm("The archive is built but not yet checked. Close anyway? You would have to build it again.")) return;
+    onClose();
+  };
+
   const title = mode === "year" ? "Archive a year" : "Archive a date range";
   const rangeLabel = mode === "year" ? String(year) : `${rangeFrom} to ${rangeTo}`;
   const count = jobs ? jobs.length : 0;
@@ -191,7 +205,7 @@ export function ArchiveDialog({ mode, currentUser, onClose, onCleared }) {
           there was nothing here to do it with: the owner had to close the
           dialog and start over from the year picker. */}
       <Btn variant="secondary" onClick={build} disabled={checking}>Build it again</Btn>
-      <Btn variant="primary" onClick={clear} disabled={!canClear || confirmWord.trim().toUpperCase() !== "CLEAR"}
+      <Btn variant="danger" onClick={clear} disabled={!canClear || confirmWord.trim().toUpperCase() !== "CLEAR"}
         title={!complete ? "The archive is not complete — see above" : !verified ? "Check the downloaded zip first" : !verified.ok ? "The downloaded zip did not check out" : undefined}>
         Clear {plural(count, "job")} from the app
       </Btn>
@@ -203,7 +217,7 @@ export function ArchiveDialog({ mode, currentUser, onClose, onCleared }) {
   );
 
   return (
-    <Dialog title={title} maxWidth={580} onClose={busy ? () => {} : onClose} actions={actions}>
+    <Dialog title={title} maxWidth={580} onClose={busy ? () => {} : requestClose} actions={actions}>
       <ErrorBox>{error}</ErrorBox>
 
       {/* The check before the delete is minutes of reading on a big year, and

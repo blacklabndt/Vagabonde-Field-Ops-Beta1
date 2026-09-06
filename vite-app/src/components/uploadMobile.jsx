@@ -1,6 +1,7 @@
 import React, { useState } from "react";
 import { Db } from "../db.js";
 import { Blueprint, Btn, TagX, ErrorBox, emailIn, NoJobSelected, ConnectionBar, QueuedPanel } from "./common.jsx";
+import { fileSize, reportFileRefusal, MAX_REPORT_LABEL } from "../data.js";
 import { OfflineQueue } from "../offlineQueue.js";
 
 export function UploadMobileScreen({ job, jobRecord, currentUser, onSent }) {
@@ -25,6 +26,13 @@ export function UploadMobileScreen({ job, jobRecord, currentUser, onSent }) {
     // change event and looks like the app ignored the second tap.
     e.target.value = "";
     if (!f) return;
+    // `accept=` on the input is a picker filter and nothing more: "All files"
+    // in the picker, or a share sheet, hands over whatever was chosen. A .txt
+    // and a 25 MB blank PDF both went up without a word, and a report nobody
+    // can open is only discovered by the contractor.
+    const refused = reportFileRefusal(f);
+    if (refused) { setError(refused); return; }
+    setError("");
     // A stable key per attachment, not the array index: everything below —
     // the row, its weld chips, its half-typed draft — is keyed by it, so
     // removing one file can't shift another file's state onto the wrong row.
@@ -147,7 +155,7 @@ export function UploadMobileScreen({ job, jobRecord, currentUser, onSent }) {
 
           <div className="blueprint" style={{ borderStyle: "dashed", padding: 16, textAlign: "center", position: "relative", fontSize: 12, color: "color-mix(in srgb, var(--color-text) 60%, transparent)" }}>
             <i className="corner tl" /><i className="corner tr" /><i className="corner bl" /><i className="corner br" />
-            Tap to attach a PDF
+            Tap to attach a PDF — up to {MAX_REPORT_LABEL}
             <input type="file" accept="application/pdf" style={{ position: "absolute", inset: 0, opacity: 0 }} onChange={attach} />
           </div>
 
@@ -159,7 +167,7 @@ export function UploadMobileScreen({ job, jobRecord, currentUser, onSent }) {
                   <span className="pdf-glyph" style={{ width: 20, height: 26 }}>PDF</span>
                   <div style={{ flex: 1, minWidth: 0 }}>
                     <div style={{ fontSize: 13, whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>{it.file.name}</div>
-                    <div style={{ fontSize: 11, color: "color-mix(in srgb, var(--color-text) 55%, transparent)" }}>{(it.file.size / 1e6).toFixed(1)} MB · {currentUser.name}</div>
+                    <div style={{ fontSize: 11, color: "color-mix(in srgb, var(--color-text) 55%, transparent)" }}>{fileSize(it.file.size)} · {currentUser.name}</div>
                   </div>
                   <TagX variant="neutral">{it.state}</TagX>
                   <button type="button" className="row-x" aria-label={`Remove ${it.file.name}`}

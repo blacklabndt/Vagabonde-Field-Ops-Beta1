@@ -26,6 +26,18 @@ const SEARCH_FIELDS = [
   { key: "contractor", label: "Contractor" }
 ];
 
+// What "Anything" will actually match on. search_jobs strips every character
+// outside a-z0-9 out of the query before comparing it — that stripping is
+// what lets "S-10113" find a job filed as S10113 — but a query of pure
+// punctuation, an accent or an emoji strips to nothing, and an empty pattern
+// matches every row. The board then shows all 2,469 jobs under a search box
+// with a character in it, which reads as "they all matched".
+//
+// Guarded here rather than in the database because the field-scoped searches
+// escape their own wildcards properly and are right as they stand; only the
+// case where nothing searchable is left needs saying out loud.
+const searchableText = q => String(q || "").toLowerCase().replace(/[^a-z0-9]/g, "");
+
 // "On file" is the useful half of this chip; the date is a bonus. A contact
 // filed before `last_used_at` existed has none, and formatting null produced
 // the literal words "Invalid Date" next to the client's name.
@@ -100,6 +112,10 @@ export function HomeScreen({ onCreateJob, onOpenJob, onStartTicket, currentUser,
   // query, page) opening the board fired three identical requests before a
   // single row was drawn; this fires one. Typing still waits for a pause —
   // only the search box is debounced, so a filter or page tap is immediate.
+  // A search the server would strip to nothing. Whitespace on its own is not
+  // one of these: an empty box is "no search", and always has been.
+  const unsearchable = searchField === "any" && query.trim() !== "" && searchableText(query) === "";
+
   const last = useRef({ key: null, text: "" });
   useEffect(() => {
     const key = [filter, searchField, query].join("\u0001");
@@ -110,6 +126,18 @@ export function HomeScreen({ onCreateJob, onOpenJob, onStartTicket, currentUser,
     // state update, so wait for it to land rather than asking for page 5 of a
     // result set that may no longer have one.
     if (isNewQuery && page !== 0) { setPage(0); return; }
+    if (unsearchable) {
+      // Not asked at all: the answer would be the whole board. The token is
+      // stepped so a read already in flight cannot land on top of the empty
+      // state and paint every job under a search that matched none.
+      loadSeq.current++;
+      setRows([]);
+      setTotal(0);
+      setLoadError("");
+      setCachedAt(null);
+      setLoading(false);
+      return;
+    }
     if (!typed) { fetchPage(page, filter, query, searchField); return; }
     const t = setTimeout(() => fetchPage(page, filter, query, searchField), 350);
     return () => clearTimeout(t);
@@ -217,7 +245,9 @@ export function HomeScreen({ onCreateJob, onOpenJob, onStartTicket, currentUser,
             <tbody>
               {!loadError && rows.length === 0 && (
                 <tr><td colSpan={7} style={{ color: "color-mix(in srgb, var(--color-text) 55%, transparent)" }}>
-                  {query ? `No jobs match “${query}”.` : "No jobs to show."}
+                  {unsearchable
+                    ? "Nothing searchable in that — try letters or numbers."
+                    : query ? `No jobs match “${query}”.` : "No jobs to show."}
                 </td></tr>
               )}
               {rows.map(j => (
@@ -244,7 +274,7 @@ export function HomeScreen({ onCreateJob, onOpenJob, onStartTicket, currentUser,
                   <td style={{ whiteSpace: "nowrap" }}>{j.lsd}</td>
                   <td className="col-opt">
                     {j.createdAt}
-                    <div style={{ fontSize: 11, color: "color-mix(in srgb, var(--color-text) 50%, transparent)" }}>{j.createdBy}</div>
+                    <div style={{ fontSize: 11, color: "color-mix(in srgb, var(--color-text) 65%, transparent)" }}>{j.createdBy}</div>
                   </td>
                   <td className="col-opt"><StatusTag status={j.status} /></td>
                 </tr>

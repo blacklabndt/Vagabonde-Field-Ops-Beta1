@@ -1,5 +1,5 @@
 import React, { useState, useEffect, useRef } from "react";
-import { STANDARD_RATE_LINES } from "../data.js";
+import { STANDARD_RATE_LINES, money } from "../data.js";
 import { Db, DEFAULT_SCHEDULE } from "../db.js";
 import { Toasts } from "../toastBus.js";
 import { Blueprint, Btn, useDebounced, TagX, Field, Dialog, ErrorBox, Switch, NumField, useMissingFields, SearchSelect, TableScroll, Loading } from "./common.jsx";
@@ -13,6 +13,10 @@ export function RateAdminScreen() {
   const [overrides, setOverrides] = useState([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState("");
+  // An answer rather than a failure — "there was nothing to restore" is the
+  // button having done its job. It used to go in the red box, which carries
+  // role="alert" and sent the admin looking for a problem.
+  const [note, setNote] = useState("");
   const [publishing, setPublishing] = useState(false);
   const [justPublished, setJustPublished] = useState(false);
   const [showNewClient, setShowNewClient] = useState(false);
@@ -45,6 +49,9 @@ export function RateAdminScreen() {
     // A recovery reload from a failed save passes keepError so it doesn't
     // wipe the error banner the failing caller just set.
     if (!keepError) setError("");
+    // The note is about the card on screen, so it goes when another one is
+    // loaded — including the reload restoreStandard itself does.
+    setNote("");
     try {
       const { schedule: s, lines: l } = await Db.getEditableSchedule(selected);
       // A card that follows the house card displays the house card — the
@@ -85,7 +92,9 @@ export function RateAdminScreen() {
   const following = !isDefault && !!(schedule && schedule.follows_default);
   // A group's rates render as plain figures when it can't be edited —
   // while its rows are being reordered, or while the card follows the
-  // house card.
+  // house card. They are money, and they go through money() like every
+  // other figure in the app: a bare "125" beside "$125.00" in the rate
+  // history read as two different numbers.
   const locked = group => following || reorderGroup === group;
 
   // ── Row order ──────────────────────────────────────────────────────────
@@ -300,6 +309,14 @@ export function RateAdminScreen() {
     } catch (e) { setError(e.message || "Couldn't add that line."); }
   };
   const removeCustom = async id => {
+    const gone = lines.find(l => l.id === id);
+    if (!gone) return;
+    // The × is 24px away from a rate box people are typing in, and it takes
+    // a priced line with it. "Restore removed lines" only puts the standard
+    // ones back, at zero, so a Travel or a blended rate typed once is gone
+    // with its price. The size row beside it has always asked.
+    if (!confirm(`Remove ${gone.label}, priced at ${money(gone.rate)}? This can't be undone — "Restore removed lines" puts a standard line back unpriced, and a line added by hand does not come back at all.`)) return;
+    setError("");
     try { await Db.deleteRateLine(id); setLines(p => p.filter(l => l.id !== id)); setJustPublished(false); }
     catch (e) { setError(e.message || "Couldn't remove that line."); }
   };
@@ -354,13 +371,14 @@ export function RateAdminScreen() {
     await persistRate.flush();
     setRestoring(true);
     setError("");
+    setNote("");
     const wanted = STANDARD_RATE_LINES;
     const missing = wanted.filter(w => !lines.some(l => l.kind === w.kind && l.label === w.label));
     try {
       // In parallel — twenty sequential round trips was a visible stall.
       await Promise.all(missing.map(m => Db.addRateLine({ scheduleId: schedule.id, ...m, rate: 0 })));
       await loadSchedule();
-      if (!missing.length) setError("Nothing to restore — every standard line is already on this schedule.");
+      if (!missing.length) setNote("Nothing to restore — every standard line is already on this schedule.");
     } catch (e) { setError(e.message || "Couldn't restore the standard lines."); }
     setRestoring(false);
   };
@@ -404,8 +422,12 @@ export function RateAdminScreen() {
     <div className="page">
       <div style={{ display: "flex", alignItems: "flex-end", gap: 16, marginBottom: 20, flexWrap: "wrap" }}>
         <div>
-          <div className="kicker">Admin · Rate schedules</div>
-          <h2 style={{ fontSize: 34, margin: "2px 0 0" }}>Billing rates</h2>
+          {/* One name for one screen: the drawer, the README and this
+              heading all say Rate admin now. "Billing rates" in the heading
+              and "Rate admin" in the menu was a tech looking for a section
+              that wasn't in the list. */}
+          <div className="kicker">Admin · Rate admin</div>
+          <h2 style={{ fontSize: 34, margin: "2px 0 0" }}>Rate admin</h2>
         </div>
         <span style={{ fontSize: 12, color: "color-mix(in srgb, var(--color-text) 50%, transparent)" }}>
           {following ? "Follows the house card"
@@ -444,6 +466,9 @@ export function RateAdminScreen() {
         </div>
       </div>
       <ErrorBox>{error}</ErrorBox>
+      {note && (
+        <div role="status" style={{ fontSize: 13, marginBottom: 12, color: "color-mix(in srgb, var(--color-text) 70%, transparent)" }}>{note}</div>
+      )}
 
       {/* Whose rates: one search box, with the house card as the first row
           of the list rather than a button beside it — per Kyle. Clients are
@@ -547,7 +572,7 @@ export function RateAdminScreen() {
                       {r.line ? (
                         <>
                           <td>{locked("sizes")
-                            ? <span className="tabular">{r.line.rate}</span>
+                            ? <span className="tabular">{money(r.line.rate)}</span>
                             : <RateInput value={r.line.rate} onChange={v => setRate(r.line.id, v)} />}</td>
                           <td></td>
                           <td></td>
@@ -556,7 +581,7 @@ export function RateAdminScreen() {
                         SIZE_KINDS.map(kind => {
                           const l = line(kind, r.label);
                           return <td key={kind}>{l && (locked("sizes")
-                            ? <span className="tabular">{l.rate}</span>
+                            ? <span className="tabular">{money(l.rate)}</span>
                             : <RateInput value={l.rate} onChange={v => setRate(l.id, v)} />)}</td>;
                         })
                       )}
@@ -565,7 +590,7 @@ export function RateAdminScreen() {
                           : reorderGroup === "sizes"
                           ? <MoveButtons rows={sizeRows} i={i} />
                           : (r.ids.length > 0 && (
-                            <button className="row-x" aria-label={`Remove ${r.label}`}
+                            <button className="row-x btn-danger" aria-label={`Remove ${r.label}`}
                               onClick={() => r.line ? removeCustom(r.line.id) : removeSizeRow(r.label)}>×</button>
                           ))}
                       </td>
@@ -589,13 +614,13 @@ export function RateAdminScreen() {
                     <tr key={r.key}>
                       <td>{r.label}</td>
                       <td>{locked("methods")
-                        ? <span className="tabular">{r.line.rate}</span>
+                        ? <span className="tabular">{money(r.line.rate)}</span>
                         : <RateInput value={r.line.rate} onChange={v => setRate(r.line.id, v)} />}</td>
                       <td style={{ textAlign: "right" }}>
                         {following ? null
                           : reorderGroup === "methods"
                           ? <MoveButtons rows={methodRows} i={i} />
-                          : <button className="row-x" onClick={() => removeCustom(r.line.id)} aria-label={`Remove ${r.label}`}>×</button>}
+                          : <button className="row-x btn-danger" onClick={() => removeCustom(r.line.id)} aria-label={`Remove ${r.label}`}>×</button>}
                       </td>
                     </tr>
                   ))}
@@ -616,13 +641,13 @@ export function RateAdminScreen() {
                     <tr key={r.key}>
                       <td>{r.label}<div style={{ fontSize: 11, color: "color-mix(in srgb, var(--color-text) 55%, transparent)" }}>{r.line.unit}</div></td>
                       <td>{locked("expense")
-                        ? <span className="tabular">{r.line.rate}</span>
+                        ? <span className="tabular">{money(r.line.rate)}</span>
                         : <RateInput value={r.line.rate} onChange={v => setRate(r.line.id, v)} />}</td>
                       <td style={{ textAlign: "right" }}>
                         {following ? null
                           : reorderGroup === "expense"
                           ? <MoveButtons rows={expenseRows} i={i} />
-                          : <button className="row-x" onClick={() => removeCustom(r.line.id)} aria-label={`Remove ${r.label}`}>×</button>}
+                          : <button className="row-x btn-danger" onClick={() => removeCustom(r.line.id)} aria-label={`Remove ${r.label}`}>×</button>}
                       </td>
                     </tr>
                   ))}
@@ -676,7 +701,7 @@ export function RateAdminScreen() {
                         <Switch on={o.active} label={`Override for ${o.jobs ? o.jobs.job_number : "job"}`}
                           onClick={() => !o.locked && toggleOverride(o)} />
                         {!o.locked && (
-                          <button className="row-x" aria-label={`Remove override for ${o.jobs ? o.jobs.job_number : "job"}`}
+                          <button className="row-x btn-danger" aria-label={`Remove override for ${o.jobs ? o.jobs.job_number : "job"}`}
                             onClick={() => removeOverride(o)}>×</button>
                         )}
                       </div>
@@ -755,7 +780,10 @@ function RateHistoryDialog({ scheduleId, onClose }) {
             <div key={h.id} style={{ borderBottom: "1px solid var(--color-neutral-300)", paddingBottom: 8 }}>
               <div style={{ display: "flex", justifyContent: "space-between", gap: 10, fontSize: 14 }}>
                 <span style={{ fontWeight: 600 }}>{h.label}</span>
-                <span className="tabular">${h.oldRate.toFixed(2)} → ${h.newRate.toFixed(2)}</span>
+                {/* money(), like every other figure in the app: this dialog
+                    is where an argument about a price gets settled, and it
+                    was the one screen printing $1250.00. */}
+                <span className="tabular">{money(h.oldRate)} → {money(h.newRate)}</span>
               </div>
               <div style={{ fontSize: 11, color: "color-mix(in srgb, var(--color-text) 55%, transparent)" }}>
                 {h.changedBy} · {new Date(h.changedAt).toLocaleString("en-CA", { day: "2-digit", month: "short", year: "numeric", hour: "numeric", minute: "2-digit" })}

@@ -3,7 +3,7 @@ import { Db } from "../db.js";
 import { Btn, Dialog, Field, ErrorBox, Loading, TagX } from "./common.jsx";
 import {
   BACKUP_PROVIDERS, PROVIDER_LABEL, redirectUriFor, readBackupOutcome,
-  isBeforeRestore, restoreNameMatches, failedRunAdvice
+  isBeforeRestore, restoreNameMatches, failedRunAdvice, keepPhrase
 } from "../backupPanelLogic.js";
 import { describeSchedule, WEEKDAY_NAMES, nextRunAt, BACKUP_ZONE } from "../backupSchedule.js";
 
@@ -46,9 +46,13 @@ const plural = (n, one, many = one + "s") => `${n} ${n === 1 ? one : many}`;
 // fires. A last-run line drawn on the browser's own clock would disagree
 // with the folder name sitting beside it the moment anybody opened the panel
 // from anywhere else.
+//
+// The year is in it because this is also how the restore-jobs picker dates
+// the jobs in a backup, and telling a 2024 job from a 2026 one is the whole
+// point of that list.
 const when = iso => iso
   ? new Date(iso).toLocaleString("en-CA", {
-      timeZone: BACKUP_ZONE, day: "2-digit", month: "short", hour: "numeric", minute: "2-digit"
+      timeZone: BACKUP_ZONE, day: "2-digit", month: "short", year: "numeric", hour: "numeric", minute: "2-digit"
     })
   : "—";
 
@@ -245,7 +249,9 @@ export function AutomaticBackupPanel() {
     if (outcome === "connected") setNotice("The drive is connected. The first backup runs at the next scheduled time.");
     else if (outcome === "denied") setNotice("The drive was not connected: the consent screen was cancelled.");
     else setOutcomeError(why || "The drive couldn't be connected.");
-    window.history.replaceState({}, "", window.location.pathname + (rest ? `?${rest}` : ""));
+    // The hash is the app's own route (route.js) and stays: dropping it here
+    // sent the Google return to Home with the address bar behind the screen.
+    window.history.replaceState({}, "", window.location.pathname + (rest ? `?${rest}` : "") + window.location.hash);
     load();
   }, [load]);
 
@@ -283,7 +289,14 @@ export function AutomaticBackupPanel() {
     }
   };
 
+  // One press clears the refresh token and backups stop until somebody sits
+  // through the provider's consent screen again — on Google, picking the
+  // right account out of however many this browser is signed into. The app
+  // asks before far smaller undoings than this one.
   const disconnect = async () => {
+    const who = (state && state.account) || "this drive";
+    const provider = (state && PROVIDER_LABEL[state.provider]) || "the drive";
+    if (!confirm(`Disconnect ${who}? Backups stop until a drive is connected again, and reconnecting means signing in to ${provider} once more.`)) return;
     setError("");
     setOutcomeError("");
     setNotice("");
@@ -333,7 +346,7 @@ export function AutomaticBackupPanel() {
                 refresh token, and the slice in flight — or the very next one
                 — then fails at connectDrive, which on a restore means failing
                 somewhere between the wipe and the load. */}
-            <Btn variant="secondary" style={{ marginLeft: "auto", flex: "none" }} disabled={!!run} onClick={disconnect}
+            <Btn variant="danger" style={{ marginLeft: "auto", flex: "none" }} disabled={!!run} onClick={disconnect}
               title={run ? "Not while a run is going — wait for it to finish." : undefined}>Disconnect</Btn>
           </>
         ) : (
@@ -386,7 +399,9 @@ export function AutomaticBackupPanel() {
       </div>
 
       <div style={{ ...QUIET, marginBottom: 12 }}>
-        {describeSchedule(form)}. Older backups beyond the {plural(Number(form.keep) || 14, "most recent")} are
+        {/* keepPhrase, not the box read back: an emptied box saves as 14, a
+            typed 0 saves as 1, and this sentence used to name neither. */}
+        {describeSchedule(form)}. Older backups beyond {keepPhrase(form.keep)} are
         removed after each successful run &mdash; except the copies taken automatically just before a restore,
         which are never tidied away.
         {connected && <> Next due <strong>{when(s.next_run_at || nextRunAt(form, Date.now()))}</strong>.</>}
@@ -649,7 +664,9 @@ export function RestoreDialog({ backup, onClose, onStarted }) {
     <Dialog title="Restore everything" maxWidth={580} onClose={starting ? () => {} : onClose}
       actions={<>
         <Btn variant="secondary" onClick={onClose} disabled={starting}>Cancel</Btn>
-        <Btn variant="primary" disabled={!ready || starting} onClick={start}
+        {/* The one button in the app that empties the database. It wore the
+            same blue as Save settings. */}
+        <Btn variant="danger" disabled={!ready || starting} onClick={start}
           title={check && check.tooNew
             ? "That backup is newer than this app"
             : !ready ? "Type the backup's name to confirm" : undefined}>

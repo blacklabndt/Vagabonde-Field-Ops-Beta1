@@ -2,6 +2,7 @@ import React, { useState, useEffect, useRef, useCallback, useId } from "react";
 import { createPortal } from "react-dom";
 import { Db } from "../db.js";
 import { nonNegative } from "../data.js";
+import { acceptsNumberText, isWholeStep } from "../numberInput.js";
 
 // Re-exported from data.js, which is where they live now — the sign-in path
 // needs them and cannot import a file that pulls in React. Kept here so the
@@ -125,17 +126,55 @@ const LABELABLE = new Set(["input", "select", "textarea", "button", "meter", "ou
 // with several children — a picker above a box, a warning underneath — is
 // left alone, because guessing which of them the label names would be worse
 // than leaving it unsaid. A child that brought its own id keeps it.
+// A Field the label cannot be attached to is still a Field whose control has
+// a name: the New job dialog had five unnamed comboboxes (Job #, Client, Name,
+// Company, Rep name) because each wraps its control in a <div> or sits beside
+// a hint, so `only` is null and there is nothing for `for=` to point at.
+// Rather than name them one at a time in every dialog, the label is given an
+// id and pointed at the first control inside that has no name of its own —
+// which also skips the pickers that already carry an aria-label ("Client
+// contact on file") and lands on the box the label is actually about.
+//
+// Done to the DOM rather than through props because the children are the
+// caller's markup, arbitrarily deep, and cloning through it would mean this
+// component deciding where the label belongs in someone else's layout.
+// Buttons are left out: their name is the words on them.
+// Deliberately without a dependency list: which control comes first, and
+// whether it has a name of its own yet, depends on children that appear and
+// vanish (the contact picker only exists once the contacts have loaded). It
+// settles on the first pass that has a control to name and is a no-op after
+// that — hence no cleanup, which would take the attribute off again before
+// every re-render and re-stamp it on every keystroke, which is how a screen
+// reader ends up re-announcing the box being typed into. The stamped element
+// belongs to this Field's own subtree and leaves with it.
+function useLabelFirstControl(rootRef, labelId, active) {
+  useEffect(() => {
+    if (!active) return;
+    const root = rootRef.current;
+    if (!root) return;
+    const ours = el => el.getAttribute("aria-labelledby") === labelId;
+    const named = el => el.getAttribute("aria-label") ||
+      (el.getAttribute("aria-labelledby") && !ours(el)) ||
+      (el.labels && el.labels.length);
+    const el = Array.from(root.querySelectorAll("input, select, textarea")).find(x => !named(x));
+    if (el && !ours(el)) el.setAttribute("aria-labelledby", labelId);
+  });
+}
+
 export function Field({ label, children, style, missing, required }) {
   const autoId = useId();
+  const rootRef = useRef(null);
+  const labelId = autoId + "-label";
   // A fragment is several children wearing one wrapper, and it has no props
   // of its own — handing it an id only earns a console warning.
   const only = React.isValidElement(children) && children.type !== React.Fragment &&
     (typeof children.type !== "string" || LABELABLE.has(children.type)) ? children : null;
   const forId = only ? (only.props.id || autoId) : undefined;
+  useLabelFirstControl(rootRef, labelId, !!label && !forId);
   return (
-    <div className="field" style={style}>
+    <div className="field" style={style} ref={rootRef}>
       {label && (
-        <label htmlFor={forId} className={missing ? "field-label-missing" : undefined}>
+        <label htmlFor={forId} id={labelId} className={missing ? "field-label-missing" : undefined}>
           {label}
           {required && (
             <span style={{ marginLeft: 6, fontSize: 11, fontWeight: 400, opacity: 0.7 }}>required</span>
@@ -461,6 +500,49 @@ export function PdfGlyph({ w = 16, h = 20 }) {
   return <span className="pdf-glyph" style={{ width: w, height: h }}>PDF</span>;
 }
 
+// Opens something whose URL does not exist until it has been asked for: every
+// stored file in this app lives in a private bucket and is reached through a
+// signed link minted at tap time. Three screens do it — the PDF link below,
+// the Files page and a shared file in the chat — and all three used to do it
+// like this:
+//
+//     const win = window.open(url, "_blank", "noopener");
+//     if (!win) window.location.href = url;
+//
+// window.open returns null whenever `noopener` is set, by spec, whether or not
+// the tab opened. So the fallback fired on every single open: a stray blank
+// tab, the file fetched twice, and — for a PDF, which the browser renders
+// rather than downloads — the running app replaced by the document, taking
+// whatever was half-entered behind it.
+//
+// A window opened after an await is a pop-up as far as the browser is
+// concerned, so the tab has to be claimed inside the click, blank, and pointed
+// at the file when the link arrives. That needs a handle, so `noopener` cannot
+// be passed; clearing `opener` on the handle severs the same link. `replace`
+// rather than an assignment keeps about:blank out of the new tab's history, so
+// its Back button is not a dead step.
+//
+// A blocked pop-up says so and mints nothing. Falling back to this tab is the
+// behaviour that caused the bug, and a browser that blocked one tab will block
+// the next: better to name the setting than to lose the screen behind it.
+export async function openMinted(mint) {
+  const win = window.open("", "_blank");
+  if (!win) {
+    const blocked = new Error("This browser blocked the new tab — allow pop-ups for this site, then try again.");
+    blocked.popupBlocked = true;
+    throw blocked;
+  }
+  // Read-only in a few browsers, which is the same outcome by another route.
+  try { win.opener = null; } catch (_) { /* nothing to sever */ }
+  try {
+    const url = await mint();
+    win.location.replace(url);
+  } catch (e) {
+    try { win.close(); } catch (_) { /* already gone */ }
+    throw e;
+  }
+}
+
 // Opens the stored PDF. The storage buckets are private, so there is no
 // durable URL to put in href — we mint a short-lived signed URL on click and
 // open that. A row with no pdfKey (e.g. a JHA recorded before PDF rendering
@@ -485,14 +567,13 @@ export function PdfLink({ file, pdfKey, bucket = "reports", style }) {
     if (busy) return;
     setBusy(true); setErr("");
     try {
-      const url = await Db.signedUrl(bucket, pdfKey);
-      // Opened synchronously-ish after an await, so some browsers treat this
-      // as a non-user gesture and block it — fall back to same-tab navigation.
-      const win = window.open(url, "_blank", "noopener");
-      if (!win) window.location.href = url;
+      await openMinted(() => Db.signedUrl(bucket, pdfKey));
     } catch (e2) {
       console.error("Couldn't open PDF:", e2);
-      setErr("Couldn't open");
+      // Short, because it sits inline beside the filename. The blocked
+      // pop-up is worth naming: "Couldn't open" would send someone looking
+      // for a missing file instead of a browser setting.
+      setErr(e2 && e2.popupBlocked ? "Allow pop-ups, then tap again" : "Couldn't open");
     }
     setBusy(false);
   };
@@ -682,8 +763,10 @@ export function Toast({ message, tone = "ok", onDone, duration = 2600 }) {
 // the browser considers half-typed or locale-wrong (a comma decimal, a
 // stray key) — so a quantity that was visibly on screen reached the total
 // as zero, with no error anywhere. Beta testing found ten of these on the
-// billing ticket alone. The keystroke filter below replaces the old
-// minus/e key blocking: nothing but digits and separators ever lands.
+// billing ticket alone. The keystroke rule below (numberInput.js) replaces
+// the old minus/e key blocking, and refuses rather than filters: a stray key
+// that was dropped left the surviving digits closed up into a different,
+// plausible number, which is how "1e6" reached a line as 16.
 export function NumField({ value, onChange, step, style, ...rest }) {
   const [text, setText] = useState(() => String(value == null ? 0 : value));
   const [editing, setEditing] = useState(false);
@@ -698,16 +781,25 @@ export function NumField({ value, onChange, step, style, ...rest }) {
   const commit = raw => { setText(String(nonNegative(raw))); onChange(nonNegative(raw)); };
 
   return (
-    <input className="input tabular" type="text" inputMode="decimal" value={text}
+    <input className="input tabular" type="text" value={text}
+      // A box that counts in whole units asks the phone for a keypad with no
+      // decimal point on it, rather than offering a key that will be refused.
+      inputMode={isWholeStep(step) ? "numeric" : "decimal"}
       style={style}
       // Selecting the contents on focus means one tap then type, rather than
       // clear-then-type, which is what people actually do with these.
       onFocus={e => { setEditing(true); e.target.select(); }}
       onBlur={e => { setEditing(false); commit(e.target.value); }}
       onChange={e => {
-        const raw = e.target.value.replace(/[^\d.,]/g, "");
+        const raw = e.target.value;
+        // Declining the change leaves `text` alone, and React puts the
+        // controlled value back on the element, so the refused key simply
+        // never appears. Nothing half-typed is ever shown as a figure the
+        // line is not billing.
+        if (!acceptsNumberText(raw, step)) return;
         setText(raw);
-        // Floored on the way out, which also catches a pasted "-5".
+        // Floored on the way out: a value can still arrive by paste from
+        // code that does not go through this box.
         onChange(nonNegative(raw));
       }}
       {...rest} />

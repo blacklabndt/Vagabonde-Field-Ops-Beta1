@@ -369,8 +369,11 @@ will remove before the deletes.
   reached the database yet; it syncs itself when signal returns. **"N
   won't sync"** is different: tap it, read the reason, fix and retry.
 - **An email didn't arrive** — Resend's dashboard → Emails shows every
-  attempt and why it failed. The app-side reasons land in the
-  `function_errors` table (Supabase → Table Editor).
+  attempt and why it failed. The app-side reasons are on the **Admin
+  screen**, under **Recent background errors**: the newest twenty failures
+  from the functions that send mail, render PDFs and remove accounts, with
+  **Refresh** beside them and **Clear** to empty the log once they have been
+  dealt with.
 - **An approval link opens as a plain text-looking page** — the Admin
   screen's App address is blank or wrong.
 - **Chat push isn't arriving on one device** — notifications are allowed

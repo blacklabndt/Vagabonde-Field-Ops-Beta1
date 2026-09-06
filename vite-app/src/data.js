@@ -337,6 +337,34 @@ export const decimalString = value => {
 export const lineTotal = (quantity, unitRate) =>
   Math.round(Number(quantity || 0) * Number(unitRate || 0) * 100) / 100;
 
+// What a day's work can plausibly hold, per unit of the rate card. None of
+// these is a limit — a ticket may legitimately carry any of them — they are
+// the figure past which the ticket screen asks once whether that is really
+// what was worked. The only guard until now was MAX_TICKET_TOTAL in db.js,
+// which is the database's numeric(10,2) ceiling: it catches a nine-figure
+// ticket and nothing under it, so 12,000 welds at $8 saved without a murmur
+// and billed the client $96,000. A stray digit in the quantity box is the one
+// way a ticket goes wrong quietly.
+//
+// Per unit, because the units mean different things: 200 km is an ordinary
+// drive out of Grande Prairie, and 200 hours is a month.
+export const SANE_QUANTITY_PER_UNIT = {
+  weld: 200,     // a crew shoots dozens of welds in a day, not hundreds
+  h: 24,         // hours billed on one line of one work date
+  days: 31,      // LOA and day rates are sometimes back-billed over a stretch
+  km: 2000,      // there and back from anywhere in the province
+  ea: 200        // film, callouts, mobilizations
+};
+export const SANE_QUANTITY_DEFAULT = 200;
+export const saneQuantityCeiling = unit =>
+  Object.prototype.hasOwnProperty.call(SANE_QUANTITY_PER_UNIT, unit)
+    ? SANE_QUANTITY_PER_UNIT[unit] : SANE_QUANTITY_DEFAULT;
+
+// One person's hours on one ticket. A ticket covers a single work date, so
+// anything past a full day is a typo worth a question — hours here are
+// payroll, not billing.
+export const SANE_CREW_HOURS = 24;
+
 export const GST_RATE = 0.05;
 
 // Rounded on integer cents, not on dollars.
@@ -368,6 +396,46 @@ export const storageKeySafe = (name, fallback = "file") => {
     .slice(0, 100);
   return cleaned || fallback;
 };
+
+// A file's size in the unit it is actually in. The phone upload screen
+// printed everything in MB to one decimal, so a 340 KB report read "0.0 MB"
+// and looked like an empty attachment.
+export const fileSize = bytes => {
+  const n = Number(bytes) || 0;
+  if (n < 1000) return `${Math.round(n)} bytes`;
+  if (n < 1e6) return `${Math.round(n / 1000)} KB`;
+  return `${(n / 1e6).toFixed(1)} MB`;
+};
+
+// The ceiling on an interpreted report. Nothing enforced one on the client
+// before: `accept=` on a file input is a picker filter and no more, so a .txt
+// and a 25 MB blank PDF both went up without a word. The number is ours, not
+// the platform's — Storage stops at the project's 50 MiB and says so in the
+// API's own words, and the mail function attaches up to MAX_ATTACHMENT_BYTES
+// (7 MB) and sends anything larger as a link. 25 MB is generous for a scanned
+// report and small enough that a phone on a lease can actually push it.
+// Decimal megabytes, the same ones fileSize above prints in, so the size a
+// refusal quotes and the limit it quotes are measured the same way.
+export const MAX_REPORT_BYTES = 25 * 1e6;
+export const MAX_REPORT_LABEL = "25 MB";
+
+// Why a picked report is refused, or "" if it is fine. Both the phone screen
+// and the desktop dialog ask this, so the two say the same sentence.
+export function reportFileRefusal(file) {
+  if (!file) return "";
+  const name = file.name || "the file";
+  // The type is what the browser thinks; the extension is what the person
+  // chose. Either one saying PDF is enough — some phones hand over an empty
+  // type for a file picked out of a cloud drive.
+  const isPdf = file.type === "application/pdf" || /\.pdf$/i.test(name);
+  if (!isPdf) {
+    return `${name} isn't a PDF. Interpreted reports are filed as PDFs — export it as one and attach that.`;
+  }
+  if (Number(file.size) > MAX_REPORT_BYTES) {
+    return `${name} is ${fileSize(file.size)}, over the ${MAX_REPORT_LABEL} limit for a report. Split it, or export it at a lower scan quality, and attach it again.`;
+  }
+  return "";
+}
 
 // Reads the film and MPI numbering off an interpreted report's text and
 // answers the Upload dialog's "Last numbers" field in its own format:
@@ -431,19 +499,26 @@ export const JHA_TEMPLATES = [
   "RT — Shop radiography v1", "RT — Sour service (H₂S) v3"
 ];
 
+// The standing hazard list the JHA builder opens with, every one of them
+// unticked. They used to open ticked, which made "tick at least one hazard"
+// a rule that could never fire: an assessment could be filed in three taps
+// claiming all twelve with no severity, probability or frequency on any of
+// them, and a pre-ticked safety form is a form to tap past. Same rule the
+// ticket screen keeps on purpose — every charge on a ticket is one somebody
+// picked from the dropdown.
 export const SEED_HAZARDS = [
-  { name: "Driving", control: "Follow all road rules, wear safety equipment, drive to conditions", level: "High", on: true },
-  { name: "Entanglement", control: "Store equipment correctly, housekeeping to prevent injuries", level: "Med", on: true },
-  { name: "Environmental", control: "Dress to conditions, stay hydrated, watch for extreme weather", level: "Med", on: true },
-  { name: "Hazardous materials (WHMIS)", control: "Refer to MSDS sheets, sign transportation documentation", level: "High", on: true },
-  { name: "Heavy equipment", control: "Make eye contact with the operator, keep a safe distance", level: "High", on: true },
-  { name: "Housekeeping", control: "Keep the work area clutter-free to prevent injuries", level: "Med", on: true },
-  { name: "Manual lifting", control: "Lift with your legs, do not twist or jerk", level: "Med", on: true },
-  { name: "Pinch points", control: "Be aware of pinch points and avoid them whenever possible", level: "Med", on: true },
-  { name: "Radiation (inc. NORM)", control: "ALARA, monitors, survey meters and signage to control area and monitor dose rates", level: "Critical", on: true },
-  { name: "Slips / trips / falls", control: "Watch footing, wear proper footwear", level: "Med", on: true },
-  { name: "Tools", control: "Examine tools for defects before use; do not use a defective tool", level: "Med", on: true },
-  { name: "Weather related", control: "Dress to conditions; watch for extreme heat/cold, slippery or wet ground", level: "Med", on: true }
+  { name: "Driving", control: "Follow all road rules, wear safety equipment, drive to conditions", level: "High", on: false },
+  { name: "Entanglement", control: "Store equipment correctly, housekeeping to prevent injuries", level: "Med", on: false },
+  { name: "Environmental", control: "Dress to conditions, stay hydrated, watch for extreme weather", level: "Med", on: false },
+  { name: "Hazardous materials (WHMIS)", control: "Refer to MSDS sheets, sign transportation documentation", level: "High", on: false },
+  { name: "Heavy equipment", control: "Make eye contact with the operator, keep a safe distance", level: "High", on: false },
+  { name: "Housekeeping", control: "Keep the work area clutter-free to prevent injuries", level: "Med", on: false },
+  { name: "Manual lifting", control: "Lift with your legs, do not twist or jerk", level: "Med", on: false },
+  { name: "Pinch points", control: "Be aware of pinch points and avoid them whenever possible", level: "Med", on: false },
+  { name: "Radiation (inc. NORM)", control: "ALARA, monitors, survey meters and signage to control area and monitor dose rates", level: "Critical", on: false },
+  { name: "Slips / trips / falls", control: "Watch footing, wear proper footwear", level: "Med", on: false },
+  { name: "Tools", control: "Examine tools for defects before use; do not use a defective tool", level: "Med", on: false },
+  { name: "Weather related", control: "Dress to conditions; watch for extreme heat/cold, slippery or wet ground", level: "Med", on: false }
 ];
 
 // The methods every schedule starts with. What a ticket can bill comes from

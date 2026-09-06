@@ -1,5 +1,5 @@
 import React, { useState, useEffect, useMemo, useRef } from "react";
-import { money, todayLocal, localDate, dayMonth, initialsOf, crewRoleFor, hours, lineTotal, gstOn, seesPrices } from "../data.js";
+import { money, todayLocal, localDate, dayMonth, initialsOf, crewRoleFor, hours, lineTotal, gstOn, seesPrices, saneQuantityCeiling, SANE_CREW_HOURS } from "../data.js";
 import { Db } from "../db.js";
 import { Blueprint, Btn, TagX, Field, ErrorBox, emailIn, NoJobSelected, QueuedPanel, NumField , Loading } from "./common.jsx";
 import { OfflineQueue } from "../offlineQueue.js";
@@ -509,6 +509,13 @@ export function TicketMobileScreen({ job, jobRecord, currentUser, onSaved, ticke
   const weldItemsByKey = useMemo(() => rates ? Object.fromEntries(rates.welds.map(w => [w.key, w])) : {}, [rates]);
   const serviceByKey = useMemo(() => rates ? Object.fromEntries(rates.others.map(s => [s.key, s])) : {}, [rates]);
 
+  // The sanity prompt's answer, remembered for this ticket and keyed on the
+  // figures it was given for: a legitimate big number is not argued with on
+  // every resave, and a newly typed one is still asked about. Declared up
+  // here with the other hooks, above the early returns — below them it ran
+  // only on some renders and React refused the screen.
+  const oddConfirmed = useRef("");
+
   if (!job) return <NoJobSelected what="a billing ticket" />;
   if (queued) return <QueuedPanel what="this ticket" onDone={onSaved} />;
   if (loadError) {
@@ -614,15 +621,24 @@ export function TicketMobileScreen({ job, jobRecord, currentUser, onSaved, ticke
     : availablePeople.some(p => p.id === currentUser.id) ? currentUser.id
     : (availablePeople[0] || {}).id || "";
 
-  const setCrewField = (profileId, key, value) =>
-    setCrew(p => p.map(c => c.profileId === profileId ? { ...c, [key]: Math.max(0, value) } : c));
+  // A refusal is about the figures that were on screen when Save was pressed.
+  // It used to be cleared only at the top of the next save, so a $4.49 ticket
+  // sat under "This ticket adds up to $198,000,010…" long after the quantity
+  // was corrected, reading as if it were still refused. The first edit to
+  // anything the message could be about takes it down.
+  const clearSaveError = () => setSaveError(e => e ? "" : e);
 
-  const setWeldQty = (key, qty) => setWeldLines(p => p.map(l => l.key === key ? { ...l, qty: Math.max(0, qty) } : l));
-  const setOtherQty = (key, qty) => setOtherLines(p => p.map(l => l.key === key ? { ...l, qty: Math.max(0, qty) } : l));
-  const removeWeld = key => setWeldLines(p => p.filter(l => l.key !== key));
-  const removeOther = key => setOtherLines(p => p.filter(l => l.key !== key));
+  const setCrewField = (profileId, key, value) => {
+    clearSaveError();
+    setCrew(p => p.map(c => c.profileId === profileId ? { ...c, [key]: Math.max(0, value) } : c));
+  };
+
+  const setWeldQty = (key, qty) => { clearSaveError(); setWeldLines(p => p.map(l => l.key === key ? { ...l, qty: Math.max(0, qty) } : l)); };
+  const setOtherQty = (key, qty) => { clearSaveError(); setOtherLines(p => p.map(l => l.key === key ? { ...l, qty: Math.max(0, qty) } : l)); };
+  const removeWeld = key => { clearSaveError(); setWeldLines(p => p.filter(l => l.key !== key)); };
+  const removeOther = key => { clearSaveError(); setOtherLines(p => p.filter(l => l.key !== key)); };
   // By position: an off-card line has no catalog key to be known by.
-  const removeOrphan = i => setOrphanLines(p => p.filter((_, j) => j !== i));
+  const removeOrphan = i => { clearSaveError(); setOrphanLines(p => p.filter((_, j) => j !== i)); };
 
   // Stored — and therefore printed on the field invoice — in the card's
   // order, not the order lines were tapped in: the invoice reads like the
@@ -641,6 +657,31 @@ export function TicketMobileScreen({ job, jobRecord, currentUser, onSaved, ticke
       // they would be deleted by the very next save.
       ...orphanLines.map(l => ({ kind: l.kind, label: l.label, unit: l.unit, quantity: l.quantity, unit_rate: l.unit_rate }))
     ];
+  };
+
+  // Which hours field a crew figure came from, in the words the row uses.
+  const CREW_HOUR_FIELDS = [
+    ["straight", "reg"], ["ot", "OT"], ["solo", "solo"], ["soloOt", "solo OT"]
+  ];
+
+  // Figures nobody could have worked. Nothing here refuses a save — a big
+  // number is sometimes the right number — it is the question the ticket
+  // screen never asked: the only guard was the database's eight-figure
+  // ceiling, so 12,000 welds at $8 saved in silence and billed $96,000.
+  const oddFigures = () => {
+    const out = [];
+    for (const l of buildLines()) {
+      if (l.quantity > saneQuantityCeiling(l.unit)) {
+        const unit = l.unit === "weld" ? "welds" : l.unit;
+        out.push(`${l.label} has ${Number(l.quantity).toLocaleString("en-CA")} ${unit}`);
+      }
+    }
+    for (const c of crew) {
+      for (const [key, label] of CREW_HOUR_FIELDS) {
+        if ((c[key] || 0) > SANE_CREW_HOURS) out.push(`${c.name} has ${hours(c[key])} ${label} hours`);
+      }
+    }
+    return out;
   };
 
   const save = async sendForApproval => {
@@ -662,6 +703,17 @@ export function TicketMobileScreen({ job, jobRecord, currentUser, onSaved, ticke
       // but not without being asked.
       if (!String(jobRecord.afe || "").trim()
           && !confirm(`${job.id} has no AFE / PO on file. The client's accounts payable pays against it — send this ticket for approval anyway?`)) return;
+    }
+
+    // Asked before anything is written, and asked once: the figure is named
+    // so the answer is about this line rather than about a warning in general.
+    const odd = oddFigures();
+    const oddKey = odd.join(" · ");
+    if (odd.length && oddKey !== oddConfirmed.current) {
+      const others = odd.length - 1;
+      const rest = others ? ` (and ${others} other figure${others === 1 ? "" : "s"} like it)` : "";
+      if (!confirm(`${odd[0]}${rest} — save it anyway?`)) return;
+      oddConfirmed.current = oddKey;
     }
 
     setSaving(true);
@@ -953,6 +1005,7 @@ export function TicketMobileScreen({ job, jobRecord, currentUser, onSaved, ticke
                   {avail.map(w => <option key={w.key} value={w.key}>{shortWeldLabel(g.id, w.label)}{isUnpriced(w) ? " (unpriced)" : ""}</option>)}
                 </select>
                 <Btn variant="secondary" onClick={() => {
+                  clearSaveError();
                   setWeldLines(p => [...p, { key: pick, qty: 1 }]);
                   const rest = avail.filter(w => w.key !== pick);
                   setWeldPicks(p => ({ ...p, [g.id]: rest[0] ? rest[0].key : "" }));
@@ -993,7 +1046,7 @@ export function TicketMobileScreen({ job, jobRecord, currentUser, onSaved, ticke
               <select className="input" value={effServicePick} onChange={e => setServicePick(e.target.value)} style={{ flex: 1 }}>
                 {availableService.map(s => <option key={s.key} value={s.key}>{s.label}{isUnpriced(s) ? " (unpriced)" : ""}</option>)}
               </select>
-              <Btn variant="secondary" onClick={() => { const pick = effServicePick; if (!pick) return; setOtherLines(p => [...p, { key: pick, qty: 1 }]); const rest = availableService.filter(s => s.key !== pick); if (rest[0]) setServicePick(rest[0].key); }}>Add</Btn>
+              <Btn variant="secondary" onClick={() => { const pick = effServicePick; if (!pick) return; clearSaveError(); setOtherLines(p => [...p, { key: pick, qty: 1 }]); const rest = availableService.filter(s => s.key !== pick); if (rest[0]) setServicePick(rest[0].key); }}>Add</Btn>
             </div>
           )}
 
@@ -1059,7 +1112,7 @@ export function TicketMobileScreen({ job, jobRecord, currentUser, onSaved, ticke
                   {c.role === "Helper" && <TagX variant="neutral">Helper</TagX>}
                   {c.isSub && <TagX variant="outline">Sub</TagX>}
                   {crew.length > 1 && (
-                    <button onClick={() => setCrew(p => p.filter(x => x.profileId !== c.profileId))}
+                    <button onClick={() => { clearSaveError(); setCrew(p => p.filter(x => x.profileId !== c.profileId)); }}
                       aria-label={`Remove ${c.name}`}
                       style={{ marginLeft: "auto", background: "none", border: "none", cursor: "pointer", color: "color-mix(in srgb, var(--color-text) 50%, transparent)", fontSize: 16 }}>×</button>
                   )}
@@ -1128,6 +1181,7 @@ export function TicketMobileScreen({ job, jobRecord, currentUser, onSaved, ticke
               <Btn variant="secondary" onClick={() => {
                 const p = availablePeople.find(x => x.id === effCrewPick);
                 if (!p) return;
+                clearSaveError();
                 setCrew(c => [...c, { profileId: p.id, name: p.displayName, isSub: p.is_subcontractor, role: crewRoleFor(p), straight: 0, ot: 0, solo: 0, soloOt: 0, dose: 0, mileage: 0 }]);
                 const rest = availablePeople.filter(x => x.id !== effCrewPick);
                 if (rest[0]) setCrewPick(rest[0].id);
@@ -1143,7 +1197,7 @@ export function TicketMobileScreen({ job, jobRecord, currentUser, onSaved, ticke
           <div style={{ marginTop: 4 }}>
             <span style={{ fontSize: 13, fontFamily: "var(--font-heading)", fontWeight: 600 }}>Job delays</span>
             <textarea className="input" rows={2} value={delays}
-              onChange={e => setDelays(e.target.value)}
+              onChange={e => { clearSaveError(); setDelays(e.target.value); }}
               placeholder="Standby, waiting on the line, road ban… — leave blank if the day ran clean"
               style={{ marginTop: 6, resize: "vertical", fontFamily: "inherit" }} />
           </div>

@@ -2,6 +2,7 @@ import React, { useState, useEffect } from "react";
 import { sbClient, forgetStoredSession } from "../config.js";
 import { tabList, Blueprint, Btn, Field, ErrorBox } from "./common.jsx";
 import { OfflineCache } from "../offlineCache.js";
+import { OfflineQueue } from "../offlineQueue.js";
 import { IDENTITY_KEY } from "../session.js";
 import { Recovery } from "../recovery.js";
 
@@ -63,7 +64,18 @@ export function SignInScreen({ onSignIn, notice = "" }) {
     });
     if (authErr || !data.user) {
       setBusy(false);
-      setError("That email and password don't match an account.");
+      // A request that never reached Supabase is not a wrong password, and
+      // this is the screen where confusing the two costs the most: a tech on
+      // a lease reads "that password doesn't match", taps Forgot password —
+      // which needs the network too and also fails — and decides the account
+      // is broken. auth-js reports a request it could not make as
+      // AuthRetryableFetchError; the profile read below draws exactly the
+      // same distinction one branch further on, for the same reason.
+      const noSignal = authErr
+        && (authErr.name === "AuthRetryableFetchError" || OfflineQueue.isNetworkError(authErr));
+      setError(noSignal
+        ? "No connection, so this sign-in couldn't be checked. Signing in needs signal — get back in range and try again."
+        : "That email and password don't match an account.");
       return;
     }
     let profile = null, profErr = null;
@@ -139,7 +151,10 @@ export function SignInScreen({ onSignIn, notice = "" }) {
           <p style={{ fontSize: 14, color: "color-mix(in srgb, var(--color-text) 65%, transparent)", maxWidth: "38ch" }}>
             Hazard assessments, radiographic reports and daily billing for crews working out of Grande Prairie. Sign in with your company email.
           </p>
-          <div style={{ display: "flex", flexDirection: "column", gap: 6, marginTop: 20, fontSize: 12, color: "color-mix(in srgb, var(--color-text) 50%, transparent)" }}>
+          {/* 65%, not 50%: at half strength this line was 3.15:1 on the light
+              theme's paper ground, which is under AA and is the theme a crew
+              picks outdoors. */}
+          <div style={{ display: "flex", flexDirection: "column", gap: 6, marginTop: 20, fontSize: 12, color: "color-mix(in srgb, var(--color-text) 65%, transparent)" }}>
             <span>No account yet? Ask an admin to add you from Users &amp; access —</span>
             <span>accounts are created in Supabase Auth, not self-serve signup.</span>
           </div>
@@ -154,20 +169,32 @@ export function SignInScreen({ onSignIn, notice = "" }) {
               button, because it is about the link they just followed. */}
           {linkError && <ErrorBox>{linkError}</ErrorBox>}
           {notice && <ErrorBox>{notice}</ErrorBox>}
+          {/* Correcting a typo clears the complaint about it. Left standing,
+              "that email and password don't match" sat there while the email
+              was retyped and only went on the next submit, which reads as the
+              app not having noticed. */}
           <Field label="Email">
             <input className="input" style={{ minHeight: 42 }} type="email" value={email}
               name="email" autoComplete="username" required
-              onChange={e => setEmail(e.target.value)} placeholder="you@vagabonde.ca" />
+              onChange={e => { setEmail(e.target.value); setError(""); }} placeholder="you@vagabonde.ca" />
           </Field>
           <Field label="Password">
             <input className="input" style={{ minHeight: 42 }} type="password" value={password}
               name="password" autoComplete="current-password" required
-              onChange={e => setPassword(e.target.value)} placeholder="••••••••" />
+              onChange={e => { setPassword(e.target.value); setError(""); }} placeholder="••••••••" />
           </Field>
           <ErrorBox>{error}</ErrorBox>
           <Btn type="submit" variant="primary" block style={{ minHeight: 48 }} disabled={busy}>{busy ? "Signing in…" : "Sign in"}</Btn>
-          <div style={{ display: "flex", justifyContent: "space-between", fontSize: 11, marginTop: 4, color: "color-mix(in srgb, var(--color-text) 55%, transparent)" }}>
-            <span>Offline sign-in cached for 12 h</span>
+          {/* This used to read "Offline sign-in cached for 12 h", which
+              promises the one thing that cannot happen: the password is
+              checked by Supabase, so signing in needs a connection. What is
+              cached for twelve hours is the session afterwards — the app
+              opens as you, out of range, until then. Saying it the short way
+              invited the attempt that fails. */}
+          <div style={{ fontSize: 11, marginTop: 4, color: "color-mix(in srgb, var(--color-text) 65%, transparent)" }}>
+            Signing in needs a connection. Once you're in, this device keeps you signed in with no signal for 12 h.
+          </div>
+          <div style={{ display: "flex", justifyContent: "flex-end", fontSize: 11, color: "color-mix(in srgb, var(--color-text) 65%, transparent)" }}>
             {resetState === "sent"
               ? <span>Reset link sent — check that inbox</span>
               : <a href="#" onClick={forgotPassword}>{resetState === "sending" ? "Sending…" : "Forgot password"}</a>}

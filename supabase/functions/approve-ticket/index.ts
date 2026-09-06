@@ -530,6 +530,7 @@ function signForm(fingerprint: string) {
       <button type="button" class="ghost" id="sigclear">Clear</button>
       <label class="ghost">Upload signature image<input type="file" id="sigfile" accept="image/*"></label>
     </div>
+    <p id="signote" role="alert" style="color:#8a3b3b;font-size:13px;margin:8px 0 0;display:none"></p>
     <input type="hidden" name="signature" id="sigdata">
     <button type="submit">Approve this ticket</button>
     <p class="signnote">Approving records your name, the time, and your IP address as the signature. Questions before you sign? Reply to the email instead.</p>
@@ -620,11 +621,21 @@ function signForm(fingerprint: string) {
       pad.addEventListener(t, function () { drawing = false; });
     });
     document.getElementById("sigclear").addEventListener("click", reset);
+    // Everything else this page refuses is said inline, in the page's own
+    // type — a rep on a phone was getting a native OS dialog in the middle
+    // of an otherwise careful document.
+    var note = document.getElementById("signote");
+    function say(text) {
+      if (!note) return;
+      note.textContent = text || "";
+      note.style.display = text ? "block" : "none";
+    }
     document.getElementById("sigfile").addEventListener("change", function () {
       var f = this.files && this.files[0];
       this.value = "";
+      say("");
       if (!f) return;
-      if (f.size > 8 * 1024 * 1024) { alert("That image is over 8 MB — use a smaller photo of your signature."); return; }
+      if (f.size > 8 * 1024 * 1024) { say("That image is over 8 MB — use a smaller photo of your signature."); return; }
       var img = new Image();
       img.onload = function () {
         reset();
@@ -634,7 +645,7 @@ function signForm(fingerprint: string) {
         dirty = true;
         URL.revokeObjectURL(img.src);
       };
-      img.onerror = function () { alert("That file couldn't be read as an image."); };
+      img.onerror = function () { say("That file couldn't be read as an image — try a photo or a screenshot of your signature."); };
       img.src = URL.createObjectURL(f);
     });
     document.getElementById("signform").addEventListener("submit", function () {

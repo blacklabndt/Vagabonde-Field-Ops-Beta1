@@ -36,7 +36,14 @@ async function loadRecovery(hash) {
 
   let handler = null;
   globalThis.__recoveryStub = { sbClient: { auth: { onAuthStateChange: fn => { handler = fn; } } } };
-  globalThis.window = { location: { hash } };
+  // A history stub as well as a location: a hash that says "recovery" without
+  // a token is taken out of the address bar on the way past, and that is a
+  // behaviour worth asserting rather than one to leave unobserved.
+  const rewrites = [];
+  globalThis.window = {
+    location: { hash, pathname: "/", search: "" },
+    history: { replaceState: (state, title, url) => { rewrites.push(url); } }
+  };
 
   const patched = SOURCE.replace(IMPORT_LINE, "const { sbClient } = globalThis.__recoveryStub;");
   // A distinct comment per load, because Node caches a data: module by its
@@ -44,7 +51,7 @@ async function loadRecovery(hash) {
   const mod = await import("data:text/javascript;base64," +
     Buffer.from(`${patched}\n// #${nonce++}\n`, "utf8").toString("base64"));
 
-  return { mod, handler, fire: event => handler(event, null) };
+  return { mod, handler, rewrites, fire: event => handler(event, null) };
 }
 
 test("a recovery landing is caught during import, before anything subscribes", async () => {
@@ -58,6 +65,25 @@ test("an ordinary landing is not a recovery", async () => {
   assert.equal(mod.Recovery.pending(), false);
   const { mod: withOtherHash } = await loadRecovery("#access_token=abc&type=signup");
   assert.equal(withOtherHash.Recovery.pending(), false, "only type=recovery counts");
+});
+
+test("the word without the token is not a recovery, and is stripped", async () => {
+  // A bare `#type=recovery` used to open the real set-a-new-password screen
+  // over whoever was signed in, with no token involved — and chat linkifies
+  // URLs, so the address could arrive in a message. It is not a recovery
+  // session, so it is not a recovery, and it does not stay in the address
+  // bar to ask again on the next load.
+  const { mod, rewrites } = await loadRecovery("#type=recovery");
+  assert.equal(mod.Recovery.pending(), false);
+  assert.deepEqual(rewrites, ["/"], "the hash was taken out of the URL");
+
+  const { mod: refresh } = await loadRecovery("#refresh_token=abc&type=recovery");
+  assert.equal(refresh.Recovery.pending(), false, "the access token is what makes the session");
+});
+
+test("a real recovery landing is left in the address bar for supabase-js", async () => {
+  const { rewrites } = await loadRecovery("#access_token=abc&type=recovery");
+  assert.deepEqual(rewrites, [], "nothing else may eat the hash before the client reads it");
 });
 
 test("the event arriving after import wakes every subscriber", async () => {
@@ -89,7 +115,7 @@ test("a landing already caught by the hash does not fire again", async () => {
   // screen reads pending() when it mounts, so the notification is only for a
   // recovery nobody has seen yet — firing it twice would re-open the
   // set-password screen over whatever the person had moved on to.
-  const { mod, fire } = await loadRecovery("#type=recovery");
+  const { mod, fire } = await loadRecovery("#access_token=abc&type=recovery");
   let calls = 0;
   mod.Recovery.subscribe(() => { calls++; });
   fire("PASSWORD_RECOVERY");
@@ -137,7 +163,7 @@ test("any other complaint is passed on in Auth's own words, once", async () => {
 });
 
 test("clear() puts it back, and a later reset is caught again", async () => {
-  const { mod, fire } = await loadRecovery("#type=recovery");
+  const { mod, fire } = await loadRecovery("#access_token=abc&type=recovery");
   assert.equal(mod.Recovery.pending(), true);
   mod.Recovery.clear();
   assert.equal(mod.Recovery.pending(), false, "the set-password screen is done with it");
