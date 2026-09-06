@@ -15,7 +15,7 @@ import { ticketFingerprint, replacedNewerWork } from "./ticketFingerprint.js";
 import { OfflineCache } from "./offlineCache.js";
 import { SwUpdates } from "./swUpdates.js";
 import { restoreSession, IDENTITY_KEY } from "./session.js";
-import { parseRoute, formatRoute, landingRoute } from "./route.js";
+import { parseRoute, formatRoute, landingRoute, historyStep } from "./route.js";
 
 // How long a device may keep opening the app as its last signed-in person
 // with no signal to check — the "12 h" the sign-in screen promises.
@@ -347,7 +347,17 @@ export function App() {
       }
       if (payload.recipient) {
         try { await Db.sendReportEmail({ reportId, to: payload.recipient, cc: "", message: "" }); }
-        catch (e) { console.warn("Queued report synced, but its email didn't send:", e.message); }
+        catch (e) {
+          // The report is filed; only the email is missing. A console line
+          // was the whole record of that, and a report the contractor never
+          // received sat as Pending until somebody wondered. Said once, and
+          // forced: toasts are muted while the outbox drains and the item is
+          // deleted when it finishes, so this is the only chance to hear it.
+          // A network failure is not "refused" — the send is not retried on
+          // its own, so it is still said, with the next step either way.
+          console.warn("Queued report synced, but its email didn't send:", e.message);
+          Toasts.show(`The report for ${payload.jobNumber || "this job"} is filed, but the email to ${payload.recipient} didn't go out — send it from the job's Radiographic reports.`, "error", true);
+        }
       }
     },
     ticket: async (payload, checkpoint) => {
@@ -855,7 +865,12 @@ export function App() {
     // The first address of a session replaces the entry the app loaded on,
     // so Back from the opening screen still leaves the app rather than
     // stepping through a duplicate of it first.
-    if (routeWritten.current) window.history.pushState({}, "", next);
+    // A job and its own screens are one entry (historyStep): pushing an
+    // entry per ticket made the first Back out of one look dead.
+    const step = routeWritten.current
+      ? historyStep(parseRoute(window.location.hash), { screen, job: activeJob ? activeJob.id : null })
+      : "replace";
+    if (step === "push") window.history.pushState({}, "", next);
     else window.history.replaceState({}, "", next);
     routeWritten.current = true;
   }, [currentUser, screen, activeJob]);

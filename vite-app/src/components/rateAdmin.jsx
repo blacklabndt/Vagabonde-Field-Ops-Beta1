@@ -865,12 +865,17 @@ export function RateAdminScreen() {
 
       {showNewClient && (
         <NewClientDialog
+          // The list is already loaded for the search box above, and it is
+          // what "Copy rates from" chooses out of.
+          clients={clients}
           onClose={() => setShowNewClient(false)}
           onCreated={async created => {
             setShowNewClient(false);
             await loadClients();
             // A new client starts on the house card, so the header's count
-            // has just gone up by one.
+            // has just gone up by one — unless their rates were copied from
+            // another client, which takes them off it again; either way the
+            // count is read back rather than worked out here.
             loadFollow();
             setSelected(created.id);
           }}
@@ -1069,20 +1074,58 @@ function NewOverrideDialog({ onClose, onCreated }) {
   );
 }
 
-function NewClientDialog({ onClose, onCreated }) {
+function NewClientDialog({ clients, onClose, onCreated }) {
   // The GST rate starts at the ordinary 5%: an exempt client is the rare
   // one, and a client added with 0 by accident is undercharged tax on every
   // ticket until somebody notices.
   const [form, setForm] = useState({ name: "", minimumCallout: "", gstRate: GST_RATE_DEFAULT });
+  // Whose card to start this one from. "" is the house card, which is what a
+  // new client has always started on and stays the default.
+  const [copyFrom, setCopyFrom] = useState("");
   const [error, setError] = useState("");
   const [saving, setSaving] = useState(false);
+  // The client, once the insert has landed. A copy that fails afterwards must
+  // not send the admin back to a button that would try to add them a second
+  // time — the name is on file by then and the app would refuse it as a
+  // duplicate. Held here, pressing again retries the copy alone.
+  const [made, setMade] = useState(null);
   const set = (k, v) => setForm(p => ({ ...p, [k]: v }));
+
+  // A copy, not a follow, and the difference is the point: following means
+  // this client's prices move whenever the card they follow moves, which is
+  // right for the house card and wrong for another client — nobody means "and
+  // reprice them again next time Peace River negotiates". So the lines are
+  // taken once, as figures of their own, and the switch goes off. From then on
+  // the two cards are strangers.
+  //
+  // A source that is itself following the house card has no live figures of
+  // its own — the house card is what prices its tickets — so the house card is
+  // what gets copied, which is exactly what the source's own screen shows.
+  const copyCardInto = async newClientId => {
+    const [source, mine] = await Promise.all([
+      Db.getEditableSchedule(copyFrom),
+      Db.getEditableSchedule(newClientId)
+    ]);
+    // Order as in the follows-the-house-card switch, for the same reason: the
+    // copy first, the flag after. If the copy fails the client is still
+    // following the house card and priced, rather than left on a card with
+    // nothing on it and every ticket refused.
+    Toasts.mute();
+    try { await Db.copyDefaultInto(mine.schedule.id, source.schedule.follows_default ? null : source.schedule.id); }
+    finally { Toasts.unmute(); }
+    await Db.setFollowsDefault(mine.schedule.id, false);
+  };
 
   const submit = async () => {
     setSaving(true);
     setError("");
     try {
-      const client = await Db.createClient(form);
+      let client = made;
+      if (!client) {
+        client = await Db.createClient(form);
+        setMade(client);
+      }
+      if (copyFrom) await copyCardInto(client.id);
       await onCreated(client);
     } catch (e) {
       setSaving(false);
@@ -1090,29 +1133,53 @@ function NewClientDialog({ onClose, onCreated }) {
     }
   };
 
+  // Giving up after the client was added is not a cancel: they are on file,
+  // on the house card, and the screen behind this should open their card
+  // rather than pretend nothing happened.
+  const leave = () => { if (made) onCreated(made); else onClose(); };
+
   return (
-    <Dialog title="New client" maxWidth={460} onClose={onClose}
-      actions={<><Btn variant="secondary" onClick={onClose}>Cancel</Btn><Btn variant="primary" onClick={submit} disabled={saving}>{saving ? "Adding…" : "Add client"}</Btn></>}>
+    <Dialog title="New client" maxWidth={460} onClose={leave}
+      actions={<><Btn variant="secondary" onClick={leave}>{made ? "Leave them on the house card" : "Cancel"}</Btn><Btn variant="primary" onClick={submit} disabled={saving}>{saving ? (made ? "Copying…" : "Adding…") : made ? "Copy the rates again" : "Add client"}</Btn></>}>
       <ErrorBox>{error}</ErrorBox>
+      {/* The client is on file and only the rates are outstanding, so the
+          boxes that made them are done with. */}
+      {made && (
+        <div style={{ fontSize: 13, marginBottom: 8 }}>
+          <strong>{made.name} is on file</strong> and priced from the house card. Only the copy of the other
+          client&rsquo;s rates is left to do.
+        </div>
+      )}
       <Field label="Client name">
-        <input className="input" autoFocus value={form.name} onChange={e => set("name", e.target.value)}
+        <input className="input" autoFocus value={form.name} onChange={e => set("name", e.target.value)} disabled={!!made}
           onKeyDown={e => { if (e.key === "Enter") submit(); }} placeholder="Peace River Midstream" />
       </Field>
       <Field label="Minimum call-out">
-        <input className="input" value={form.minimumCallout} onChange={e => set("minimumCallout", e.target.value)} placeholder="4 h + mobilization" />
+        <input className="input" value={form.minimumCallout} onChange={e => set("minimumCallout", e.target.value)} disabled={!!made} placeholder="4 h + mobilization" />
       </Field>
       {/* Almost every client pays 5%; an exempt one — a band, a Crown agency
           — is entered as 0 here rather than having the GST line deleted off
           each of their tickets afterwards. */}
       <Field label="GST %">
-        <NumField value={form.gstRate} step="0.01" style={{ width: 78 }}
+        <NumField value={form.gstRate} step="0.01" style={{ width: 78 }} disabled={!!made}
           onChange={v => set("gstRate", typedGstRate(v))} />
       </Field>
       <div style={{ fontSize: 12, color: "color-mix(in srgb, var(--color-text) 60%, transparent)", marginTop: -6, marginBottom: 8 }}>
         0 = exempt. Almost every client pays 5%.
       </div>
+      {/* Most new clients are priced like a client already on file rather than
+          off the house card, and the way to do that was to add them, turn the
+          switch off, then retype sixty figures. */}
+      <Field label="Copy rates from">
+        <select className="input" value={copyFrom} onChange={e => setCopyFrom(e.target.value)} disabled={saving}>
+          <option value="">The house card (Default rates)</option>
+          {(clients || []).map(c => <option key={c.id} value={c.id}>{c.name}</option>)}
+        </select>
+      </Field>
       <div style={{ fontSize: 12, color: "color-mix(in srgb, var(--color-text) 60%, transparent)" }}>
-        The client starts on the house card — their tickets price at Default rates until the switch on their rate card is turned off to give them their own.
+        {copyFrom
+          ? "Their card is copied across as figures of this client's own and the two are then unconnected — a later change to that client's rates does not move these. Every rate can be edited afterwards."
+          : "The client starts on the house card — their tickets price at Default rates until the switch on their rate card is turned off to give them their own."}
       </div>
     </Dialog>
   );

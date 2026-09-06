@@ -244,6 +244,21 @@ test("Create ticket on Job detail opens the editor without filing a draft", { ta
   await expect(page.getByRole("button", { name: "Save draft" })).toBeEnabled({ timeout: 15_000 });
   await expect(page.getByRole("button", { name: "Cancel this ticket" })).toHaveCount(0);
 
+  // The crew picker is a type-ahead, not a dropdown: focusing it lists the
+  // people not yet on the crew, picking one adds them straight away, and
+  // the same person is then no longer offered. Nothing is saved by this.
+  const picker = page.getByRole("combobox", { name: "Add someone to the crew" });
+  await picker.click();
+  const option = page.locator("#ticket-crew-list [role=option]").first();
+  await expect(option).toBeVisible();
+  const name = (await option.locator("div").first().innerText()).trim();
+  await picker.fill(name.slice(0, 3));
+  await page.locator("#ticket-crew-list [role=option]", { hasText: name }).first().click();
+  await expect(page.getByText(name, { exact: true }).first()).toBeVisible();
+  await picker.click();
+  await expect(page.locator("#ticket-crew-list [role=option]", { hasText: name })).toHaveCount(0);
+  await page.keyboard.press("Escape");
+
   // Walk away without saving: nothing was filed, the job's list is as it was.
   await page.getByRole("button", { name: "Sections" }).click();
   await page.getByRole("dialog", { name: "Sections" }).getByRole("button", { name: "Home" }).first().click();

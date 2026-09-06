@@ -1,7 +1,7 @@
 import React, { useState, useEffect, useMemo, useRef } from "react";
 import { money, todayLocal, localDate, dayMonth, initialsOf, crewRoleFor, hours, lineTotal, gstOn, gstLabel, gstRateOf, seesPrices, saneQuantityCeiling, SANE_CREW_HOURS } from "../data.js";
 import { Db } from "../db.js";
-import { Blueprint, Btn, TagX, Field, ErrorBox, emailIn, NoJobSelected, QueuedPanel, NumField , Loading, useScreenFoot } from "./common.jsx";
+import { Blueprint, Btn, TagX, Field, ErrorBox, emailIn, NoJobSelected, QueuedPanel, NumField, Loading, useScreenFoot, SearchSelect } from "./common.jsx";
 import { OfflineQueue } from "../offlineQueue.js";
 import { OfflineCache } from "../offlineCache.js";
 import { savingLabel, deviceOffline } from "../savingWords.js";
@@ -226,7 +226,6 @@ export function TicketMobileScreen({ job, jobRecord, currentUser, onSaved, ticke
   // person's timesheet. Seeded with whoever is raising the ticket.
   const [people, setPeople] = useState([]);
   const [crew, setCrew] = useState([]);
-  const [crewPick, setCrewPick] = useState("");
   // The filer as a crew row — what every ticket starts with. Read through a
   // ref by the draft loader, which may run before or after the directory
   // arrives; whichever comes second fills in the profile's own name and
@@ -296,8 +295,6 @@ export function TicketMobileScreen({ job, jobRecord, currentUser, onSaved, ticke
     Db.listActiveProfiles()
       .then(list => {
         setPeople(list);
-        const first = list.find(p => p.id !== currentUser.id);
-        if (first) setCrewPick(first.id);
         // A reopened draft brings its own crew rows (or is seeded by the
         // draft loader when it has none); seeding "just me" here would
         // overwrite them. The guard also covers a recovered WIP entry. What
@@ -639,16 +636,30 @@ export function TicketMobileScreen({ job, jobRecord, currentUser, onSaved, ticke
     ? h2(assignedStraight + assignedOt) !== h2(billedStraight + billedOt + billedBlended)
     : (h2(assignedStraight) !== h2(billedStraight) || h2(assignedOt) !== h2(billedOt));
   const availablePeople = people.filter(p => !crew.some(c => c.profileId === p.id));
-  const availableHelpers = availablePeople.filter(p => crewRoleFor(p) === "Helper");
-  const availableTechs = availablePeople.filter(p => crewRoleFor(p) !== "Helper");
-  // The pick must be someone still addable: a recovered or copied crew can
-  // leave the stored pick pointing at a person already on the ticket, and
-  // Add would then put them on twice. Falls back to the filer when they've
-  // taken themselves off, else the first person the dropdown shows — so
-  // what Add adds is always what the dropdown reads.
-  const effCrewPick = availablePeople.some(p => p.id === crewPick) ? crewPick
-    : availablePeople.some(p => p.id === currentUser.id) ? currentUser.id
-    : (availablePeople[0] || {}).id || "";
+  // The crew picker searches rather than lists: forty-odd names in a
+  // dropdown was a long scroll in a truck. Name, initials or id code all
+  // match, technicians before helpers as the dropdown grouped them, and a
+  // pick adds the person straight away in the role their group decides (a
+  // helper is a helper wherever they are picked from), so it cannot be set
+  // wrong. Only people not already on the crew are offered, so the same
+  // person cannot go on twice however many times they are picked.
+  const searchCrew = (text, max) => {
+    const q = text.trim().toLowerCase();
+    const initials = p => String(p.displayName || "").split(/s+/).map(w => w[0] || "").join("").toLowerCase();
+    const hit = p => !q
+      || String(p.displayName || "").toLowerCase().includes(q)
+      || initials(p).startsWith(q)
+      || String(p.id_code || "").toLowerCase().includes(q);
+    const rows = [...availablePeople.filter(p => crewRoleFor(p) !== "Helper" && hit(p)),
+                  ...availablePeople.filter(p => crewRoleFor(p) === "Helper" && hit(p))];
+    return { rows: rows.slice(0, max), total: rows.length };
+  };
+  const addCrewMember = p => {
+    if (!p || crew.some(c => c.profileId === p.id)) return;
+    clearSaveError();
+    setCrew(c => c.some(x => x.profileId === p.id) ? c
+      : [...c, { profileId: p.id, name: p.displayName, isSub: p.is_subcontractor, role: crewRoleFor(p), straight: 0, ot: 0, solo: 0, soloOt: 0, dose: 0, mileage: 0 }]);
+  };
 
   // A refusal is about the figures that were on screen when Save was pressed.
   // It used to be cleared only at the top of the next save, so a $4.49 ticket
@@ -1225,31 +1236,17 @@ export function TicketMobileScreen({ job, jobRecord, currentUser, onSaved, ticke
           )}
 
           {availablePeople.length > 0 && (
-            <div style={{ display: "flex", gap: 6 }}>
-              {/* Grouped rather than two dropdowns: helpers are picked the same
-                  way as anyone else on the crew, and the group they come from
-                  decides the crew role, so it cannot be set wrong. */}
-              <select className="input" value={effCrewPick} onChange={e => setCrewPick(e.target.value)} style={{ flex: 1 }} aria-label="Add someone to the crew">
-                {availableTechs.length > 0 && (
-                  <optgroup label="Technicians">
-                    {availableTechs.map(p => <option key={p.id} value={p.id}>{p.displayName}</option>)}
-                  </optgroup>
-                )}
-                {availableHelpers.length > 0 && (
-                  <optgroup label="Helpers">
-                    {availableHelpers.map(p => <option key={p.id} value={p.id}>{p.displayName}</option>)}
-                  </optgroup>
-                )}
-              </select>
-              <Btn variant="secondary" onClick={() => {
-                const p = availablePeople.find(x => x.id === effCrewPick);
-                if (!p) return;
-                clearSaveError();
-                setCrew(c => [...c, { profileId: p.id, name: p.displayName, isSub: p.is_subcontractor, role: crewRoleFor(p), straight: 0, ot: 0, solo: 0, soloOt: 0, dose: 0, mileage: 0 }]);
-                const rest = availablePeople.filter(x => x.id !== effCrewPick);
-                if (rest[0]) setCrewPick(rest[0].id);
-              }}>Add</Btn>
-            </div>
+            <SearchSelect style={{ flex: "none", maxWidth: "none" }} listId="ticket-crew-list"
+              ariaLabel="Add someone to the crew" placeholder="Add to the crew — type a name…"
+              search={searchCrew} optionKey={p => p.id} onPick={addCrewMember}
+              renderOption={p => (
+                <>
+                  <div style={{ fontSize: 15 }}>{p.displayName}</div>
+                  <div style={{ fontSize: 11, color: "color-mix(in srgb, var(--color-text) 60%, transparent)" }}>
+                    {crewRoleFor(p) === "Helper" ? "Helper" : "Technician"}{p.id_code ? ` · ${p.id_code}` : ""}{p.is_subcontractor ? " · subcontractor" : ""}
+                  </div>
+                </>
+              )} />
           )}
 
           {/* Job delays — standby, waiting on the line, a road ban. It prints

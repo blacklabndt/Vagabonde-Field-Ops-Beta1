@@ -14,7 +14,7 @@
 
 import test from "node:test";
 import assert from "node:assert/strict";
-import { parseRoute, formatRoute, landingRoute } from "./route.js";
+import { parseRoute, formatRoute, landingRoute, historyStep } from "./route.js";
 import { TABS, CONTEXT_TABS } from "./data.js";
 
 test("a plain section is its own address, both ways", () => {
@@ -95,4 +95,15 @@ test("a cold load can open a job, and stops there", () => {
 test("a plain section lands as itself, and nothing lands as nothing", () => {
   assert.deepEqual(landingRoute(parseRoute("#/contacts")), { screen: "contacts", job: null });
   assert.equal(landingRoute(null), null);
+});
+
+test("a job and its own screens share one history entry", () => {
+  const job = { screen: "job", job: "S-1" };
+  assert.equal(historyStep(job, { screen: "ticket", job: "S-1" }), "replace");
+  assert.equal(historyStep({ screen: "ticket", job: "S-1" }, { screen: "jha", job: "S-1" }), "replace");
+  assert.equal(historyStep({ screen: "ticket", job: "S-1" }, job), "replace");
+  assert.equal(historyStep({ screen: "board", job: null }, job), "push");
+  assert.equal(historyStep(job, { screen: "job", job: "S-2" }), "push");
+  assert.equal(historyStep(job, { screen: "chat", job: null }), "push");
+  assert.equal(historyStep(null, job), "push");
 });

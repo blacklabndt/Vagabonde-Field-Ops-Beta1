@@ -85,6 +85,80 @@ export function failedRunAdvice(run) {
   return "The next scheduled backup will still run.";
 }
 
+// What a finished run wrote, out of `backup_runs.counts` — the shape
+// backup-run's countsOf() writes: `{ rows: { <table>: n }, files, bytes }`.
+// Read through these rather than reached into, because a run that died in its
+// first slice has counts of `{}` and an older row may have none at all, and
+// "NaN records" on a panel that is otherwise reporting a healthy backup is the
+// kind of thing that gets a working backup switched off.
+export const runRows = counts => {
+  const rows = (counts && counts.rows) || {};
+  let n = 0;
+  for (const v of Object.values(rows)) n += Number(v) || 0;
+  return n;
+};
+export const runFiles = counts => Number((counts && counts.files) || 0);
+export const runBytes = counts => Number((counts && counts.bytes) || 0);
+
+// Only these two kinds put a copy of the app in the drive. A restore's own
+// bytes are what it read back out, and drawing them on the same line as the
+// backups would make an ordinary restore look like the night everything
+// doubled.
+export const SIZE_TREND_KINDS = ["backup", "before_restore"];
+
+// The line under the list: how big the last several backups were, oldest on
+// the left. It is there for one question — has this suddenly got smaller? —
+// because a backup that quietly starts missing half the app looks exactly
+// like a backup that worked, right down to the green "complete".
+//
+// Scaled from zero rather than from the smallest run, which is the whole
+// point: on a min-to-max scale every set of runs fills the box and a night
+// that halved looks like a night that dipped. From zero, half the bytes is
+// half the height.
+//
+// Nothing is drawn from one run — a single point is not a trend — and a run
+// that wrote nothing is left out rather than plotted as a zero, because that
+// is a failure before the copying started, not a small backup.
+export function sizeTrend(runs, width = 132, height = 26) {
+  const usable = (runs || [])
+    .filter(r => r && r.status === "complete" && SIZE_TREND_KINDS.includes(String(r.kind)))
+    .map(r => ({
+      bytes: runBytes(r.counts),
+      name: String(r.folder_name || ""),
+      at: r.finished_at || r.created_at || null
+    }))
+    .filter(r => r.bytes > 0)
+    // listBackupRuns answers newest first; a line is read left to right.
+    .reverse();
+  if (usable.length < 2) return null;
+
+  const max = usable.reduce((m, r) => Math.max(m, r.bytes), 0);
+  // A point sitting exactly on the top or bottom edge is half a stroke
+  // outside the box, so the plot keeps a pixel at each end.
+  const top = 1;
+  const band = Math.max(1, height - 2);
+  const step = width / (usable.length - 1);
+  const round = n => Math.round(n * 100) / 100;
+  const points = usable.map((r, i) => ({
+    ...r,
+    x: round(i * step),
+    y: round(top + band - (r.bytes / max) * band)
+  }));
+
+  const latest = usable[usable.length - 1].bytes;
+  const previous = usable[usable.length - 2].bytes;
+  return {
+    points,
+    max,
+    latest,
+    previous,
+    line: points.map(p => `${p.x},${p.y}`).join(" "),
+    // Worth a sentence, not just a shape: the last backup is under half the
+    // one before it.
+    halved: latest * 2 < previous
+  };
+}
+
 // The address the app is served from is the address a drive sends the Admin
 // back to. It is stored (Admin screen → App address) rather than guessed,
 // because the drive's registration has to hold the same string — but this

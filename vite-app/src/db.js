@@ -3389,18 +3389,35 @@ export const Db = {
   // must not silently revert to the house figure. Zero is not a negotiated
   // rate, it is an unset one. Nothing is ever removed, either — lines this
   // schedule has that the default lacks are its own business.
-  async copyDefaultInto(scheduleId) {
-    const { data: def } = await sbClient
-      .from("rate_schedules").select("id").is("client_id", null)
-      .order("effective_from", { ascending: false }).limit(1).maybeSingle();
-    if (!def) throw new Error("There is no default schedule yet — set one up first.");
-    if (def.id === scheduleId) throw new Error("This is the default schedule — there is nothing to copy into it.");
+  //
+  // `fromScheduleId` copies some other card in instead of the house card —
+  // the Rate admin's "Copy rates from", where a new client is priced like a
+  // client already on file. The work is identical; only where the lines are
+  // read from changes.
+  async copyDefaultInto(scheduleId, fromScheduleId = null) {
+    let sourceId = fromScheduleId;
+    if (!sourceId) {
+      const { data: def } = await sbClient
+        .from("rate_schedules").select("id").is("client_id", null)
+        .order("effective_from", { ascending: false }).limit(1).maybeSingle();
+      if (!def) throw new Error("There is no default schedule yet — set one up first.");
+      sourceId = def.id;
+    }
+    if (sourceId === scheduleId) {
+      throw new Error(fromScheduleId
+        ? "That is the same rate card — there is nothing to copy."
+        : "This is the default schedule — there is nothing to copy into it.");
+    }
 
     const [{ data: source }, { data: existing }] = await Promise.all([
-      sbClient.from("rate_lines").select("*").eq("schedule_id", def.id),
+      sbClient.from("rate_lines").select("*").eq("schedule_id", sourceId),
       sbClient.from("rate_lines").select("id, kind, label, rate, position").eq("schedule_id", scheduleId)
     ]);
-    if (!source || !source.length) throw new Error("The default schedule has nothing on it yet — set it up first.");
+    if (!source || !source.length) {
+      throw new Error(fromScheduleId
+        ? "That client's rate card has nothing on it yet, so there is nothing to copy."
+        : "The default schedule has nothing on it yet — set it up first.");
+    }
 
     const key = l => l.kind + "\u0000" + l.label;
     const mine = new Map((existing || []).map(l => [key(l), l]));

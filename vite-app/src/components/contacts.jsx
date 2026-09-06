@@ -30,6 +30,7 @@ export function ContactsScreen({ currentUser }) {
   // cards; the page resets whenever the organisation changes.
   const [pageSize, setPageSize] = useRowsPerPage();
   const [page, setPage] = useState(0);
+  const [filter, setFilter] = useState("");
   const [adding, setAdding] = useState(false);
   const [showNewOrg, setShowNewOrg] = useState(false);
   const [error, setError] = useState("");
@@ -81,11 +82,18 @@ export function ContactsScreen({ currentUser }) {
     }
     if (seq === loadSeq.current) setContactsLoading(false);
   };
-  useEffect(() => { loadContacts(); setPage(0); }, [org ? org.key : null]);
+  useEffect(() => { loadContacts(); setPage(0); setFilter(""); }, [org ? org.key : null]);
 
   // Primary first, then alphabetical — the list answers "who do I call?"
   // before it answers "who else is there?"
-  const sorted = [...mine].sort((a, b) =>
+  // The filter is one box over everything a person is looked up by: a
+  // plant's rep list runs to fifty names and the office remembers a phone
+  // number or a title as often as a surname. It narrows the list, and the
+  // pager counts what is left, so page 3 of the filtered list is a real
+  // page and not a page of the whole.
+  const q = filter.trim().toLowerCase();
+  const matches = c => !q || [c.name, c.title, c.email, c.phone].some(v => String(v || "").toLowerCase().includes(q));
+  const sorted = mine.filter(matches).sort((a, b) =>
     (b.is_primary ? 1 : 0) - (a.is_primary ? 1 : 0) || (a.name || "").localeCompare(b.name || ""));
   // The page is clamped rather than reset: a contact removed off the last
   // page leaves the person on the page that still exists.
@@ -187,10 +195,16 @@ export function ContactsScreen({ currentUser }) {
               <div style={{ display: "flex", alignItems: "center", gap: 10, marginBottom: 4, flexWrap: "wrap" }}>
                 <h4 style={{ margin: 0, fontSize: 19 }}>{org.name}</h4>
                 <TagX variant={org.type === "client" ? "accent" : "outline"}>{org.type === "client" ? "Client" : "Contractor"}</TagX>
-                {sorted.length > 10 && (
+                {(sorted.length > 10 || q) && (
                   <RowsPerPage value={pageSize} onChange={n => { setPageSize(n); setPage(0); }} style={{ marginLeft: "auto" }} />
                 )}
               </div>
+              {(mine.length > 5 || q) && (
+                <input className="input" type="search" value={filter} aria-label="Find a contact"
+                  placeholder="Find by name, title, email or phone…"
+                  onChange={e => { setFilter(e.target.value); setPage(0); }}
+                  style={{ margin: "6px 0 10px", maxWidth: 420 }} />
+              )}
               <div style={{ fontSize: 12, color: "color-mix(in srgb, var(--color-text) 60%, transparent)", marginBottom: 16 }}>
                 {org.type === "client"
                   ? "Who the work is billed to — their rates live on the Rate admin screen"
@@ -220,7 +234,7 @@ export function ContactsScreen({ currentUser }) {
                 <div style={{ display: "flex", alignItems: "center", gap: 10, padding: "14px 0 0" }}>
                   <Btn variant="secondary" onClick={() => setPage(Math.max(0, safePage - 1))} disabled={safePage === 0}>← Previous</Btn>
                   <span style={{ fontSize: 13, color: "color-mix(in srgb, var(--color-text) 60%, transparent)" }}>
-                    Page {safePage + 1} of {pageCount} · {sorted.length} people
+                    Page {safePage + 1} of {pageCount} · {sorted.length} {q ? "matching" : "people"}
                   </span>
                   <Btn variant="secondary" onClick={() => setPage(Math.min(pageCount - 1, safePage + 1))} disabled={safePage >= pageCount - 1}>Next →</Btn>
                 </div>
@@ -228,7 +242,9 @@ export function ContactsScreen({ currentUser }) {
 
               {!contactsLoading && !sorted.length && !adding && (
                 <div style={{ fontSize: 13, color: "color-mix(in srgb, var(--color-text) 60%, transparent)" }}>
-                  No one on file for {org.name} yet. Add the site rep and they'll pre-fill the next job here.
+                  {q
+                    ? <>Nobody at {org.name} matches "{filter.trim()}". <Btn variant="secondary" onClick={() => setFilter("")} style={{ marginLeft: 8 }}>Show everyone</Btn></>
+                    : <>No one on file for {org.name} yet. Add the site rep and they'll pre-fill the next job here.</>}
                 </div>
               )}
             </Blueprint>

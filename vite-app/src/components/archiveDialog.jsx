@@ -20,6 +20,27 @@ import { buildArchive, archiveZipName, verifyZip, archiveDrift, mapLimit } from 
 const isoDay = d => `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}-${String(d.getDate()).padStart(2, "0")}`;
 const mb = bytes => `${(bytes / 1048576).toFixed(bytes < 10 * 1048576 ? 1 : 0)} MB`;
 const plural = (n, one, many = one + "s") => `${n} ${n === 1 ? one : many}`;
+// This device's own clock, deliberately: what it dates is when the zip landed
+// on this computer, and it is only ever read on the computer it landed on.
+const at = ms => new Date(ms).toLocaleString("en-CA", { day: "2-digit", month: "short", hour: "numeric", minute: "2-digit" });
+
+// The build that has already happened, kept on the device.
+//
+// Building a busy year is an hour of reading, and until now all of it — the
+// manifest, the figures, which jobs were in it — lived in this component's
+// state and nowhere else, so closing the dialog (or a reload, or the tab
+// dying) threw the hour away and left a zip on disk that could never be
+// checked. Held here, the owner can download in the afternoon, check the file
+// in the morning, and still clear.
+//
+// It changes none of the three gates. The zip still has to be picked and
+// matched against this manifest, the jobs are still re-read live immediately
+// before the delete — which is what catches the work filed since, and a day-old
+// build has had a day to gain some — and CLEAR still has to be typed. A day is
+// the ceiling because past that the re-check would refuse most of the time
+// anyway, and an offer nobody can act on is worse than none.
+const BUILT_KEY = "archive.built";
+const BUILT_GOOD_FOR_MS = 24 * 60 * 60 * 1000;
 // How many jobs are re-read at once by the check that runs after CLEAR is
 // typed. The same figure the build renders invoices at, for the same reason:
 // enough to stop a busy year being a long silence, few enough not to drown a
@@ -69,6 +90,49 @@ export function ArchiveDialog({ mode, currentUser, onClose, onCleared }) {
   const complete = !!summary && summary.missing.length === 0;
   const canClear = complete && !!verified && verified.ok;
 
+  // A build this device is still holding, and — once it has been picked up —
+  // the jobs that build covered. The held ids are what the clear acts on from
+  // then on, never the range picker's count: the picker may well be sitting on
+  // a different year, and deleting the jobs somebody happens to have counted
+  // rather than the ones in the zip would be the worst bug this screen could
+  // have. Both `id` (the job number, which is how a refusal names a job) and
+  // `dbId` (what is deleted) are kept, because the re-check needs to say which
+  // job stopped it.
+  const [held, setHeld] = useState(null);
+  const [resumed, setResumed] = useState(null);
+  const activeJobs = resumed || jobs;
+
+  useEffect(() => {
+    let alive = true;
+    OfflineCache.read(BUILT_KEY)
+      .then(hit => {
+        const v = hit && hit.value;
+        if (!alive || !v || !v.manifest || !v.summary) return;
+        if (Date.now() - Number(v.builtAt || 0) >= BUILT_GOOD_FOR_MS) { OfflineCache.remove(BUILT_KEY); return; }
+        setHeld(v);
+      })
+      // Nothing is lost if this read fails: the offer is a shortcut, and the
+      // way without it — build again — is the way it has always worked.
+      .catch(() => {});
+    return () => { alive = false; };
+  }, []);
+
+  const forgetBuilt = () => { setHeld(null); OfflineCache.remove(BUILT_KEY); };
+
+  // Picking the held build up again: everything the check and the clear need,
+  // straight into the stage that asks for the zip.
+  const resume = () => {
+    if (!held) return;
+    setResumed(held.jobIds || []);
+    setSummary(held.summary);
+    setManifest(held.manifest);
+    setZipName(held.zipName || "");
+    setVerified(null);
+    setConfirmWord("");
+    setError("");
+    setStage("built");
+  };
+
   const build = async () => {
     if (!jobs || !jobs.length) return;
     setStage("building");
@@ -83,6 +147,9 @@ export function ArchiveDialog({ mode, currentUser, onClose, onCleared }) {
     setSummary(null);
     setManifest(null);
     setZipName("");
+    // Including the copy on disk: it names a zip that is about to be replaced.
+    forgetBuilt();
+    setResumed(null);
     setProgress({ index: 0, count: jobs.length, job: jobs[0].id, step: "starting", bytes: 0 });
     try {
       const { blob, summary: s, manifest: m } = await buildArchive({
@@ -95,10 +162,42 @@ export function ArchiveDialog({ mode, currentUser, onClose, onCleared }) {
       setSummary(s);
       setManifest(m);
       setStage("built");
+      // Written after the download, so what is held is only ever a build whose
+      // zip actually reached the disk. It is read straight back before this
+      // screen believes it: everything the dialog says about closing and coming
+      // back rests on the copy being there, and a storage that quietly refused
+      // the write would make that a promise nobody could keep. A device that
+      // cannot remember it still has the build on screen, which is where it was
+      // before this existed.
+      const keep = {
+        zipName: name, manifest: m, summary: s, builtAt: Date.now(),
+        jobIds: jobs.map(j => ({ id: j.id, dbId: j.dbId }))
+      };
+      OfflineCache.put(BUILT_KEY, keep)
+        .then(() => OfflineCache.read(BUILT_KEY))
+        .then(hit => { if (hit) setHeld(keep); })
+        .catch(() => {});
     } catch (e) {
       setError(e.message || "The archive couldn't be built.");
       setStage("pick");
     }
+  };
+
+  // "Build it again" from the built stage. A build picked up from the device
+  // holds only what the check and the clear need — the ids, not the jobs
+  // themselves — so there is nothing here to build from and the button goes
+  // back one step to the picker, which counts the range afresh.
+  const buildAgain = () => {
+    forgetBuilt();
+    if (!resumed) { build(); return; }
+    setResumed(null);
+    setSummary(null);
+    setManifest(null);
+    setZipName("");
+    setVerified(null);
+    setConfirmWord("");
+    setError("");
+    setStage("pick");
   };
 
   // The proof: the file the owner picks is read back and every entry the
@@ -137,7 +236,7 @@ export function ArchiveDialog({ mode, currentUser, onClose, onCleared }) {
     const counts = (summary && summary.jobCounts) || {};
     setCheckedJobs(0);
     let done = 0;
-    const problems = await mapLimit(jobs, RECHECK_CONCURRENCY, async j => {
+    const problems = await mapLimit(activeJobs, RECHECK_CONCURRENCY, async j => {
       try {
         const [tickets, jhas, reports] = await Promise.all([
           Db.listTicketsForJob(j.dbId), Db.listJhasForJob(j.dbId), Db.listReportsForJob(j.dbId)
@@ -154,15 +253,17 @@ export function ArchiveDialog({ mode, currentUser, onClose, onCleared }) {
   });
 
   const clear = async () => {
-    if (!jobs || !canClear || confirmWord.trim().toUpperCase() !== "CLEAR") return;
+    if (!activeJobs || !activeJobs.length || !canClear || confirmWord.trim().toUpperCase() !== "CLEAR") return;
     setStage("clearing");
     setError("");
     try {
       const drift = await recheckJobs();
       if (drift) { setError(drift); setStage("built"); return; }
-      const result = await Db.archiveClearJobs(jobs.map(j => j.dbId));
+      const result = await Db.archiveClearJobs(activeJobs.map(j => j.dbId));
       setCleared(result);
       setStage("cleared");
+      // The jobs it named are gone, so the offer to check that zip is over.
+      forgetBuilt();
       if (onCleared) onCleared(result);
     } catch (e) {
       setError(e.message || "The jobs couldn't be cleared.");
@@ -172,21 +273,23 @@ export function ArchiveDialog({ mode, currentUser, onClose, onCleared }) {
 
   // The two accidental ways out of the dialog — the grey backdrop and
   // Escape — ask first once there is something to lose. At "built" the
-  // manifest, the summary and the zip's name are held here and nowhere
-  // else, so closing takes with them the only thing the downloaded zip can
-  // be checked against: the file stays on disk, the check can never be
+  // manifest, the summary and the zip's name are what the downloaded zip is
+  // checked against; without a copy on the device they are here and nowhere
+  // else, so closing means the file stays on disk, the check can never be
   // satisfied, and the way back is another build, which on a busy year is
-  // another hour of reading. The buttons are somebody deciding and are left
-  // alone — "Keep the jobs" says what it does.
+  // another hour of reading. With the copy on the device — confirmed written,
+  // see build() — closing costs nothing: the dialog offers it back for a day.
+  // The buttons are somebody deciding and are left alone — "Keep the jobs"
+  // says what it does.
   const requestClose = () => {
-    if (stage === "built" &&
+    if (stage === "built" && !held &&
       !confirm("The archive is built but not yet checked. Close anyway? You would have to build it again.")) return;
     onClose();
   };
 
   const title = mode === "year" ? "Archive a year" : "Archive a date range";
   const rangeLabel = mode === "year" ? String(year) : `${rangeFrom} to ${rangeTo}`;
-  const count = jobs ? jobs.length : 0;
+  const count = activeJobs ? activeJobs.length : 0;
 
   const actions = stage === "pick" ? (
     <>
@@ -204,7 +307,7 @@ export function ArchiveDialog({ mode, currentUser, onClose, onCleared }) {
           didn't check out — end with the words "build it again", and until now
           there was nothing here to do it with: the owner had to close the
           dialog and start over from the year picker. */}
-      <Btn variant="secondary" onClick={build} disabled={checking}>Build it again</Btn>
+      <Btn variant="secondary" onClick={buildAgain} disabled={checking}>Build it again</Btn>
       <Btn variant="danger" onClick={clear} disabled={!canClear || confirmWord.trim().toUpperCase() !== "CLEAR"}
         title={!complete ? "The archive is not complete — see above" : !verified ? "Check the downloaded zip first" : !verified.ok ? "The downloaded zip did not check out" : undefined}>
         Clear {plural(count, "job")} from the app
@@ -228,6 +331,22 @@ export function ArchiveDialog({ mode, currentUser, onClose, onCleared }) {
           {checkedJobs < count
             ? `Checking the app against the archive — job ${Math.min(checkedJobs + 1, count)} of ${count}…`
             : `Checked all ${plural(count, "job")}. Removing them…`}
+        </div>
+      )}
+
+      {/* An archive built earlier and never checked. It is offered first,
+          above the year picker, because building the same year a second time
+          is the expensive mistake this is here to stop. */}
+      {stage === "pick" && held && (
+        <div style={{ fontSize: 13, border: "1px solid var(--color-accent)", padding: "8px 10px" }}>
+          <strong>You built {held.zipName} at {at(held.builtAt)}</strong> — {plural((held.jobIds || []).length, "job")},
+          {" "}and the download was never checked. The zip is still on this computer.
+          <div style={{ marginTop: 8 }}>
+            <Btn variant="secondary" onClick={resume}>Check that zip</Btn>
+          </div>
+          <div style={{ marginTop: 6, fontSize: 12, color: "color-mix(in srgb, var(--color-text) 60%, transparent)" }}>
+            Or pick a range below and build again, which forgets this one.
+          </div>
         </div>
       )}
 
@@ -282,6 +401,16 @@ export function ArchiveDialog({ mode, currentUser, onClose, onCleared }) {
           {" "}{plural(summary.tickets, "ticket")} ({money(summary.beforeGstCents / 100)} before GST), {plural(summary.jhas, "assessment PDF")},
           {" "}{plural(summary.reports, "report PDF")}, {plural(summary.invoices, "invoice")} · {mb(summary.bytes)}.
         </div>
+        {/* Resumed, so the figures above are from earlier and the app has had
+            time to move on. Nothing is taken on trust for that: the jobs are
+            read again live the moment CLEAR is pressed, and one that has
+            gained a ticket since stops it. */}
+        {resumed && held && (
+          <div style={{ fontSize: 12, color: "color-mix(in srgb, var(--color-text) 65%, transparent)" }}>
+            Built at {at(held.builtAt)}. Anything filed against these jobs since then is not in the zip — the jobs are
+            checked against the app again before anything is removed, and one that has changed stops the clear.
+          </div>
+        )}
         {summary.notOnFile.length > 0 && (
           <div style={{ fontSize: 12, color: "color-mix(in srgb, var(--color-text) 65%, transparent)" }}>
             {plural(summary.notOnFile.length, "assessment or report has", "assessments or reports have")} no PDF on file — nothing to retrieve; their details are in the job text files and the README names them.

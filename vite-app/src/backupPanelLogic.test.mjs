@@ -13,7 +13,7 @@ import {
   BACKUP_PROVIDERS, PROVIDER_LABEL,
   redirectUriFor, backupSettingsPatch, readBackupOutcome, cleanClientId,
   BEFORE_RESTORE_PREFIX, isBeforeRestore, restoreNameMatches, failedRunAdvice,
-  keepToSave, keepPhrase
+  keepToSave, keepPhrase, runRows, runFiles, runBytes, sizeTrend
 } from "./backupPanelLogic.js";
 
 // ── The redirect URI ─────────────────────────────────────────────────────
@@ -303,4 +303,67 @@ view or download the client`), id);
   assert.equal(cleanClientId("microsoft", " 3f2b0a1c-1111-2222-3333-444444444444 "), "3f2b0a1c-1111-2222-3333-444444444444");
   const patch = backupSettingsPatch({ ...FORM, clientIdGoogle: `${id} view or download the client` }, 0);
   assert.equal(patch.backup_client_id_google, id);
+});
+
+// ── What a run wrote, and the line under the list ────────────────────────
+
+test("a run's figures come out of counts, and a run with none reads as zero", () => {
+  const counts = { rows: { jobs: 12, tickets: 300, ticket_lines: 4000 }, files: 88, bytes: 1234567 };
+  assert.equal(runRows(counts), 4312);
+  assert.equal(runFiles(counts), 88);
+  assert.equal(runBytes(counts), 1234567);
+  for (const empty of [null, undefined, {}, { rows: {} }]) {
+    assert.equal(runRows(empty), 0);
+    assert.equal(runFiles(empty), 0);
+    assert.equal(runBytes(empty), 0);
+  }
+  // A row written by an older version, or a slice that died mid-write.
+  assert.equal(runRows({ rows: { jobs: "12", tickets: null } }), 12);
+});
+
+const run = (kind, bytes, extra = {}) => ({
+  id: `${kind}-${bytes}`, kind, status: "complete", folder_name: `${bytes}`,
+  finished_at: "2026-09-05T08:00:00Z", counts: { rows: { jobs: 1 }, files: 1, bytes }, ...extra
+});
+
+test("one run is not a trend", () => {
+  assert.equal(sizeTrend([]), null);
+  assert.equal(sizeTrend([run("backup", 100)]), null);
+});
+
+test("the line runs oldest to newest and is scaled from zero, so half is half", () => {
+  // Newest first, the way listBackupRuns answers.
+  const t = sizeTrend([run("backup", 50), run("backup", 100)], 100, 22);
+  assert.equal(t.points.length, 2);
+  assert.deepEqual(t.points.map(p => p.bytes), [100, 50]);
+  assert.equal(t.max, 100);
+  assert.equal(t.points[0].x, 0);
+  assert.equal(t.points[1].x, 100);
+  // The biggest sits a pixel below the top; half of it sits halfway down the
+  // band, not on the floor — which is what a min-to-max scale would do.
+  assert.equal(t.points[0].y, 1);
+  assert.equal(t.points[1].y, 11);
+  assert.equal(t.line, "0,1 100,11");
+});
+
+test("a backup that halved says so; one that held steady does not", () => {
+  assert.equal(sizeTrend([run("backup", 40), run("backup", 100)]).halved, true);
+  assert.equal(sizeTrend([run("backup", 90), run("backup", 100)]).halved, false);
+  // Exactly half is not "less than half" — the sentence is for a real drop.
+  assert.equal(sizeTrend([run("backup", 50), run("backup", 100)]).halved, false);
+});
+
+test("only runs that wrote a copy are plotted", () => {
+  const rows = [
+    run("restore_all", 900),                       // read back out, not written
+    run("restore_jobs", 800),
+    run("backup", 0),                              // failed before the copying
+    run("backup", 300, { status: "failed" }),
+    run("before_restore", 200),                    // a safety copy is a copy
+    run("backup", 100)
+  ];
+  const t = sizeTrend(rows);
+  assert.deepEqual(t.points.map(p => p.bytes), [100, 200]);
+  assert.equal(t.latest, 200);
+  assert.equal(t.previous, 100);
 });

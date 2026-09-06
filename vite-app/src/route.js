@@ -90,3 +90,17 @@ export function landingRoute(route) {
   }
   return route;
 }
+
+// Whether moving from one route to the next deserves a history entry of its
+// own. A job and the screens that hang off it — its ticket, its assessment,
+// its report upload — are one place to the Back gesture: the address for a
+// ticket degrades to its job on the way back (landingRoute), so an entry of
+// its own meant the first Back landed on the job already showing and looked
+// dead. Within one job the bar is replaced; everything else is pushed.
+export function historyStep(prev, next) {
+  if (!prev || !next) return "push";
+  if (!prev.job || prev.job !== next.job) return "push";
+  const prevUnderJob = prev.screen === "job" || CONTEXT_TABS.includes(prev.screen);
+  const nextUnderJob = next.screen === "job" || CONTEXT_TABS.includes(next.screen);
+  return prevUnderJob && nextUnderJob ? "replace" : "push";
+}

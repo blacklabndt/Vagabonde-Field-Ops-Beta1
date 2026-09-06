@@ -3,8 +3,10 @@ import { Db } from "../db.js";
 import { Btn, Dialog, Field, ErrorBox, Loading, TagX } from "./common.jsx";
 import {
   BACKUP_PROVIDERS, PROVIDER_LABEL, redirectUriFor, readBackupOutcome,
-  isBeforeRestore, restoreNameMatches, failedRunAdvice, keepPhrase
+  isBeforeRestore, restoreNameMatches, failedRunAdvice, keepPhrase,
+  runRows, runFiles, runBytes, sizeTrend
 } from "../backupPanelLogic.js";
+import { fileSize } from "../data.js";
 import { describeSchedule, WEEKDAY_NAMES, nextRunAt, BACKUP_ZONE } from "../backupSchedule.js";
 
 // Automatic backup — the Admin screen's Archive block, below the year-end
@@ -78,9 +80,13 @@ const KIND_WORDS = {
   restore_jobs: "Restoring jobs"
 };
 
-const rowsIn = counts => Object.values((counts && counts.rows) || {}).reduce((n, v) => n + Number(v || 0), 0);
-const filesIn = counts => Number((counts && counts.files) || 0);
-const bytesIn = counts => Number((counts && counts.bytes) || 0);
+// The three figures every run keeps, now shared with the list of earlier runs
+// and the line drawn under it — so what the last-run sentence counts and what
+// the line plots cannot drift apart. They live in backupPanelLogic.js, where
+// they are tested.
+const rowsIn = runRows;
+const filesIn = runFiles;
+const bytesIn = runBytes;
 // A restore's two other figures, and they arrive in two shapes on purpose.
 // A restore-all writes into tables it has just emptied, so what it left out
 // is a number; a per-job restore writes into tables that are full, so what
@@ -110,10 +116,62 @@ const POLL_IDLE_MS = 20000;
 // The slice chain does the work; this is for when the chain drops.
 const NUDGE_EVERY_MS = 15000;
 
+// How far back "Earlier runs" reaches. It used to be five, which is a fine
+// list and a poor line: on a daily schedule five points is under a week, and
+// the question the line is drawn for — is this quietly getting smaller? — is
+// asked of a fortnight. They are small rows behind a fold.
+const EARLIER_RUNS = 12;
+
 // The panel sits inside the Archive block's own box: a rule above it, not a
 // second box — the two are one subject, keeping the work and keeping the
 // app.
 const SECTION_STYLE = { marginTop: 18, paddingTop: 16, borderTop: "1px solid var(--color-divider)", minWidth: 0, overflowWrap: "anywhere" };
+
+// How big the last several backups were, drawn rather than listed.
+//
+// A backup that has quietly stopped holding half the app finishes green,
+// writes a folder, and reports a perfectly ordinary "complete" — the only
+// thing that gives it away is the size, and a size is only a fact next to the
+// sizes before it. Hence a line: the shape is read in a glance and the numbers
+// are still in the rows above it.
+//
+// Twenty-six pixels of SVG written out here rather than a chart library: it is
+// a polyline and a dot per run, and the app does not carry a charting
+// dependency for it.
+const TREND_W = 130;
+const TREND_H = 26;
+
+function SizeTrend({ runs }) {
+  const trend = sizeTrend(runs, TREND_W, TREND_H);
+  // Fewer than two backups in the list, or none that wrote anything: there is
+  // nothing a line could say that the rows do not.
+  if (!trend) return null;
+  const label = `The last ${trend.points.length} backups by size, oldest first. Largest ${fileSize(trend.max)}, latest ${fileSize(trend.latest)}.`;
+  return (
+    <div style={{ marginTop: 10, display: "flex", gap: 10, alignItems: "center", flexWrap: "wrap" }}>
+      <svg width={TREND_W + 4} height={TREND_H + 4} viewBox={`-2 -2 ${TREND_W + 4} ${TREND_H + 4}`}
+        role="img" aria-label={label} style={{ flex: "none", overflow: "visible" }}>
+        <title>{label}</title>
+        <polyline points={trend.line} fill="none" stroke="var(--color-accent)" strokeWidth="1.5"
+          strokeLinejoin="round" strokeLinecap="round" />
+        {trend.points.map(p => (
+          <circle key={`${p.name}-${p.x}`} cx={p.x} cy={p.y} r="1.8" fill="var(--color-accent)" />
+        ))}
+      </svg>
+      <span style={QUIET}>
+        Size of the last {trend.points.length} backups, oldest first &middot; largest {fileSize(trend.max)},
+        {" "}latest {fileSize(trend.latest)}.
+      </span>
+      {trend.halved && (
+        <div style={{ fontSize: 12, color: "var(--color-accent-700)", flexBasis: "100%" }}>
+          The last backup is less than half the size of the one before it. That can be an ordinary quiet week, or it
+          can be a copy that stopped partway &mdash; open the drive and check the folder holds the records and files
+          the row above says it does.
+        </div>
+      )}
+    </div>
+  );
+}
 
 export function AutomaticBackupPanel() {
   const [state, setState] = useState(null);
@@ -208,13 +266,13 @@ export function AutomaticBackupPanel() {
         } else if (had) {
           // Something finished while this screen was open: what it says now
           // is the last-run line and the list behind it.
-          setLastRuns(await Db.listBackupRuns(5));
+          setLastRuns(await Db.listBackupRuns(EARLIER_RUNS));
           load();
         }
       } catch { /* a failed poll is not worth an error box */ }
       if (alive) timer = setTimeout(look, runRef.current ? POLL_BUSY_MS : POLL_IDLE_MS);
     };
-    Db.listBackupRuns(5).then(rows => { if (alive) setLastRuns(rows); }).catch(() => {});
+    Db.listBackupRuns(EARLIER_RUNS).then(rows => { if (alive) setLastRuns(rows); }).catch(() => {});
     look();
     return () => { alive = false; if (timer) clearTimeout(timer); };
   }, [load]);
@@ -492,13 +550,21 @@ export function AutomaticBackupPanel() {
           <summary style={QUIET}>Earlier runs</summary>
           <div style={{ display: "grid", gap: 6, marginTop: 8 }}>
             {lastRuns.map(r => (
-              <div key={r.id} style={{ fontSize: 12, display: "flex", gap: 8, alignItems: "center" }}>
+              <div key={r.id} style={{ fontSize: 12, display: "flex", gap: 8, alignItems: "baseline", flexWrap: "wrap" }}>
                 <TagX variant="outline">{KIND_WORDS[r.kind] || r.kind}</TagX>
                 <span>{r.folder_name || "—"}</span>
+                {/* What the run actually moved. A folder name and a green
+                    "complete" say a backup happened; they do not say whether
+                    it holds the app. These three figures do, and they are the
+                    same ones the last-run sentence above quotes. */}
+                <span style={QUIET}>
+                  {plural(rowsIn(r.counts), "record")} &middot; {plural(filesIn(r.counts), "file")} &middot; {fileSize(bytesIn(r.counts))}
+                </span>
                 <span style={{ marginLeft: "auto" }}>{r.status} &middot; {when(r.finished_at || r.created_at)}</span>
               </div>
             ))}
           </div>
+          <SizeTrend runs={lastRuns} />
         </details>
       )}
 

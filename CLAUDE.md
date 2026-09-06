@@ -213,7 +213,11 @@ Cloudflare Worker `solitary-snowflake-ee22` (assets + the `/approve` and
   tested) spells `#/board`, `#/chat`, `#/job/S-10113` and
   `#/job/S-10113/ticket`; App.jsx pushes one history entry per screen
   change and answers popstate, so Back steps back a screen and a reload stays
-  put. A ticket/JHA/upload address degrades to its job (`landingRoute`) —
+  put — except within one job: `historyStep(prev, next)` answers "replace"
+  when both addresses are the same job's screens (its page, its ticket, its
+  JHA, its upload), so a technician who went job → ticket → job → JHA
+  reaches the board with one Back instead of four. A ticket/JHA/upload
+  address degrades to its job (`landingRoute`) —
   the address never said which draft. Our hashes always start with `/`;
   Auth's recovery hash never does, and `recovery.js` now also demands an
   access_token before showing the set-password screen. Anything that
