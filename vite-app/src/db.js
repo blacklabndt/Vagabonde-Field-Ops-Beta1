@@ -1,5 +1,5 @@
 import { sbClient, VAPID_PUBLIC_KEY } from "./config.js";
-import { money, todayLocal, localDate, dayMonth, ticketDateStamp, primaryContact, ageInDays, storageKeySafe, STANDARD_RATE_LINES, nonNegative, lineTotal, decimalString, ticketStatusWriteRefusal } from "./data.js";
+import { money, todayLocal, localDate, dayMonth, ticketDateStamp, primaryContact, ageInDays, storageKeySafe, STANDARD_RATE_LINES, nonNegative, lineTotal, decimalString, ticketStatusWriteRefusal, gstRateOf } from "./data.js";
 import { OfflineCache } from "./offlineCache.js";
 import { Toasts } from "./toastBus.js";
 import { OfflineQueue, isNetworkError } from "./offlineQueue.js";
@@ -152,6 +152,11 @@ function shapeJob(j) {
   return {
     dbId: j.id, id: j.job_number, project: j.project,
     client: j.clients ? j.clients.name : "", clientId: j.client_id,
+    // The tax the client actually pays, carried on the job because that is
+    // where every ticket screen already has it. gstRateOf reads a job with
+    // no rate on it — a cached copy from before the column, a row out of an
+    // older backup — as the ordinary 5% rather than as exempt.
+    clientGstRate: gstRateOf(j.clients ? j.clients.gst_rate : null),
     contractor: j.contractors ? j.contractors.name : "", contractorId: j.contractor_id,
     lsd: j.lsd, afe: j.afe, area: j.area, method: j.method, procedure: j.procedure,
     scope: "RT · scope TBD", status: j.status,
@@ -611,7 +616,7 @@ export const Db = {
     const data = await fetchAllPages(async (page, size) => {
       const { data: rows, error, count } = await sbClient
         .from("jobs")
-        .select("id, job_number, project, lsd, afe, area, method, procedure, status, created_at, client_id, contractor_id, created_by, clients(name), contractors(name), profiles!jobs_created_by_fkey(name)", page === 0 ? { count: "exact" } : {})
+        .select("id, job_number, project, lsd, afe, area, method, procedure, status, created_at, client_id, contractor_id, created_by, clients(name, gst_rate), contractors(name), profiles!jobs_created_by_fkey(name)", page === 0 ? { count: "exact" } : {})
         .gte("created_at", start.toISOString())
         .lt("created_at", end.toISOString())
         .order("created_at").order("id")
@@ -775,7 +780,7 @@ export const Db = {
     return OfflineCache.readThrough("jobs.client." + clientId, async () => {
       const { data, error } = await sbClient
         .from("jobs")
-        .select("id, job_number, project, lsd, afe, area, method, procedure, status, created_at, client_id, contractor_id, created_by, clients(name), contractors(name), profiles!jobs_created_by_fkey(name)")
+        .select("id, job_number, project, lsd, afe, area, method, procedure, status, created_at, client_id, contractor_id, created_by, clients(name, gst_rate), contractors(name), profiles!jobs_created_by_fkey(name)")
         .eq("client_id", clientId)
         .eq("status", "Active")
         .order("created_at", { ascending: false })
@@ -791,7 +796,7 @@ export const Db = {
   async getMostRecentJob() {
     const { data, error } = await sbClient
       .from("jobs")
-      .select("id, job_number, project, lsd, afe, area, method, procedure, status, created_at, client_id, contractor_id, created_by, clients(name), contractors(name), profiles!jobs_created_by_fkey(name)")
+      .select("id, job_number, project, lsd, afe, area, method, procedure, status, created_at, client_id, contractor_id, created_by, clients(name, gst_rate), contractors(name), profiles!jobs_created_by_fkey(name)")
       .order("created_at", { ascending: false }).limit(1).maybeSingle();
     if (error) throw error;
     return data ? shapeJob(data) : null;
@@ -944,7 +949,7 @@ export const Db = {
     return OfflineCache.readThrough("job." + jobDbId, async () => {
       const { data: j, error } = await sbClient
         .from("jobs")
-        .select("id, job_number, project, lsd, afe, area, method, procedure, status, created_at, client_id, contractor_id, created_by, clients(name), contractors(name), profiles!jobs_created_by_fkey(name)")
+        .select("id, job_number, project, lsd, afe, area, method, procedure, status, created_at, client_id, contractor_id, created_by, clients(name, gst_rate), contractors(name), profiles!jobs_created_by_fkey(name)")
         .eq("id", jobDbId).single();
       if (error) throw error;
       return shapeJob(j);
@@ -956,7 +961,7 @@ export const Db = {
   async getJobByNumber(jobNumber) {
     const { data: j, error } = await sbClient
       .from("jobs")
-      .select("id, job_number, project, lsd, afe, area, method, procedure, status, created_at, client_id, contractor_id, created_by, clients(name), contractors(name), profiles!jobs_created_by_fkey(name)")
+      .select("id, job_number, project, lsd, afe, area, method, procedure, status, created_at, client_id, contractor_id, created_by, clients(name, gst_rate), contractors(name), profiles!jobs_created_by_fkey(name)")
       .eq("job_number", jobNumber).single();
     if (error) throw error;
     return shapeJob(j);
@@ -1005,7 +1010,7 @@ export const Db = {
   // Contractors are created inline when a job names a new one (see
   // createJob), but clients are deliberate: they carry a rate schedule, so
   // adding one is its own act rather than a side effect.
-  async createClient({ name, minimumCallout, effectiveFrom }) {
+  async createClient({ name, minimumCallout, effectiveFrom, gstRate }) {
     const clean = (name || "").trim();
     if (!clean) throw new Error("Give the client a name.");
 
@@ -1018,7 +1023,8 @@ export const Db = {
     const { data, error } = await sbClient.from("clients").insert({
       name: clean,
       minimum_callout: (minimumCallout || "").trim() || null,
-      effective_from: effectiveFrom || todayLocal()
+      effective_from: effectiveFrom || todayLocal(),
+      gst_rate: gstRateOf(gstRate)
     }).select().single();
     if (error) throw error;
     invalidate("clients");
@@ -1033,6 +1039,27 @@ export const Db = {
     // card, with the ticket screen the first place to notice.
     const { error: schedErr } = await sbClient.from("rate_schedules").insert({ client_id: data.id, follows_default: true });
     if (schedErr) console.warn("Client created, but their rate schedule was not:", schedErr.message);
+    return data;
+  },
+
+  // The tax on this client's tickets, as a percent. Zero is exempt and is a
+  // real answer, so the rate is normalised rather than falsy-checked — 0 has
+  // to reach the database, and a blank box must not.
+  //
+  // The database is the gate: private.guard_client_update refuses this
+  // column to anyone but an Admin, and the refusal comes back as the message
+  // the caller shows. Live only — a GST rate is not something to change with
+  // no signal and hope it lands, and the ticket in the truck already has the
+  // rate it was priced at.
+  async updateClientGst(id, gstRate) {
+    const { data, error } = await sbClient.from("clients")
+      .update({ gst_rate: gstRateOf(gstRate) })
+      .eq("id", id).select("id, gst_rate").single();
+    if (error) throw error;
+    // The client list is cached. A job already open on somebody's screen
+    // carries the rate it was joined with and keeps it until that screen
+    // loads the job again, which is the same way a client's name behaves.
+    invalidate("clients");
     return data;
   },
 
@@ -1672,12 +1699,13 @@ export const Db = {
   // Admin-only, so everyone else errors rather than reads blanks.
   async getAppSettings() {
     const { data, error } = await sbClient.from("app_settings")
-      .select("resend_api_key, from_reports, from_billing, reply_to, klipy_api_key, approval_base_url").maybeSingle();
+      .select("resend_api_key, from_reports, from_billing, reply_to, klipy_api_key, approval_base_url, invoice_terms, invoice_remit_to, business_number").maybeSingle();
     if (error) throw error;
     return data || {};
   },
 
-  async saveAppSettings({ resendApiKey, fromReports, fromBilling, replyTo, klipyApiKey, approvalBaseUrl }) {
+  async saveAppSettings({ resendApiKey, fromReports, fromBilling, replyTo, klipyApiKey, approvalBaseUrl,
+    invoiceTerms, invoiceRemitTo, businessNumber }) {
     // The approval link is built as `${base}/approve?t=…` and dropped into
     // an email — a bare "app.example.com" renders as dead text in every
     // client's inbox and errors nowhere. Refuse the shapes that can't work.
@@ -1712,6 +1740,13 @@ export const Db = {
       reply_to: (replyTo || "").trim() || null,
       klipy_api_key: (klipyApiKey || "").trim() || null,
       approval_base_url: (approvalBaseUrl || "").trim().replace(/\/+$/, "") || null,
+      // What the field invoice prints besides the money. Blank saves null,
+      // and a null prints nothing at all — an invoice with an empty "Terms:"
+      // on it looks like a document somebody forgot to finish. The remit-to
+      // block keeps its line breaks: it is an address.
+      invoice_terms: (invoiceTerms || "").trim() || null,
+      invoice_remit_to: (invoiceRemitTo || "").trim() || null,
+      business_number: (businessNumber || "").trim() || null,
       updated_at: new Date().toISOString()
     });
     if (error) throw error;
@@ -2446,7 +2481,14 @@ export const Db = {
       amount: t.total == null ? null : Number(t.total), status: t.status, tech: t.technician_name || "",
       job: t.job_number || "", project: t.project || "", client: t.client_name || "",
       chasedAt: t.chased_at || null, invoicedAt: t.invoiced_at || null,
-      queriedAt: t.queried_at || null, queryText: t.query_text || "", queryBy: t.query_by || ""
+      queriedAt: t.queried_at || null, queryText: t.query_text || "", queryBy: t.query_by || "",
+      // Not money: the client's tax rate, their id, and the number an
+      // invoice went out under, for the tracker and the accounting export.
+      // Absent on a database before 20260906 — the export reads absence as
+      // the ordinary 5% and a blank cell.
+      gstRate: t.client_gst_rate == null ? null : Number(t.client_gst_rate),
+      clientId: t.client_id || null,
+      invoiceNumber: t.invoice_number == null ? null : Number(t.invoice_number)
     }));
     const total = data && data.length ? Number(data[0].total_count) : 0;
     // The money across every matching ticket, not only this page's — null
@@ -2517,6 +2559,65 @@ export const Db = {
       if (all.length >= total) break;
     }
     return all;
+  },
+
+  // What the accounting export knows about a ticket that search_tickets does
+  // not: its invoice number, and — for the per-line export — the charges it is
+  // made of. Asked for in batches of ticket ids rather than one ticket at a
+  // time, because a busy month is thousands of tickets and that many round
+  // trips is an export nobody waits for.
+  //
+  // The invoice number arrives with a later migration. A database without that
+  // column refuses the whole select, and that refusal is not a failure of the
+  // export — the CSV goes out with those cells blank and says so. Recognised
+  // the way the dose ledger recognises its missing routine: the code is the
+  // reliable half, and a message is believed only when it names the column, so
+  // a permission refusal or a timeout still reaches the screen as itself.
+  //
+  // The lines are walked by key inside each batch, never by offset. Two
+  // hundred tickets carry well over the 1000-row cap in lines alone, so the
+  // walk is the read and not a precaution — and line_order is one sequence
+  // across the whole table, so "the next thousand after this one" is a true
+  // keyset walk. It is also the column the printed invoice orders by, so the
+  // CSV lists a ticket's charges in the order the client agreed them.
+  async listTicketExportDetail(ticketIds, { withLines = false, batchSize = 200 } = {}) {
+    const ids = [...new Set((ticketIds || []).filter(Boolean))];
+    const invoices = {};
+    const lines = {};
+    let invoiceNumbers = true;
+    const noInvoiceColumn = e => {
+      if (!e) return false;
+      if (e.code === "42703") return true;
+      const msg = String(e.message || "");
+      return msg.includes("invoice_number") && /does not exist|could not find|schema cache/i.test(msg);
+    };
+    for (let i = 0; i < ids.length; i += batchSize) {
+      const batch = ids.slice(i, i + batchSize);
+      if (invoiceNumbers) {
+        const { data, error } = await sbClient.from("tickets")
+          .select("id, invoice_number, invoiced_at").in("id", batch);
+        if (error) {
+          if (!noInvoiceColumn(error)) throw error;
+          invoiceNumbers = false;
+        } else {
+          for (const t of data || []) {
+            invoices[t.id] = { number: t.invoice_number || "", invoicedAt: t.invoiced_at || null };
+          }
+        }
+      }
+      if (!withLines) continue;
+      const rows = await fetchAllKeyset(async after => {
+        let query = sbClient.from("ticket_lines")
+          .select("ticket_id, kind, label, unit, quantity, unit_rate, line_order")
+          .in("ticket_id", batch);
+        if (after != null) query = query.gt("line_order", after);
+        const { data, error } = await query.order("line_order").limit(RESPONSE_ROW_CAP);
+        if (error) throw error;
+        return data || [];
+      }, r => r.line_order);
+      for (const r of rows) (lines[r.ticket_id] || (lines[r.ticket_id] = [])).push(r);
+    }
+    return { invoices, lines, invoiceNumbers };
   },
 
   // Every unsigned ticket's client contact, for the tracker's bulk chase —
@@ -3902,6 +4003,7 @@ const SAVE_MESSAGES = {
   deleteContact: "Contact removed",
   setPrimaryContact: "Primary contact changed",
   createClient: "Client added",
+  updateClientGst: "GST rate saved",
   createContractor: "Contractor added",
 
   // Jobs

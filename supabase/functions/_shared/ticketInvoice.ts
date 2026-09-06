@@ -12,12 +12,14 @@
 // the other two read as the signed-in user so row-level security still
 // decides what they can see. Same shape either way.
 
-import type { InvoiceData } from "./invoice.ts";
+import { createClient } from "https://esm.sh/@supabase/supabase-js@2";
+import type { InvoiceData, InvoiceSettings } from "./invoice.ts";
 import { LEVEL_LEGEND } from "./levels.ts";
 
 // Everything the invoice prints, and nothing else.
 export const TICKET_INVOICE_SELECT =
   "id, work_date, total, status, delays, client_contact, approved_at, approved_by_email, approved_signature, approval_sent_to, " +
+  "invoice_number, invoiced_at, " +
   "jobs(job_number, project, lsd, afe, area, clients(name), contractors(name)), " +
   "ticket_lines(kind, label, unit, quantity, unit_rate)";
 
@@ -34,6 +36,37 @@ const CREW_SELECT =
 
 // deno-lint-ignore no-explicit-any
 type Client = any;
+
+// The terms, the remit-to block and the GST number, off the one app_settings
+// row. Read with the service role the way _shared/mail.ts appSettings() does:
+// the table is Admin-only under RLS, and two of the three callers here read
+// the ticket as a signed-in technician — or, on the approval page, as nobody
+// at all.
+//
+// Best-effort, unlike mail.ts. A settings read that fails there means mail
+// could go out under a rotated key, so it throws; here it means an invoice
+// prints without its terms, and the alternative is a client rep who cannot
+// open the bill they were asked to sign at all. The money on the document is
+// not affected either way — it comes from the lines.
+export async function invoiceSettings(): Promise<InvoiceSettings> {
+  try {
+    const admin = createClient(
+      Deno.env.get("SUPABASE_URL")!,
+      Deno.env.get("SUPABASE_SERVICE_ROLE_KEY")!
+    );
+    const { data } = await admin
+      .from("app_settings")
+      .select("invoice_terms, invoice_remit_to, business_number")
+      .maybeSingle();
+    return {
+      terms: data?.invoice_terms ?? null,
+      remitTo: data?.invoice_remit_to ?? null,
+      businessNumber: data?.business_number ?? null
+    };
+  } catch {
+    return {};
+  }
+}
 
 export async function loadInvoice(
   client: Client,
@@ -58,6 +91,11 @@ export async function loadInvoice(
     .select(CREW_SELECT)
     .eq("ticket_id", ticketId);
 
+  // Read here rather than in each of the three callers, for the same reason
+  // the column list is: three hand-written copies is how the emailed bill
+  // ends up carrying terms the page it links to does not.
+  const settings = await invoiceSettings();
+
   return {
     error: null,
     data: {
@@ -77,7 +115,8 @@ export async function loadInvoice(
         ot: Number(c.ot_hours ?? 0),
         mileage: Number(c.mileage_km ?? 0)
       })),
-      levelLegend: LEVEL_LEGEND
+      levelLegend: LEVEL_LEGEND,
+      settings
     }
   };
 }

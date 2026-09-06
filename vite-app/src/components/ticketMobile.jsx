@@ -1,5 +1,5 @@
 import React, { useState, useEffect, useMemo, useRef } from "react";
-import { money, todayLocal, localDate, dayMonth, initialsOf, crewRoleFor, hours, lineTotal, gstOn, seesPrices, saneQuantityCeiling, SANE_CREW_HOURS } from "../data.js";
+import { money, todayLocal, localDate, dayMonth, initialsOf, crewRoleFor, hours, lineTotal, gstOn, gstLabel, gstRateOf, seesPrices, saneQuantityCeiling, SANE_CREW_HOURS } from "../data.js";
 import { Db } from "../db.js";
 import { Blueprint, Btn, TagX, Field, ErrorBox, emailIn, NoJobSelected, QueuedPanel, NumField , Loading } from "./common.jsx";
 import { OfflineQueue } from "../offlineQueue.js";
@@ -558,6 +558,12 @@ export function TicketMobileScreen({ job, jobRecord, currentUser, onSaved, ticke
   const orphanCents = orphanLines.reduce((s, l) => s + Math.round(lineTotal(l.quantity, l.unit_rate) * 100), 0);
   const orphanDollars = orphanCents / 100;
   const total = (centsOf(weldRows) + centsOf(otherRows) + orphanCents) / 100;
+  // This client's own GST rate, which is 5% for almost everyone and zero for
+  // the exempt ones. Read off the job because that is where the client is;
+  // gstRateOf reads a job with no rate on it — one cached before the column
+  // existed — as 5%, never as exempt.
+  const gstRate = gstRateOf(job && job.clientGstRate);
+  const gst = gstOn(total, gstRate);
 
   const availableWeld = rates.welds.filter(w => !weldLines.some(l => l.key === w.key));
   const availableService = rates.others.filter(s => !otherLines.some(l => l.key === s.key));
@@ -1119,12 +1125,16 @@ export function TicketMobileScreen({ job, jobRecord, currentUser, onSaved, ticke
           {/* The figure the rep signs for is the one with tax on it; the
               subtotal alone read as "the total" and a technician quoting
               the screen was quoting a different number than the page the
-              client signs. Same integer-cent GST as the invoice. */}
+              client signs. Same integer-cent GST as the invoice, at this
+              client's own rate — an exempt client's ticket says so on the
+              screen rather than being corrected by hand afterwards. */}
           <Blueprint style={{ padding: "12px 14px", background: "color-mix(in srgb, var(--color-accent) 8%, transparent)" }}>
-            <div style={{ fontSize: 10, textTransform: "uppercase", color: "color-mix(in srgb, var(--color-text) 55%, transparent)" }}>Ticket total · including GST</div>
-            <div className="tabular" style={{ fontFamily: "var(--font-heading)", fontWeight: 600, fontSize: 30 }}>{money(Math.round(total * 100 + gstOn(total) * 100) / 100)}</div>
+            <div style={{ fontSize: 10, textTransform: "uppercase", color: "color-mix(in srgb, var(--color-text) 55%, transparent)" }}>
+              {gstRate === 0 ? "Ticket total · GST exempt" : "Ticket total · including GST"}
+            </div>
+            <div className="tabular" style={{ fontFamily: "var(--font-heading)", fontWeight: 600, fontSize: 30 }}>{money(Math.round(total * 100 + gst * 100) / 100)}</div>
             <div className="tabular" style={{ fontSize: 12, color: "color-mix(in srgb, var(--color-text) 60%, transparent)" }}>
-              {money(total)} before GST · GST {money(gstOn(total))}
+              {money(total)} before GST · {gstLabel(gstRate)}{gstRate === 0 ? "" : ` ${money(gst)}`}
             </div>
           </Blueprint>
 

@@ -271,11 +271,6 @@ export const JOB_FIELDS = [
   { key: "started", label: "Started" }
 ];
 
-// GST on the client's field invoice. Alberta, so the 5% federal rate with no
-// provincial component. One named constant because a tax rate copied into
-// three templates is a tax rate that will one day disagree with itself — if
-// it changes, or the company ever bills into a province with HST, this is the
-// only line to edit.
 // The certification levels printed beside a technician's name on the client
 // field invoice, and the legend printed under them. One list so the codes on
 // the ticket and the legend explaining them can never drift apart.
@@ -365,7 +360,39 @@ export const saneQuantityCeiling = unit =>
 // payroll, not billing.
 export const SANE_CREW_HOURS = 24;
 
-export const GST_RATE = 0.05;
+// GST on the client's field invoice. Alberta, so the 5% federal rate with no
+// provincial component — but not every client pays it: a First Nations band,
+// a Crown agency or a client billing through an exempt entity is zero-rated,
+// and the office was deleting the GST line off those tickets by hand every
+// time. The rate is a percent on the client's own row (clients.gst_rate),
+// and this is the figure a client without one is billed at.
+export const GST_RATE_DEFAULT = 5;
+// The same rate as a fraction, kept because the invoice and the approval
+// email still speak in fractions. 5 / 100 is exactly the double 0.05, so
+// nothing that multiplies by it changes.
+export const GST_RATE = GST_RATE_DEFAULT / 100;
+
+// What a client's rate really is. A row from before the column existed — an
+// older backup, a job cached on a tablet, a fresh database the migration has
+// not reached — has nothing to say, and silence means the ordinary 5%, never
+// zero: guessing exempt is the guess that undercharges. Anything outside
+// 0–100 is not a tax rate, so it falls back the same way.
+// Nothing at all is checked before the number: Number(null) and Number("")
+// are both 0, which is a perfectly valid tax rate and exactly the wrong one
+// to infer from an absent field.
+export const gstRateOf = value => {
+  if (value == null || value === "") return GST_RATE_DEFAULT;
+  const n = Number(value);
+  return Number.isFinite(n) && n >= 0 && n <= 100 ? n : GST_RATE_DEFAULT;
+};
+
+// How a rate is written on screen. Zero is spelled out rather than shown as
+// "GST 0%": a technician reading a total needs to know the client is exempt,
+// not wonder whether the tax line failed to load.
+export const gstLabel = ratePercent => {
+  const n = gstRateOf(ratePercent);
+  return n === 0 ? "GST exempt" : `GST ${Number(n.toFixed(2))}%`;
+};
 
 // Rounded on integer cents, not on dollars.
 //
@@ -376,9 +403,13 @@ export const GST_RATE = 0.05;
 // $42.30 among them — always under-charging, so the company covers the
 // difference. Rounding the subtotal to cents first removes the class.
 //
+// The rate is a percent, so the one-argument call every screen made before
+// clients had their own rate still means 5%.
+//
 // Mirrored in supabase/functions/_shared/invoice.ts. The two must agree to
 // the cent or the app and the client's copy quote different totals.
-export const gstOn = subtotal => Math.round(Math.round(subtotal * 100) * GST_RATE) / 100;
+export const gstOn = (subtotal, ratePercent = GST_RATE_DEFAULT) =>
+  Math.round(Math.round(subtotal * 100) * (gstRateOf(ratePercent) / 100)) / 100;
 
 // Storage object keys are stricter than filenames: the API refuses
 // non-ASCII outright ("Invalid key"), % breaks the request before it

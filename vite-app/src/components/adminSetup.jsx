@@ -24,7 +24,8 @@ export function AdminSetupScreen({ currentUser, onArchiveCleared }) {
   const [archiveMode, setArchiveMode] = useState(null);
   const [form, setForm] = useState({
     resendApiKey: "", fromReports: "", fromBilling: "", replyTo: "",
-    klipyApiKey: "", approvalBaseUrl: ""
+    klipyApiKey: "", approvalBaseUrl: "",
+    invoiceTerms: "", invoiceRemitTo: "", businessNumber: ""
   });
   // "loading" | "ready" | "failed". Failed matters: saving writes the whole
   // form over the whole row, so a save on top of a load that never arrived
@@ -50,7 +51,10 @@ export function AdminSetupScreen({ currentUser, onArchiveCleared }) {
           fromBilling: row.from_billing || "",
           replyTo: row.reply_to || "",
           klipyApiKey: row.klipy_api_key || "",
-          approvalBaseUrl: row.approval_base_url || ""
+          approvalBaseUrl: row.approval_base_url || "",
+          invoiceTerms: row.invoice_terms || "",
+          invoiceRemitTo: row.invoice_remit_to || "",
+          businessNumber: row.business_number || ""
         });
         setLoadState("ready");
       })
@@ -197,6 +201,40 @@ export function AdminSetupScreen({ currentUser, onArchiveCleared }) {
           <div style={{ fontSize: 12, marginTop: 8, color: "color-mix(in srgb, var(--color-text) 60%, transparent)" }}>
             You&rsquo;re reading the app at <span className="tabular">{window.location.origin}</span> right
             now — that&rsquo;s almost always the value to put here.
+          </div>
+        </Blueprint>
+
+        {/* The words on the bill. They sit beside the approval address
+            because they finish the same document: the address decides where
+            the client signs it, these decide whether their accounts
+            department can pay it without it being re-typed elsewhere. */}
+        <Blueprint style={{ padding: "18px 20px", minWidth: 0 }}>
+          <div style={SECTION_TITLE}>Invoices</div>
+          <div style={SECTION_HELP}>
+            What the field invoice prints besides the charges. A ticket takes its invoice number
+            the moment it is marked invoiced on the billing tracker &mdash; the numbers start at 1000,
+            run in order, and are never reused, so a ticket pulled back and re-invoiced keeps the
+            number the client already has. Anything left blank here simply doesn&rsquo;t print.
+          </div>
+          <div style={{ display: "flex", flexDirection: "column", gap: 12 }}>
+            <Field label="Terms">
+              <input className="input" value={form.invoiceTerms}
+                onChange={e => set("invoiceTerms", e.target.value)}
+                placeholder="Net 30 days — printed under the total"
+                style={{ width: "100%" }} />
+            </Field>
+            <Field label="GST number">
+              <input className="input" value={form.businessNumber}
+                onChange={e => set("businessNumber", e.target.value)}
+                placeholder="123456789 RT0001 — printed under the company name"
+                style={{ width: "100%" }} />
+            </Field>
+            <Field label="Remit to">
+              <textarea className="input" rows={4} value={form.invoiceRemitTo}
+                onChange={e => set("invoiceRemitTo", e.target.value)}
+                placeholder={"Where the money goes — printed under the total, line breaks kept.\nVagaboNDE Inc.\nPO Box 000, Grande Prairie, AB"}
+                style={{ width: "100%" }} />
+            </Field>
           </div>
         </Blueprint>
 

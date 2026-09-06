@@ -29,6 +29,18 @@ export interface InvoiceCrew {
   name?: string; level?: string; certNo?: string;
   straight?: number; ot?: number; mileage?: number;
 }
+// What the office puts on a bill besides the money: the terms it is payable
+// on, where the cheque goes, and the GST registration an accounts department
+// looks for before it will pay anything. They live on the app_settings row
+// (Admin screen) because they belong to the business and change without the
+// software. Each prints only when it has been set — a labelled empty line on
+// a client's invoice reads worse than no line at all.
+export interface InvoiceSettings {
+  terms?: string | null;
+  remitTo?: string | null;
+  businessNumber?: string | null;
+}
+
 export interface InvoiceData {
   ticket: {
     id: string; work_date: string; status?: string; total: number | string;
@@ -38,6 +50,10 @@ export interface InvoiceData {
     // Where the approval link was emailed. Printed on the stamp so a signed
     // ticket says who was asked, not only who typed a name.
     approval_sent_to?: string | null;
+    // The office's own invoice number, and when it was raised. Written by
+    // mark_tickets_invoiced alone; null until a ticket is marked invoiced.
+    invoice_number?: number | null;
+    invoiced_at?: string | null;
   };
   job: {
     job_number?: string; project?: string; lsd?: string; afe?: string;
@@ -47,6 +63,7 @@ export interface InvoiceData {
   lines: InvoiceLine[];
   crew: InvoiceCrew[];
   levelLegend: string;
+  settings?: InvoiceSettings;
 }
 
 const money = (n: number | string) =>
@@ -78,6 +95,15 @@ export const edmontonStamp = (iso: string) => {
   const d = new Date(iso);
   return isNaN(+d) ? "" : d.toLocaleString("en-CA",
     { timeZone: "America/Edmonton", dateStyle: "medium", timeStyle: "short" });
+};
+
+// The same moment as a plain date. An invoice is dated, not timed: "02:14"
+// beside an invoice number reads like a machine raised the bill, which is
+// true and is not what a client's accounts department wants to be told.
+export const edmontonDay = (iso: string) => {
+  const d = new Date(iso);
+  return isNaN(+d) ? "" : d.toLocaleDateString("en-CA",
+    { timeZone: "America/Edmonton", dateStyle: "medium" });
 };
 
 // The contact is stored as one label — "Rep · phone · email". The header
@@ -135,6 +161,10 @@ export const invoiceCss = `
   .docname{margin-left:auto;text-align:right}
   .docname .t{font-size:17px;font-weight:700;letter-spacing:.04em}
   .docname .n{font-size:11px;color:var(--mute);margin-top:2px}
+  .docname .inv{font-size:13px;font-weight:700;margin-top:5px;letter-spacing:.02em}
+  .pay{margin-top:14px;font-size:11.5px;max-width:340px}
+  .pay .k{font-size:9.5px;letter-spacing:.06em;text-transform:uppercase;font-weight:700;color:#3b3d3e}
+  .pay .remit{margin-top:8px;line-height:1.5}
   table{width:100%;border-collapse:collapse}
   td,th{border:1px solid var(--line);padding:4px 6px;vertical-align:middle}
   th{background:var(--band);font-size:9.5px;letter-spacing:.06em;text-transform:uppercase;
@@ -194,6 +224,19 @@ export function renderInvoice(d: InvoiceData): string {
 
   const signed = d.ticket.approved_at || d.ticket.status === "Approved" || d.ticket.status === "Invoiced";
 
+  // Once the office has marked the ticket invoiced it is the invoice, not a
+  // field ticket that will be re-typed into one somewhere else, and it says
+  // so at the top. The number outlives that status on purpose: a ticket
+  // pulled back to Approved to be corrected keeps the number the client
+  // already has in their system, so it still prints — under the field-ticket
+  // heading, which is what the ticket is again until it is re-invoiced.
+  const invoiced = d.ticket.status === "Invoiced";
+  const invoiceNumber = d.ticket.invoice_number;
+  const settings = d.settings || {};
+  const terms = String(settings.terms ?? "").trim();
+  const remitTo = String(settings.remitTo ?? "").trim();
+  const businessNumber = String(settings.businessNumber ?? "").trim();
+
   const rows = (list: InvoiceLine[]) => list.length
     ? list.map(l => `<tr>
         <td>${esc(l.label)}</td>
@@ -210,10 +253,14 @@ export function renderInvoice(d: InvoiceData): string {
     <div class="brand">
       ${wordmark(210)}
       <div class="sub">Full Service NDE &middot; Grande Prairie, AB</div>
+      ${businessNumber ? `<div class="sub">GST # ${esc(businessNumber)}</div>` : ""}
     </div>
     <div class="docname">
-      <div class="t">FIELD INVOICE</div>
+      <div class="t">${invoiced ? "INVOICE" : "FIELD INVOICE"}</div>
       <div class="n">Labour &middot; Equipment &middot; Materials</div>
+      ${invoiceNumber != null ? `<div class="inv">Invoice # ${esc(String(invoiceNumber))}</div>` : ""}
+      ${invoiced && d.ticket.invoiced_at
+        ? `<div class="n">Invoiced ${esc(edmontonDay(d.ticket.invoiced_at))}</div>` : ""}
     </div>
   </div>
 
@@ -286,6 +333,12 @@ export function renderInvoice(d: InvoiceData): string {
     <tr><td class="k">GST @ ${(GST_RATE * 100).toFixed(0)}%</td><td class="v">${moneyCents(total.gst)}</td></tr>
     <tr class="grand"><td>Total due</td><td class="v">${moneyCents(total.grand)}</td></tr>
   </table>
+
+  ${terms || remitTo ? `
+  <div class="pay">
+    ${terms ? `<div><span class="k">Terms:</span> ${esc(terms)}</div>` : ""}
+    ${remitTo ? `<div class="remit"><span class="k">Remit to</span><br>${esc(remitTo).replace(/\n/g, "<br>")}</div>` : ""}
+  </div>` : ""}
 
   ${signed ? `
   <div class="stamp">${sigImage(d.ticket.approved_signature)}<strong>Approved</strong><br>

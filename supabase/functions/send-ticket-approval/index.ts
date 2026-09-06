@@ -96,6 +96,13 @@ Deno.serve(async (req) => {
     if (invErr || !invoiceData) throw new Error(invErr ?? "Ticket not found");
     const lines = invoiceData.lines ?? [];
 
+    // Usually absent: a ticket goes out for signing before it is invoiced,
+    // and this function refuses an Approved or Invoiced one above. It is
+    // here for the ticket that was invoiced, pulled back and re-sent — the
+    // number is what the client's accounts department has on file, so the
+    // email quotes it rather than making them match the ticket up by hand.
+    const invoiceNo = invoiceData.ticket.invoice_number;
+
     // Summed from the lines, like the invoice does, rather than read off
     // tickets.total — the email and the document it links to must not be
     // able to quote a client two different numbers. Each line rounded to
@@ -133,7 +140,7 @@ Deno.serve(async (req) => {
     ).join("");
 
     const summary = `
-      <div style="font-size:11px;letter-spacing:.12em;text-transform:uppercase;color:#5980a6;margin-bottom:6px">Daily ticket ${esc(ticket.id)}</div>
+      <div style="font-size:11px;letter-spacing:.12em;text-transform:uppercase;color:#5980a6;margin-bottom:6px">Daily ticket ${esc(ticket.id)}${invoiceNo != null ? ` &middot; Invoice # ${esc(String(invoiceNo))}` : ""}</div>
       <div style="font-size:22px;font-weight:600;margin-bottom:4px">${esc(job.project)}</div>
       <div style="color:#6b6d6e;margin-bottom:18px">${esc(job.job_number)} · ${esc(job.clients?.name)}${job.lsd ? " · " + esc(job.lsd) : ""}${job.afe ? " · AFE " + esc(job.afe) : ""}</div>
       <div style="color:#6b6d6e;margin-bottom:10px">Work performed ${esc(ticket.work_date)}</div>
@@ -156,7 +163,7 @@ Deno.serve(async (req) => {
     `);
 
     const text = [
-      `Daily ticket ${ticket.id} — ${job.project}`,
+      `Daily ticket ${ticket.id}${invoiceNo != null ? ` · Invoice # ${invoiceNo}` : ""} — ${job.project}`,
       `${job.job_number} · ${job.clients?.name ?? ""}`,
       `Work performed ${ticket.work_date}`,
       "",

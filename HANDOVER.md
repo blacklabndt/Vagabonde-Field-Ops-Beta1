@@ -339,6 +339,32 @@ markers (S-1… jobs, @seed.vagabonde.ca accounts, organisations that only
 ever appeared on seed jobs) and prints a preview of the organisations it
 will remove before the deletes.
 
+## Invoice numbers
+
+An approved ticket becomes an invoice the moment an Admin presses **Mark
+invoiced** on the billing tracker: the app stamps it with the next number in
+its own series — starting at **1000** — and the client's copy prints as
+INVOICE, with that number, the date it was raised, and the terms, GST number
+and remit-to block set on the Admin screen. Nothing else in the app writes
+that number.
+
+A number is never reused. Pulling a ticket back to Approved to correct
+something leaves the number on it, so the corrected bill goes out under the
+number the client already has in their system rather than appearing as a
+second invoice for one day's work.
+
+To carry on a series that started somewhere else — an accounting package, a
+pad of paper invoices — run this once in the Supabase SQL editor **before**
+the first ticket is marked invoiced, never after, or the next invoice takes a
+number a client has already been given:
+
+    alter sequence public.invoice_number_seq restart with 4001;
+
+The same command is what to run after restoring into a fresh Supabase project
+(Path B): a backup carries the tickets and the numbers on them, not the series
+they came from, so set it past the highest number restored —
+`select max(invoice_number) from public.tickets;`.
+
 ## Day one, for the new admin
 
 1. **Admin screen** (drawer → Admin): Resend key, then the two sending

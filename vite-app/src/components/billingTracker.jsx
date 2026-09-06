@@ -6,6 +6,7 @@ import { Toasts } from "../toastBus.js";
 import { runSendPool } from "../sendPool.js";
 import { planChase } from "../chasePlan.js";
 import { rollUpAging, isMissingTicketAging, AGING_BUCKETS } from "../ticketAging.js";
+import { ticketExportRows, lineExportRows } from "../accountingExport.js";
 
 const TRACKER_FILTERS = ["All", "Draft", "Awaiting approval", "Approved", "Invoiced", "Over 7 days"];
 
@@ -36,15 +37,20 @@ function filterCaption(filter, q, from, to) {
   return parts.join(" · ");
 }
 
-function exportTickets(tickets, caption) {
-  downloadCsv(`Tickets ${todayLocal()}.csv`, [
-    [caption],
-    [`Exported ${todayLocal()} · ${tickets.length} ticket${tickets.length === 1 ? "" : "s"}`],
-    [],
-    ["Ticket", "Date", "Age (days)", "Job", "Project", "Client", "Technician", "Amount", "Status", "Chased", "Invoiced"],
-    ...tickets.map(t => [t.id, t.date, t.age, t.job, t.project, t.client, t.tech, t.amount, t.status,
-      t.chasedAt ? t.chasedAt.slice(0, 10) : "", t.invoicedAt ? t.invoicedAt.slice(0, 10) : ""])
-  ]);
+// The two spreadsheets, built by accountingExport.js and written by the CSV
+// helper every other export here uses. The rows are its business and the
+// quoting is downloadCsv's; this is only the filename and the trip to disk.
+function exportTickets(tickets, caption, detail) {
+  downloadCsv(`Tickets ${todayLocal()}.csv`, ticketExportRows(tickets, {
+    caption, exportedOn: todayLocal(),
+    invoices: detail.invoices, invoiceNumbers: detail.invoiceNumbers
+  }));
+}
+
+function exportLines(tickets, caption, detail) {
+  downloadCsv(`Ticket lines ${todayLocal()}.csv`, lineExportRows(tickets, {
+    caption, exportedOn: todayLocal(), invoices: detail.invoices, lines: detail.lines
+  }));
 }
 
 export function BillingTrackerScreen({ onOpenTicket, currentUser }) {
@@ -83,6 +89,7 @@ export function BillingTrackerScreen({ onOpenTicket, currentUser }) {
   const [byClient, setByClient] = useState(false);
   const [error, setError] = useState("");
   const [exporting, setExporting] = useState(false);
+  const [exportingLines, setExportingLines] = useState(false);
   const [chasing, setChasing] = useState(false);
   const [chaseResult, setChaseResult] = useState("");
   // What the chase is about to do, held while the office reads it. Null when
@@ -357,11 +364,34 @@ export function BillingTrackerScreen({ onOpenTicket, currentUser }) {
       // the screen to one client's March and pressed Export got every ticket
       // ever raised, under a footer count that said otherwise.
       const all = await Db.listTicketsForExport({ status: filter, q, from, to });
-      exportTickets(all, filterCaption(filter, q, from, to));
+      // The invoice number is not on a tracker row — it is read off the
+      // tickets themselves, in batches. A database that has no such column yet
+      // answers so, and the export goes out with that column blank and a line
+      // in the file saying why, rather than failing over a number the office
+      // was not asking for.
+      const detail = await Db.listTicketExportDetail(all.map(t => t.id));
+      exportTickets(all, filterCaption(filter, q, from, to), detail);
     } catch (e) {
       setError(e.message || "Couldn't build the export.");
     }
     setExporting(false);
+  };
+
+  // The same filter, one row per charge instead of one per ticket: what a
+  // ticket's figure is actually made of, which is the question a reconciliation
+  // asks second. It reads every matching ticket's lines, so it is much the
+  // slower of the two buttons and says so while it runs.
+  const exportCurrentLines = async () => {
+    setExportingLines(true);
+    setError("");
+    try {
+      const all = await Db.listTicketsForExport({ status: filter, q, from, to });
+      const detail = await Db.listTicketExportDetail(all.map(t => t.id), { withLines: true });
+      exportLines(all, filterCaption(filter, q, from, to), detail);
+    } catch (e) {
+      setError(e.message || "Couldn't build the line export.");
+    }
+    setExportingLines(false);
   };
 
   // Resends the approval-link email for every ticket still awaiting
@@ -472,7 +502,21 @@ export function BillingTrackerScreen({ onOpenTicket, currentUser }) {
               every ticket, which is worse than no spreadsheet at all. Same
               gate as the column and the tiles. */}
           {priced && (
-            <Btn variant="secondary" onClick={exportCurrentFilter} disabled={exporting || !total}>{exporting ? "Building…" : "Export to accounting"}</Btn>
+            <Btn variant="secondary" onClick={exportCurrentFilter} disabled={exporting || exportingLines || !total}
+              title="One row per ticket, with the subtotal, the GST and the grand total.">
+              {exporting ? "Building…" : "Export to accounting"}
+            </Btn>
+          )}
+          {/* The detail behind the same filter. Same gate and the same reason:
+              a line export from a role the database hands null money to would
+              be a spreadsheet of rates nobody can see. It is the slower
+              button — every matching ticket's charges, not just its total — so
+              only one export runs at a time. */}
+          {priced && (
+            <Btn variant="secondary" onClick={exportCurrentLines} disabled={exporting || exportingLines || !total}
+              title="One row per charge on every ticket the filter matches. No GST — that is on the ticket export.">
+              {exportingLines ? "Building…" : "Export lines"}
+            </Btn>
           )}
           {/* Behind the same price gate as every other money control here.
               The email this sends is a ticket summary with the amount on it,
@@ -691,7 +735,12 @@ export function BillingTrackerScreen({ onOpenTicket, currentUser }) {
                       </div>
                     )}
                     {t.status === "Invoiced" && t.invoicedAt && (
-                      <div style={{ fontSize: 11, color: "color-mix(in srgb, var(--color-text) 55%, transparent)" }}>{shortDate(t.invoicedAt)}</div>
+                      <div style={{ fontSize: 11, color: "color-mix(in srgb, var(--color-text) 55%, transparent)" }}>
+                        {/* The number the bill went out under — what a client's
+                            accounts department quotes back on the phone. */}
+                        {t.invoiceNumber != null && <span className="tabular">Invoice #{t.invoiceNumber} · </span>}
+                        {shortDate(t.invoicedAt)}
+                      </div>
                     )}
                   </td>
                   <td>

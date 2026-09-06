@@ -20,7 +20,8 @@ import {
   money, todayLocal, tabList, UNIVERSAL_TABS,
   primaryContact, crewRoleFor, seesPrices, ROLE_PRESETS, ticketStatusWriteRefusal,
   fileSize, reportFileRefusal, MAX_REPORT_BYTES, saneQuantityCeiling,
-  SANE_QUANTITY_DEFAULT, SEED_HAZARDS
+  SANE_QUANTITY_DEFAULT, SEED_HAZARDS,
+  gstOn, gstRateOf, gstLabel, GST_RATE_DEFAULT
 } from "./data.js";
 
 // ── money ────────────────────────────────────────────────────────────────
@@ -287,6 +288,59 @@ test("the sanity ceiling is per unit, with a default for anything new", () => {
   // A unit added to the rate card tomorrow still gets an answer.
   assert.equal(saneQuantityCeiling("box"), SANE_QUANTITY_DEFAULT);
   assert.equal(saneQuantityCeiling(undefined), SANE_QUANTITY_DEFAULT);
+});
+
+// ── the client's GST rate ────────────────────────────────────────────────
+// Not every client pays GST. The rate is a percent on the client's own row,
+// and the two ways it can go wrong are opposite: charging an exempt client
+// tax they don't owe, and reading a missing rate as exempt and billing an
+// ordinary client 5% short. Silence has to mean 5%.
+
+test("a client with no rate on file is billed the ordinary 5%", () => {
+  assert.equal(gstRateOf(undefined), GST_RATE_DEFAULT);
+  assert.equal(gstRateOf(null), GST_RATE_DEFAULT);
+  assert.equal(gstRateOf(""), GST_RATE_DEFAULT);
+  // Nothing outside 0–100 is a tax rate.
+  assert.equal(gstRateOf(-1), GST_RATE_DEFAULT);
+  assert.equal(gstRateOf(101), GST_RATE_DEFAULT);
+  assert.equal(gstRateOf("not a rate"), GST_RATE_DEFAULT);
+  // numeric(5,2) comes back from PostgREST as a string.
+  assert.equal(gstRateOf("0"), 0);
+  assert.equal(gstRateOf("5.00"), 5);
+});
+
+test("gstOn with no rate given still charges 5%", () => {
+  assert.equal(gstOn(100), 5);
+  assert.equal(gstOn(100, GST_RATE_DEFAULT), 5);
+  assert.equal(gstOn(0), 0);
+});
+
+test("an exempt client is charged nothing, not a rounding of nothing", () => {
+  assert.equal(gstOn(1234.56, 0), 0);
+  assert.equal(gstOn(0.01, 0), 0);
+});
+
+test("the half-cent rounds up at every rate, so the company is not short", () => {
+  // $0.70 at 5% is 3.5 cents. Rounding the subtotal to cents first is what
+  // makes it 4 rather than the 3 that float arithmetic on dollars gives.
+  assert.equal(gstOn(0.70), 0.04);
+  assert.equal(gstOn(2.90), 0.15);
+  // A rate the office might type on a client that pays HST instead.
+  assert.equal(gstOn(0.70, 13), 0.09);
+  assert.equal(gstOn(100, 13), 13);
+});
+
+test("a missing rate is charged, never quietly exempted", () => {
+  assert.equal(gstOn(100, null), 5);
+  assert.equal(gstOn(100, undefined), 5);
+});
+
+test("the rate is written so a technician can tell exempt from broken", () => {
+  assert.equal(gstLabel(5), "GST 5%");
+  assert.equal(gstLabel("5.00"), "GST 5%");
+  assert.equal(gstLabel(4.5), "GST 4.5%");
+  assert.equal(gstLabel(0), "GST exempt");
+  assert.equal(gstLabel(null), "GST 5%");
 });
 
 // ── SEED_HAZARDS ─────────────────────────────────────────────────────────

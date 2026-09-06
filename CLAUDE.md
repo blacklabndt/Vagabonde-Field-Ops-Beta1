@@ -32,7 +32,19 @@ Cloudflare Worker `solitary-snowflake-ee22` (assets + the `/approve` and
   re-point the trigger before anything else — HANDOVER.md's Path B says how. An unshipped
   DB fix waits as a draft under `supabase/handover/` (probes beside it) —
   a draft, not history, until it is applied and filed under migrations.
-  Nothing is waiting there now. The latest two are
+  Nothing is waiting there now. The latest are
+  `20260906154840_an_invoice_has_a_number.sql` — `tickets.invoice_number`
+  from `invoice_number_seq` (starts at 1000, `authenticated` has no USAGE),
+  stamped only by `mark_tickets_invoiced` and kept across an un-invoice; the
+  tickets insert policy pins it null; `app_settings.invoice_terms`,
+  `invoice_remit_to`, `business_number`; and the merged `search_tickets`
+  carrying `client_gst_rate`, `invoice_number` and `client_id` — and
+  `20260906154650_a_client_may_be_gst_exempt.sql` — `clients.gst_rate`
+  (percent, default 5, not null, 0–100), guarded per column by the
+  `clients_guard_update` trigger so only an Admin changes it (the clients
+  update policy is a tab test a Helper passes). `gstOn(subtotal, rate)` in
+  data.js and `invoiceTotals` in invoice.ts both take the client's rate; a
+  missing rate reads as 5, never as exempt. Before them,
   `20260906143757_the_office_hears_about_failures.sql` — the pg_cron job
   `admin-digest-daily` (13:00 UTC) calling the `admin-digest` function,
   which mails every active Admin only when something needs attention — and
@@ -86,7 +98,8 @@ Cloudflare Worker `solitary-snowflake-ee22` (assets + the `/approve` and
 - RLS changes get probed live with `set_config('request.jwt.claims', …)`
   role simulation before they ship. Permissive policies OR together — a
   new `FOR ALL` policy can silently void an older condition.
-- Money: integer-cents rounding (`gstOn` in `data.js`); never float-sum.
+- Money: integer-cents rounding (`gstOn(subtotal, ratePercent)` in `data.js`,
+  the rate from the client's row via `gstRateOf`); never float-sum.
 - Rates come from the Rate admin screen, never hardcoded. Billing is per
   truck, not per technician. PO = AFE. Hotel = subsistence. solo/soloOt
   are timesheet-only and never billed.

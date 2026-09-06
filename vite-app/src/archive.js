@@ -11,7 +11,7 @@
 // it (`db`) by the dialog, and the tests never load config.js's browser-only
 // env.
 
-import { money, gstOn } from "./data.js";
+import { money, gstOn, gstRateOf } from "./data.js";
 import { makeZip, safeFilename, crc32 } from "./zip.js";
 // Only for the switch that turns the offline fallback off while the archive
 // reads — no env, nothing browser-only, so the tests still load this module.
@@ -151,10 +151,15 @@ export function jobDetailsText({ job, record = {}, tickets = [], jhas = [], repo
 
   out.push("", `TICKETS (${tickets.length})`);
   if (!tickets.length) out.push("  none");
+  // The client's own GST rate, which is zero for an exempt client. A job
+  // archived out of an older backup has no rate on it and is read as the
+  // ordinary 5% — the archive is the record of what was billed, and 5% is
+  // what was billed before any client had a rate of their own.
+  const gstRate = gstRateOf(job.clientGstRate);
   for (const t of tickets) {
     const sub = cents(t.total);
-    const gst = cents(gstOn(dollars(sub)));
-    out.push(`  ${t.id} · ${t.workDate || ""} · ${t.status} · ${money(dollars(sub))} before GST · GST ${money(dollars(gst))} · total ${money(dollars(sub + gst))}`);
+    const gst = cents(gstOn(dollars(sub), gstRate));
+    out.push(`  ${t.id} · ${t.workDate || ""} · ${t.status} · ${money(dollars(sub))} before GST · ${gstRate === 0 ? "GST exempt" : `GST ${money(dollars(gst))}`} · total ${money(dollars(sub + gst))}`);
     const who = [t.tech ? `Technician ${t.tech}` : "", t.clientContact ? `Client rep ${t.clientContact}` : "", t.contractorContact ? `Contractor rep ${t.contractorContact}` : ""].filter(Boolean).join(" · ");
     if (who) out.push(`    ${who}`);
     if (t.approvedAt) out.push(`    Approved by ${t.approvedBy || "—"} on ${fmtWhen(t.approvedAt)}${t.sentTo ? ` (link sent to ${t.sentTo})` : ""}`);

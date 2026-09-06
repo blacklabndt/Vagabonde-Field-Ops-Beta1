@@ -1,8 +1,18 @@
 import React, { useState, useEffect, useRef } from "react";
-import { STANDARD_RATE_LINES, money } from "../data.js";
+import { STANDARD_RATE_LINES, money, gstRateOf, GST_RATE_DEFAULT } from "../data.js";
 import { Db, DEFAULT_SCHEDULE } from "../db.js";
 import { Toasts } from "../toastBus.js";
 import { Blueprint, Btn, useDebounced, TagX, Field, Dialog, ErrorBox, Switch, NumField, useMissingFields, SearchSelect, TableScroll, Loading } from "./common.jsx";
+
+// A GST rate as it comes out of a box somebody is typing in, clamped to what
+// the column will hold. Not gstRateOf: that reads anything outside 0-100 as
+// "no rate given" and answers 5, which is right for a row read back from the
+// database and wrong here — a typed 101 would snap to 5% with nothing on
+// screen to say it had. Clamped, the box shows the ceiling it hit.
+const typedGstRate = value => {
+  const n = Number(value);
+  return Number.isFinite(n) ? Math.min(100, Math.max(0, n)) : GST_RATE_DEFAULT;
+};
 
 export function RateAdminScreen() {
   const [clients, setClients] = useState([]);
@@ -287,6 +297,45 @@ export function RateAdminScreen() {
     setJustPublished(false);
     setSaveState("saving");
     persistRate(id, rate);
+  };
+
+  // ── The client's GST rate ──────────────────────────────────────────────
+  // Not a rate-card line: it is the tax on whatever the card prices, so it
+  // stays editable while the client follows the house card, and it applies
+  // to their own card just the same. Zero is exempt — a band, a Crown
+  // agency, a client billing through an exempt entity — and the office was
+  // deleting the GST line off those tickets by hand every time.
+  //
+  // Written as you type through the same debounce and the same saving
+  // indicator as a rate, so there is nothing extra to press and nothing to
+  // forget. The database refuses the column to anyone but an Admin
+  // (private.guard_client_update), and the refusal is what lands in the
+  // error box.
+  const clientGst = gstRateOf(client && client.gst_rate);
+  const persistGst = useDebounced(async (id, rate) => {
+    beginWrite();
+    try {
+      await Db.updateClientGst(id, rate);
+      endWrite();
+    } catch (e) {
+      anyFailed.current = true;
+      inFlight.current--;
+      setSaveState("failed");
+      setError(e.message || "Couldn't save that GST rate.");
+      // Back to what the database actually holds, so the box never shows a
+      // rate this client's tickets are not being billed at.
+      await loadClients();
+    }
+  }, 500);
+  const setClientGst = rate => {
+    if (!client) return;
+    // A tax rate above 100% is a typo, and the column's check constraint
+    // would refuse it after the round trip. Caught here so the box shows
+    // the figure that will be saved.
+    const next = typedGstRate(rate);
+    setClients(cs => cs.map(c => c.id === client.id ? { ...c, gst_rate: next } : c));
+    setSaveState("saving");
+    persistGst(client.id, next);
   };
 
   const addCustom = async (kind, label, unit) => {
@@ -597,6 +646,20 @@ export function RateAdminScreen() {
                     </tr>
                   ))}
                   {!isDefault && <tr><td colSpan={5} style={{ color: "color-mix(in srgb, var(--color-text) 55%, transparent)" }}>Minimum call-out — {client.minimum_callout || "not set"}</td></tr>}
+                  {!isDefault && (
+                    <tr><td colSpan={5} style={{ color: "color-mix(in srgb, var(--color-text) 55%, transparent)" }}>
+                      <span style={{ display: "flex", alignItems: "center", gap: 8, flexWrap: "wrap" }}>
+                        <span>GST on their tickets</span>
+                        <NumField value={clientGst} step="0.01" onChange={setClientGst}
+                          aria-label={`GST rate for ${client.name}, in percent`}
+                          style={{ width: 78 }} />
+                        <span>%</span>
+                        <span>{clientGst === 0
+                          ? "Exempt — their tickets and invoices carry no GST."
+                          : "0 = exempt. It applies to every ticket priced from now on."}</span>
+                      </span>
+                    </td></tr>
+                  )}
                 </tbody>
               </table></TableScroll>
               {!following && (
@@ -878,7 +941,10 @@ function NewOverrideDialog({ onClose, onCreated }) {
 }
 
 function NewClientDialog({ onClose, onCreated }) {
-  const [form, setForm] = useState({ name: "", minimumCallout: "" });
+  // The GST rate starts at the ordinary 5%: an exempt client is the rare
+  // one, and a client added with 0 by accident is undercharged tax on every
+  // ticket until somebody notices.
+  const [form, setForm] = useState({ name: "", minimumCallout: "", gstRate: GST_RATE_DEFAULT });
   const [error, setError] = useState("");
   const [saving, setSaving] = useState(false);
   const set = (k, v) => setForm(p => ({ ...p, [k]: v }));
@@ -906,6 +972,16 @@ function NewClientDialog({ onClose, onCreated }) {
       <Field label="Minimum call-out">
         <input className="input" value={form.minimumCallout} onChange={e => set("minimumCallout", e.target.value)} placeholder="4 h + mobilization" />
       </Field>
+      {/* Almost every client pays 5%; an exempt one — a band, a Crown agency
+          — is entered as 0 here rather than having the GST line deleted off
+          each of their tickets afterwards. */}
+      <Field label="GST %">
+        <NumField value={form.gstRate} step="0.01" style={{ width: 78 }}
+          onChange={v => set("gstRate", typedGstRate(v))} />
+      </Field>
+      <div style={{ fontSize: 12, color: "color-mix(in srgb, var(--color-text) 60%, transparent)", marginTop: -6, marginBottom: 8 }}>
+        0 = exempt. Almost every client pays 5%.
+      </div>
       <div style={{ fontSize: 12, color: "color-mix(in srgb, var(--color-text) 60%, transparent)" }}>
         The client starts on the house card — their tickets price at Default rates until the switch on their rate card is turned off to give them their own.
       </div>
