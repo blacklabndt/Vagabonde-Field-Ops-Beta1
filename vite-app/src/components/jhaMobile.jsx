@@ -4,6 +4,7 @@ import { Db } from "../db.js";
 import { Blueprint, Btn, CheckBox, TagX, Field, Dialog, ErrorBox, Switch, splitContact, hazardTagVariant, NoJobSelected, ConnectionBar, QueuedPanel, useMissingFields, RequiredLeft } from "./common.jsx";
 import { OfflineQueue } from "../offlineQueue.js";
 import { OfflineCache } from "../offlineCache.js";
+import { hasNoSerials, trimmedSerials, isMissingSetOwnDosimetry } from "../dosimetryPrompt.js";
 
 // The JHA (FLHA) — filed at the start of the day, closed out at the end.
 //
@@ -34,6 +35,13 @@ const BLANK_EQUIP = {
 // because the assessment still has to exist as the record of that reading.
 const RED_SURVEY_LIMIT_MR = 200;
 const BLANK_KIT = { unit: "", idCode: "", tld: "", drd: "", alarm: "" };
+
+// Who has already been offered the "keep these serials" panel this session.
+// Module-level rather than component state because the builder is unmounted
+// every time the tech leaves the screen, and an offer that came back on every
+// job would be nagging rather than helping. Keyed by profile id, so a shared
+// tablet asks the next person in their own right.
+const dosimetryAsked = new Set();
 
 const PPE_CHECKS = [
   { key: "hardHat", label: "Hard hat" },
@@ -106,6 +114,20 @@ export function JhaBuilderScreen({ job, jobRecord, contacts, currentUser, onSubm
   const editW2 = next => { w2Touched.current = true; setW2(next); };
   const w2For = useRef("");
   const [equipment, setEquipment] = useState([]);
+  // Whether the equipment list has answered. An empty array is both "nothing
+  // assigned" and "hasn't landed yet", and the offer below must not be made
+  // off a kit that is only half-derived — a tech with an assigned TLD would
+  // be told their profile is empty for the second or two before the fetch
+  // resolves.
+  const [equipReady, setEquipReady] = useState(false);
+  // The one-off offer to put this worker's serials on their own profile.
+  // `keepable` goes false when the database has no set_own_dosimetry yet:
+  // pressing again would fail the same way, so the panel keeps the message
+  // and drops the button.
+  const [askDosimetry, setAskDosimetry] = useState(false);
+  const [keeping, setKeeping] = useState(false);
+  const [keepMsg, setKeepMsg] = useState("");
+  const [keepable, setKeepable] = useState(true);
 
   // ── Don't lose a half-built assessment ───────────────────────────────
   // The ticket screen keeps a copy of what is being typed; this didn't, and
@@ -239,7 +261,12 @@ export function JhaBuilderScreen({ job, jobRecord, contacts, currentUser, onSubm
   };
 
   useEffect(() => {
-    Db.listEquipment().then(setEquipment).catch(e => console.error("Couldn't load equipment assignments:", e.message));
+    // Ready either way: a list that failed to load leaves the profile's own
+    // columns as the whole story of this person's kit, which is the honest
+    // basis for asking them about it.
+    Db.listEquipment()
+      .then(list => { setEquipment(list); setEquipReady(true); })
+      .catch(e => { setEquipReady(true); console.error("Couldn't load equipment assignments:", e.message); });
   }, []);
 
   // Start each hazard at whatever this person rated it last time. Merged
@@ -275,6 +302,56 @@ export function JhaBuilderScreen({ job, jobRecord, contacts, currentUser, onSubm
     if (me) setW1(kitOf(me, equipment));
   }, [people, equipment, currentUser.id]);
 
+  // Offer, once, to put the serials on the profile of whoever is filing.
+  // A technician with none of the three cannot file at all until they type
+  // one, and nothing they can reach has ever written it back — so the same
+  // three numbers were typed again on the next job, and the one after. Asked
+  // only when both lists have answered and the kit really is empty, and only
+  // once per person per session (dosimetryAsked, above): the panel is a help,
+  // not a gate, and the form works exactly as before if it is dismissed.
+  useEffect(() => {
+    if (!equipReady || dosimetryAsked.has(currentUser.id)) return;
+    const me = people.find(p => p.id === currentUser.id);
+    if (!me || !hasNoSerials(kitOf(me, equipment))) return;
+    dosimetryAsked.add(currentUser.id);
+    setAskDosimetry(true);
+  }, [people, equipment, equipReady, currentUser.id]);
+
+  // What the button in that panel does. The serials it keeps are the ones on
+  // the form — worker (1)'s boxes are the same three fields, so there is
+  // nothing separate to type and nothing to fall out of step.
+  const keepDosimetry = async () => {
+    const serials = trimmedSerials(w1);
+    if (!serials.tld && !serials.drd && !serials.alarm) return;
+    setKeeping(true);
+    setKeepMsg("");
+    try {
+      await Db.setOwnDosimetry(serials);
+    } catch (e) {
+      setKeeping(false);
+      if (isMissingSetOwnDosimetry(e)) {
+        // This database has not had the migration. Nothing is lost: what is
+        // typed still files with this assessment; it just cannot be kept
+        // from here yet, and saying who can is the useful half.
+        setKeepable(false);
+        setKeepMsg("This app can't put serials on a profile here yet. They'll go on this assessment as typed — ask an admin to add them to your profile so they're there next time.");
+        return;
+      }
+      setKeepMsg((e.message || "Couldn't save them to your profile.") + " They'll still go on this assessment as typed.");
+      return;
+    }
+    // The crew list is where the kit for the rest of this session is derived
+    // from, so the copy this screen holds gets the new serials too. The
+    // `currentUser` prop is App.jsx's and is left alone — nothing here reads
+    // serials off it, and reaching into it from a screen would be a second
+    // owner for the same fact.
+    setPeople(prev => prev.map(p => p.id === currentUser.id
+      ? { ...p, tld_serial: serials.tld || null, drd_serial: serials.drd || null, alarm_serial: serials.alarm || null }
+      : p));
+    setKeeping(false);
+    setAskDosimetry(false);
+  };
+
   useEffect(() => {
     if (helperId !== w2For.current) { w2For.current = helperId; w2Touched.current = false; }
     if (w2Touched.current) return;
@@ -306,6 +383,10 @@ export function JhaBuilderScreen({ job, jobRecord, contacts, currentUser, onSubm
   // typed — a comma decimal included ("0,5" is half a milliroentgen).
   const surveyMr = Number(String(equip.redSurveyMr).replace(",", "."));
   const surveyOverLimit = surveyMr > RED_SURVEY_LIMIT_MR;
+
+  // Whether there is anything to keep yet. The offer's button waits on the
+  // same condition filing does — one serial, whichever they're wearing.
+  const w1HasSerial = !hasNoSerials(w1);
 
   // The four conditions submit() refuses on, counted as the form is filled
   // in rather than reported after the button is pressed. Kept in step with
@@ -557,6 +638,37 @@ export function JhaBuilderScreen({ job, jobRecord, contacts, currentUser, onSubm
 
           <JhaSection title="Nuclear energy worker (1)" note="Technician" />
           <div style={{ fontSize: 13, fontFamily: "var(--font-heading)", fontWeight: 600 }}>{currentUser.name}</div>
+          {/* Inline, above the boxes it is talking about, and never a dialog:
+              this is an offer, and a modal in front of a form somebody is
+              filling in on a lease is an interruption. The three fields are
+              worker (1)'s own — there is nothing extra to type here. */}
+          {askDosimetry && (
+            <div style={{
+              fontSize: 12, padding: "8px 10px",
+              border: "1px solid var(--color-accent-700)",
+              background: "color-mix(in srgb, var(--color-accent) 8%, transparent)",
+              display: "flex", flexDirection: "column", gap: 8
+            }}>
+              <span>No dosimeter serials are on your profile yet. Enter your TLD, DRD and alarm serials once and the app will keep them for next time.</span>
+              {keepMsg && <span style={{ color: "var(--color-accent-700)" }}>{keepMsg}</span>}
+              <div style={{ display: "flex", gap: 8, alignItems: "center", flexWrap: "wrap" }}>
+                {keepable && (
+                  <Btn variant="secondary" onClick={keepDosimetry} disabled={keeping || !w1HasSerial}>
+                    {keeping ? "Keeping…" : "Keep these on my profile"}
+                  </Btn>
+                )}
+                <button type="button" onClick={() => setAskDosimetry(false)}
+                  style={{ background: "none", border: "none", textDecoration: "underline", cursor: "pointer", color: "inherit", font: "inherit", padding: 0 }}>
+                  {keepable ? "Not now" : "Close"}
+                </button>
+                {keepable && !w1HasSerial && (
+                  <span style={{ fontSize: 11, color: "color-mix(in srgb, var(--color-text) 55%, transparent)" }}>
+                    Fill in at least one serial below first.
+                  </span>
+                )}
+              </div>
+            </div>
+          )}
           <WorkerKit value={w1} onChange={editW1} missing={miss.is} onFixed={miss.clear} />
 
           <JhaSection title="Nuclear energy worker (2)" note="Helper — if one is on site" />

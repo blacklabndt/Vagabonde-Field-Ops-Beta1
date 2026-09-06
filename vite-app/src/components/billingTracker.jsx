@@ -1,9 +1,10 @@
 import React, { useState, useEffect, useRef } from "react";
-import { todayLocal, money, seesPrices, withinDays } from "../data.js";
+import { todayLocal, money, seesPrices } from "../data.js";
 import { Db } from "../db.js";
-import { Blueprint, Btn, TableScroll, StatusTag, TagX, ErrorBox, downloadCsv, emailIn, RowsPerPage, useRowsPerPage } from "./common.jsx";
+import { Blueprint, Btn, TableScroll, StatusTag, TagX, ErrorBox, Dialog, downloadCsv, emailIn, RowsPerPage, useRowsPerPage } from "./common.jsx";
 import { Toasts } from "../toastBus.js";
 import { runSendPool } from "../sendPool.js";
+import { planChase } from "../chasePlan.js";
 
 const TRACKER_FILTERS = ["All", "Draft", "Awaiting approval", "Approved", "Invoiced", "Over 7 days"];
 
@@ -16,6 +17,11 @@ const TRACKER_FILTERS = ["All", "Draft", "Awaiting approval", "Approved", "Invoi
 const CHASE_WORKERS = 3;
 const CHASE_INTERVAL_MS = 500;
 const CHASE_LIST_LIMIT = 20;
+// How many of the tickets about to be emailed the confirm dialog names one by
+// one. Forty is about as much as anyone reads before scrolling past it, and
+// the point of the list is to catch a wrong address in it — a thousand lines
+// hides that as thoroughly as no list at all. The rest are counted.
+const CHASE_DIALOG_LIMIT = 40;
 
 const shortDate = iso => iso ? new Date(iso).toLocaleDateString("en-CA", { day: "2-digit", month: "short" }) : "";
 
@@ -69,6 +75,23 @@ export function BillingTrackerScreen({ onOpenTicket, currentUser }) {
   const [exporting, setExporting] = useState(false);
   const [chasing, setChasing] = useState(false);
   const [chaseResult, setChaseResult] = useState("");
+  // What the chase is about to do, held while the office reads it. Null when
+  // no dialog is open; the buckets are computed from the real list before the
+  // dialog opens, so the numbers on it are the ones that will happen.
+  const [chaseAsk, setChaseAsk] = useState(null);
+  const [chasePreparing, setChasePreparing] = useState(false);
+  // Where each unsigned ticket's approval link would go — id → address, or
+  // "" for a ticket with nobody to send to. Null until the lookup answers,
+  // and it can stay null (a failed lookup): a row that doesn't know still
+  // offers the button and finds the address when it is pressed, because
+  // "we couldn't check" must never render as "there is no rep on file".
+  const [contacts, setContacts] = useState(null);
+  // The ticket a single resend is working on, and what to say on its row
+  // afterwards — the function's own words on a refusal, which is the whole
+  // value of showing it there rather than in the page-wide error box.
+  const [resendId, setResendId] = useState("");
+  const [resendAsk, setResendAsk] = useState(null);
+  const [rowNotes, setRowNotes] = useState({});
 
   // The four tiles are computed over every ticket, independent of the page
   // showing below — loaded on mount and refreshed whenever the visible page
@@ -103,6 +126,10 @@ export function BillingTrackerScreen({ onOpenTicket, currentUser }) {
       setTotal(t);
       setFilteredTotal(ft == null ? null : ft);
       setPicked({});
+      // The per-row notes belong to the rows that were on screen — a resend
+      // refusal left over from page 2 would otherwise reappear against
+      // whatever ticket takes that id's place in the next filter.
+      setRowNotes({});
     } catch (e) {
       if (mine !== loadSeq.current) return;
       setError(e.message || "Couldn't reach the database. Check your connection and reload.");
@@ -126,6 +153,28 @@ export function BillingTrackerScreen({ onOpenTicket, currentUser }) {
     return () => clearTimeout(t);
   }, [filter, q, from, to, page, pageSize]);
 
+  // Where each unsigned ticket's approval link would go, read once for the
+  // screen rather than once per row — and it is the same read the bulk chase
+  // makes, resolved the same way, so a row's "Resend link" and "Chase all
+  // unsigned" can never disagree about a ticket's address. Asked for only
+  // when a row on screen could use it, and only for a role allowed to send.
+  const contactsAsked = useRef(false);
+  const loadUnsignedContacts = async () => {
+    contactsAsked.current = true;
+    const list = await Db.listUnsignedTicketContacts();
+    setContacts(Object.fromEntries(list.map(t => [t.id, emailIn(t.contactLabel)])));
+    return list;
+  };
+  useEffect(() => {
+    if (!priced || contactsAsked.current) return;
+    if (!rows.some(r => r.status === "Awaiting approval")) return;
+    // A lookup that failed is not the page's error: the rows keep their
+    // button and find the address when it is pressed. Saying "no client
+    // email on file" because a read timed out would be a lie about somebody
+    // else's record.
+    loadUnsignedContacts().catch(() => {});
+  }, [priced, rows]);
+
   // Integer-cents sum, never a running float total — the house money rule
   // (see gstOn in data.js). Summing dollars directly drifts a half-cent low
   // at certain boundaries; summing cents and dividing once is exact.
@@ -146,6 +195,71 @@ export function BillingTrackerScreen({ onOpenTicket, currentUser }) {
     }
   };
   const flaggedCount = rows.filter(r => r.chasedAt).length;
+
+  // One ticket's link, again. The everyday office call — a rep phones to say
+  // the email is gone — used to mean leaving the tracker, finding the job,
+  // opening the ticket and sending from there. This sends exactly what the
+  // bulk chase sends, to the address the bulk chase would use, for the one
+  // ticket being asked about.
+  const noteOn = (id, text, bad) => setRowNotes(p => ({ ...p, [id]: text ? { text, bad: !!bad } : null }));
+
+  // True only when the lookup answered and this ticket has nobody to send to.
+  // A lookup that hasn't answered — or failed — is not an answer, and the row
+  // keeps its button rather than telling the office there is no rep on file.
+  const hasNoAddress = id => !!contacts && Object.prototype.hasOwnProperty.call(contacts, id) && !contacts[id];
+
+  // The address a ticket's link goes to: off the screen's map when the
+  // lookup answered, otherwise off the ticket itself — the same
+  // client_contact field the map is built from, so the two cannot differ.
+  const addressFor = async id => {
+    if (contacts && Object.prototype.hasOwnProperty.call(contacts, id)) return contacts[id];
+    const t = await Db.getTicket(id);
+    return emailIn(t && t.client_contact ? t.client_contact.name : "");
+  };
+
+  // Ask before it goes, with the address on the dialog: a link mailed to the
+  // wrong rep is not something the office can call back.
+  const askResend = async t => {
+    noteOn(t.id, "");
+    try {
+      // Nothing is marked busy here: this looks the address up (usually off
+      // the map, with no read at all) and opens the question. The button is
+      // disabled by the send itself, which is the part that must not run
+      // twice.
+      const to = await addressFor(t.id);
+      if (to) setResendAsk({ id: t.id, to });
+      else noteOn(t.id, "No client email on file — add a rep to the job, then resend.", true);
+    } catch (e) {
+      noteOn(t.id, e.message || "Couldn't work out where this ticket's link would go.", true);
+    }
+  };
+
+  const resendLink = async ({ id, to }) => {
+    setResendAsk(null);
+    setResendId(id);
+    try {
+      await Db.sendTicketApproval({ ticketId: id, to });
+      // Recorded on the ticket the way the bulk chase records it: best
+      // effort, and after the send, because a flag that didn't save is a
+      // cosmetic loss and must never turn a delivered email into a failure.
+      // Muted because db.js announces both writes and the office pressed one
+      // button — "Approval sent" is the answer, "Flagged as chased" is
+      // bookkeeping.
+      Toasts.mute();
+      try { await Db.markTicketChased(id).catch(() => {}); } finally { Toasts.unmute(); }
+      const stamp = new Date().toISOString();
+      // The query tag goes with it: send-ticket-approval clears queried_at on
+      // every resend, so leaving it on the row would have the office chasing
+      // a question the server has already closed.
+      setRows(p => p.map(r => r.id === id ? { ...r, chasedAt: stamp, queriedAt: null, queryText: "", queryBy: "" } : r));
+      noteOn(id, `Link resent to ${to}.`);
+    } catch (e) {
+      // The function's own words. "That ticket is already approved" is the
+      // answer the office needs; rewording it would hide which refusal it was.
+      noteOn(id, e.message || "Couldn't resend that link.", true);
+    }
+    setResendId("");
+  };
 
   // Approved → Invoiced (and back, for a slip). Admin-only in the database;
   // the tracker is where the office decides a ticket has been billed, and
@@ -206,36 +320,33 @@ export function BillingTrackerScreen({ onOpenTicket, currentUser }) {
   // re-render is not what makes the answer true.
   const stopChase = useRef(false);
   const [stopping, setStopping] = useState(false);
-  const chaseAllUnsigned = async () => {
-    // One tap emails every client with an unsigned ticket, and the only undo
-    // is a phone call — so it asks first, like every other outward action.
-    const n = stats && stats.unsigned ? stats.unsigned.count : 0;
-    if (!confirm(`Email an approval reminder for ${n} unsigned ticket${n === 1 ? "" : "s"} now? Each client rep on file gets a fresh link.`)) return;
+  // Reads the unsigned tickets and works out the buckets — nothing is sent
+  // here. One tap emails every client with an unsigned ticket and the only
+  // undo is a phone call, so the office sees who is about to be written to,
+  // and who is being left alone and why, before it decides. The native
+  // confirm this replaced named a count and no addresses at all.
+  const askChase = async () => {
+    setChasePreparing(true);
+    setChaseResult("");
+    setError("");
+    try {
+      const list = await loadUnsignedContacts();
+      setChaseAsk(planChase(list, { emailIn }));
+    } catch (e) {
+      setError(e.message || "Couldn't read the unsigned tickets.");
+    }
+    setChasePreparing(false);
+  };
+
+  const runChase = async plan => {
+    const { due, queried, recent, noEmail } = plan;
+    setChaseAsk(null);
     setChasing(true);
     setStopping(false);
     stopChase.current = false;
     setChaseResult("");
     setError("");
     try {
-      const list = await Db.listUnsignedTicketContacts();
-      let skipped = 0, recent = 0, queried = 0;
-      // The buckets are decided before anything is sent, so the progress line
-      // counts what is actually going out rather than a total the office then
-      // watches stall on tickets nobody meant to chase.
-      const due = [];
-      for (const t of list) {
-        // A rep who pressed "Query this ticket" is waiting on the office,
-        // not on a reminder — and a resend clears the query, so chasing
-        // this one would rub out the question before anybody answered it
-        // and ask the same rep to sign the same figures again.
-        if (t.queriedAt) { queried++; continue; }
-        // Chased in the last three days is chased: a client nudged on
-        // Tuesday does not need the same email again on Thursday.
-        if (withinDays(t.chasedAt, 3)) { recent++; continue; }
-        const to = emailIn(t.contactLabel);
-        if (!to) { skipped++; continue; }
-        due.push({ id: t.id, to });
-      }
       setChaseResult(`Sending… 0 of ${due.length}`);
       // Muted around the pool: sendTicketApproval fires an "Approval sent"
       // toast per call, so chasing N tickets would stack N toasts over the
@@ -261,9 +372,9 @@ export function BillingTrackerScreen({ onOpenTicket, currentUser }) {
       } finally { Toasts.unmute(); }
       const parts = [`Sent to ${out.sent.length} of ${due.length}`];
       if (out.stopped) parts.push(`stopped — ${out.remaining} not attempted`);
-      if (queried) parts.push(`${queried} left alone — the client has a question open`);
-      if (recent) parts.push(`${recent} left alone — chased in the last 3 days`);
-      if (skipped) parts.push(`${skipped} skipped — no client email on file`);
+      if (queried.length) parts.push(`${queried.length} left alone — the client has a question open`);
+      if (recent.length) parts.push(`${recent.length} left alone — chased in the last 3 days`);
+      if (noEmail.length) parts.push(`${noEmail.length} skipped — no client email on file`);
       // Named, not just counted. "37 failed to send" is a number the office
       // can do nothing with; the ticket numbers are the ones somebody now has
       // to chase by phone.
@@ -309,9 +420,9 @@ export function BillingTrackerScreen({ onOpenTicket, currentUser }) {
               — so a Coordinator pressing this would have mailed every client
               a $0.00 approval request, one tap, no undo. */}
           {priced && (
-            <Btn variant="primary" onClick={chaseAllUnsigned} disabled={chasing || !(stats && stats.unsigned.count)}
+            <Btn variant="primary" onClick={askChase} disabled={chasing || chasePreparing || !(stats && stats.unsigned.count)}
               title="Resends the approval-link email to every ticket still awaiting signature.">
-              {chasing ? "Sending…" : "Chase all unsigned"}
+              {chasing ? "Sending…" : chasePreparing ? "Checking…" : "Chase all unsigned"}
             </Btn>
           )}
           {/* A run of four thousand emails has to be callable off — the office
@@ -467,12 +578,38 @@ export function BillingTrackerScreen({ onOpenTicket, currentUser }) {
                   </td>
                   <td>
                     {t.status === "Awaiting approval" && (
-                      flagged
-                        ? <TagX variant="outline" title={`Chased ${new Date(t.chasedAt).toLocaleString("en-CA")}`}>Chased {shortDate(t.chasedAt)}</TagX>
-                        : <Btn variant="secondary" onClick={() => flagChased(t.id)}
-                            title="Records that the client has been nudged about this ticket — it doesn't send anything.">
-                            Flag as chased
-                          </Btn>
+                      <div style={{ display: "flex", alignItems: "center", gap: 6, flexWrap: "wrap" }}>
+                        {flagged
+                          ? <TagX variant="outline" title={`Chased ${new Date(t.chasedAt).toLocaleString("en-CA")}`}>Chased {shortDate(t.chasedAt)}</TagX>
+                          : <Btn variant="secondary" onClick={() => flagChased(t.id)}
+                              title="Records that the client has been nudged about this ticket — it doesn't send anything.">
+                              Flag as chased
+                            </Btn>}
+                        {/* The rep phoned and the email is gone: send this one
+                            ticket's link again without leaving the tracker.
+                            Behind the same price gate as the bulk chase and
+                            for the same reason — the email carries the
+                            ticket's total, and the database hands a role that
+                            can't see prices a null one, so a Coordinator
+                            pressing this would mail the client a $0.00
+                            approval request. A ticket the lookup says has
+                            nobody to send to says so instead of offering a
+                            button that opens onto nowhere. */}
+                        {priced && (hasNoAddress(t.id)
+                          ? <span style={{ fontSize: 11, color: "color-mix(in srgb, var(--color-text) 55%, transparent)" }}>
+                              No client email on file
+                            </span>
+                          : <Btn variant="secondary" disabled={resendId === t.id} onClick={() => askResend(t)}
+                              title="Emails the client rep a fresh approval link. It replaces the link they already have.">
+                              {resendId === t.id ? "Sending…" : "Resend link"}
+                            </Btn>)}
+                      </div>
+                    )}
+                    {rowNotes[t.id] && (
+                      <div style={{ fontSize: 11, marginTop: 4, maxWidth: 320,
+                        color: rowNotes[t.id].bad ? "var(--color-accent-700)" : "color-mix(in srgb, var(--color-text) 60%, transparent)" }}>
+                        {rowNotes[t.id].text}
+                      </div>
                     )}
                     {t.status === "Draft" && <Btn variant="secondary" onClick={() => onOpenTicket(t)}>Finish</Btn>}
                     {t.status === "Approved" && (
@@ -503,6 +640,89 @@ export function BillingTrackerScreen({ onOpenTicket, currentUser }) {
           {flaggedCount > 0 && ` · ${flaggedCount} chased`}
         </div>
       </Blueprint>
+
+      {/* Both dialogs last, after the page they are asking about. Each names
+          the address the email is going to, because a link sent to the wrong
+          rep is not something the office can call back. */}
+      {resendAsk && (
+        <Dialog title={`Resend ticket ${resendAsk.id}?`} maxWidth={460} onClose={() => setResendAsk(null)}
+          actions={<>
+            <Btn variant="secondary" onClick={() => setResendAsk(null)}>Cancel</Btn>
+            <Btn variant="primary" onClick={() => resendLink(resendAsk)}>Resend link</Btn>
+          </>}>
+          <div style={{ fontSize: 14 }}>
+            Resend the approval link for {resendAsk.id} to <strong>{resendAsk.to}</strong>? This replaces the
+            link they already have.
+          </div>
+        </Dialog>
+      )}
+      {chaseAsk && (
+        <ChaseDialog plan={chaseAsk} onClose={() => setChaseAsk(null)} onSend={() => runChase(chaseAsk)} />
+      )}
     </div>
+  );
+}
+
+// What "Chase all unsigned" is about to do, said before it does it: which
+// tickets get an email and at which address, and which are being left alone
+// and why. The buckets are the chase's own (chasePlan.js), worked out from the
+// same list the pool will send from — this is the plan, not an estimate of it.
+//
+// It replaced a native confirm() that named a count and nothing else. That box
+// is unthemeable, and on iOS Safari it can be suppressed outright after a
+// couple in a row — an unaskable question in front of the largest outward act
+// in the app.
+function ChaseDialog({ plan, onClose, onSend }) {
+  const { due, queried, recent, noEmail } = plan;
+  const shown = due.slice(0, CHASE_DIALOG_LIMIT);
+  const rest = due.length - shown.length;
+  const Skip = ({ n, why }) => n ? <li style={{ marginBottom: 2 }}>{n} {n === 1 ? "ticket" : "tickets"} {why}</li> : null;
+  const skipped = queried.length + recent.length + noEmail.length;
+  return (
+    <Dialog title="Chase unsigned tickets" maxWidth={560} onClose={onClose}
+      actions={<>
+        <Btn variant="secondary" onClick={onClose}>{due.length ? "Cancel" : "Close"}</Btn>
+        {due.length > 0 && (
+          <Btn variant="primary" onClick={onSend}>Send {due.length} email{due.length === 1 ? "" : "s"}</Btn>
+        )}
+      </>}>
+      <div style={{ fontSize: 14 }}>
+        {due.length
+          ? "Each of these client reps gets a fresh approval link. It replaces the link they already have, so the old one stops working."
+          : "Nothing is due to be chased right now — every unsigned ticket is in one of the lists below."}
+      </div>
+
+      {due.length > 0 && (<>
+        <div style={{ fontSize: 13, color: "color-mix(in srgb, var(--color-text) 60%, transparent)" }}>
+          {due.length} due to be chased{rest > 0 ? `, ${shown.length} of them listed` : ""}:
+        </div>
+        <div style={{ maxHeight: 220, overflowY: "auto", border: "1px solid var(--color-neutral-300)", padding: "6px 10px", fontSize: 13 }}>
+          {shown.map(d => (
+            <div key={d.id} style={{ display: "flex", gap: 10, justifyContent: "space-between", padding: "2px 0" }}>
+              <span style={{ fontFamily: "var(--font-heading)", fontWeight: 600 }}>{d.id}</span>
+              <span style={{ color: "color-mix(in srgb, var(--color-text) 70%, transparent)", overflowWrap: "anywhere" }}>{d.to}</span>
+            </div>
+          ))}
+          {rest > 0 && (
+            <div style={{ padding: "4px 0 0", color: "color-mix(in srgb, var(--color-text) 55%, transparent)" }}>
+              and {rest} more
+            </div>
+          )}
+        </div>
+      </>)}
+
+      {skipped > 0 && (
+        <div style={{ fontSize: 13 }}>
+          <div style={{ color: "color-mix(in srgb, var(--color-text) 60%, transparent)" }}>
+            Left alone, and not emailed:
+          </div>
+          <ul style={{ margin: "4px 0 0 18px", padding: 0 }}>
+            <Skip n={queried.length} why="with a question open — a resend would rub the question out" />
+            <Skip n={recent.length} why="chased in the last 3 days" />
+            <Skip n={noEmail.length} why="with no client email on file" />
+          </ul>
+        </div>
+      )}
+    </Dialog>
   );
 }

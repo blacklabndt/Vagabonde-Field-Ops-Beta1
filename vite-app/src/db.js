@@ -3317,6 +3317,31 @@ export const Db = {
     invalidate("profiles");
   },
 
+  // A worker keeping their own three dosimeter serials, from the JHA
+  // builder. It cannot be an update on profiles: that policy wants the users
+  // tab, which the field does not hold, so this goes through the definer RPC
+  // that writes those three columns on auth.uid()'s own row and nothing
+  // else. All three are sent every time — the panel only appears for someone
+  // who has none of them, and a half-written profile asks the same question
+  // again on the next job.
+  //
+  // PGRST202 (or a message naming the function) means the migration has not
+  // been applied here yet; the caller decides what to do about that, so the
+  // error goes back untouched.
+  async setOwnDosimetry({ tld, drd, alarm }) {
+    const { data, error } = await sbClient.rpc("set_own_dosimetry", {
+      p_tld: String(tld || "").trim(),
+      p_drd: String(drd || "").trim(),
+      p_alarm: String(alarm || "").trim()
+    });
+    if (error) throw error;
+    // The crew list carries these serials, and the JHA builder derives a
+    // kit from it — a stale copy would put the old blanks back on the next
+    // assessment this session.
+    invalidate("profiles");
+    return data;
+  },
+
   async updateProfileTabs(id, tabs) {
     const { error } = await sbClient.from("profiles").update({ tab_access: tabs }).eq("id", id);
     if (error) throw error;

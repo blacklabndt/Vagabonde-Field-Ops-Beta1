@@ -1248,8 +1248,13 @@ export function App() {
       body = <BillingTrackerScreen onOpenTicket={openTicket} currentUser={currentUser} />;
       break;
     case "mytickets":
+      // Two shapes reach this: the half-entered strip hands over a job record
+      // it has already read (it needed the job number to name the row), and
+      // the open-JHA list knows only the number. Reading the row back by
+      // number when it is already in hand would be a network call the strip
+      // has no signal to make.
       body = <OpenTicketsScreen tickets={myTickets} loading={myTicketsLoading} onOpenTicket={openTicket} currentUser={currentUser}
-        openJhas={myOpenJhas} onOpenJob={j => openJobByNumber(j.job)} />;
+        openJhas={myOpenJhas} onOpenJob={j => (j.dbId ? openJob(j) : openJobByNumber(j.job))} />;
       break;
     case "timesheets":
       body = <TimesheetsScreen currentUser={currentUser} />;

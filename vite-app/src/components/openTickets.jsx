@@ -1,6 +1,9 @@
-import React, { useState } from "react";
+import React, { useState, useEffect, useMemo } from "react";
 import { Blueprint, Btn, TableScroll, StatusTag, RowsPerPage, useRowsPerPage } from "./common.jsx";
 import { money, seesPrices } from "../data.js";
+import { Db } from "../db.js";
+import { OfflineCache } from "../offlineCache.js";
+import { TICKET_WIP_PREFIX, JHA_WIP_PREFIX, jobDbIdsOf, buildWipRows, wipJobLabel, wipWhen } from "../wipDrafts.js";
 
 // Open tickets — the tickets this person still has to send out to the
 // client: their drafts, and nothing else. Per Kyle. A ticket that has gone
@@ -41,6 +44,74 @@ export function OpenTicketsScreen({ tickets, loading, onOpenTicket, currentUser,
   const safePage = Math.min(page, pageCount - 1);
   const pageRows = shown.slice(safePage * pageSize, safePage * pageSize + pageSize);
 
+  // ── Half-entered on this device ────────────────────────────────────────
+  // The ticket editor and the JHA builder each keep a recovery copy of what
+  // is being typed, and the app already thinks those copies matter enough to
+  // warn about at sign-out — but nothing listed them. After a refresh you
+  // land on Home, and the only way back to a day's welds was to remember
+  // which job they were on and open a ticket there again for the "Brought
+  // back…" banner to fire. This strip is the signpost.
+  //
+  // No filtering by person, and none needed: the cache belongs to one account
+  // at a time (OfflineCache's cache.owner / claimFor empties the store when
+  // anybody else signs in on the tablet), so every copy in it is this
+  // account's own.
+  const [wipEntries, setWipEntries] = useState([]);
+  const [wipJobs, setWipJobs] = useState({});
+  useEffect(() => {
+    let live = true;
+    (async () => {
+      const keys = [...await OfflineCache.keys(TICKET_WIP_PREFIX), ...await OfflineCache.keys(JHA_WIP_PREFIX)];
+      // The record's own saved-at stamp is the whole point of the read — the
+      // key list carries no times. A copy that has just gone (discarded on
+      // the screen it belongs to) reads back as nothing and is skipped.
+      const found = [];
+      for (const key of keys) {
+        const hit = await OfflineCache.read(key).catch(() => null);
+        if (hit) found.push({ key, at: hit.at || null });
+      }
+      if (live) setWipEntries(found);
+    })().catch(() => { if (live) setWipEntries([]); });
+    return () => { live = false; };
+    // Read once per visit to the screen. The copies are written by screens
+    // that are not on top of this one, so re-reading as the drafts reload
+    // would be a walk over IndexedDB for an answer that cannot have changed.
+  }, []);
+  useEffect(() => {
+    let live = true;
+    (async () => {
+      // One read per job, not per copy, and Db.getJob goes through the cache
+      // — so a job this device has already opened still names itself with no
+      // signal. A job it has never seen stays unnamed rather than blocking
+      // the row; buildWipRows says what is known of it instead.
+      for (const dbId of jobDbIdsOf(wipEntries)) {
+        try {
+          const job = await Db.getJob(dbId);
+          if (!live) return;
+          if (job) setWipJobs(prev => (prev[dbId] ? prev : { ...prev, [dbId]: job }));
+        } catch (e) { /* no signal and never cached, or the job is gone */ }
+      }
+    })();
+    return () => { live = false; };
+  }, [wipEntries]);
+  const wipRows = useMemo(() => buildWipRows(wipEntries, { tickets, jobs: wipJobs }), [wipEntries, tickets, wipJobs]);
+
+  const openWipJob = row => {
+    if (!onOpenJob) return;
+    // The record when we have it (it carries the dbId, so no second read),
+    // and the job number when the drafts list was all that named it.
+    if (row.jobRecord) onOpenJob(row.jobRecord);
+    else if (row.jobNumber) onOpenJob({ job: row.jobNumber });
+  };
+  // Same shape as the app's other one-tap destructions (the error log, the
+  // sign-out warning): a plain confirm, saying what goes and that it is gone.
+  const discardWip = async row => {
+    const what = row.kind === "ticket" ? "half-entered ticket" : "half-built hazard assessment";
+    if (!window.confirm(`Discard the ${what} for ${wipJobLabel(row)}? None of it has been saved, and it cannot be brought back.`)) return;
+    await OfflineCache.remove(row.key);
+    setWipEntries(prev => prev.filter(e => e.key !== row.key));
+  };
+
   return (
     <div className="page">
       <div style={{ marginBottom: 20 }}>
@@ -50,6 +121,46 @@ export function OpenTicketsScreen({ tickets, loading, onOpenTicket, currentUser,
           Your tickets that still have to go out to the client. Once a ticket is sent it leaves this list.
         </div>
       </div>
+
+      {/* Above the tiles on purpose: unsaved work is the most perishable
+          thing on the screen, and the tiles are about tickets that already
+          exist in the database. */}
+      {wipRows.length > 0 && (
+        <Blueprint style={{ padding: "6px 18px 14px", marginBottom: 20 }}>
+          <div style={{ display: "flex", alignItems: "baseline", gap: 10, padding: "8px 0 4px", flexWrap: "wrap" }}>
+            <span style={{ fontFamily: "var(--font-heading)", fontWeight: 600, fontSize: 15 }}>Half-entered on this device</span>
+            <span style={{ fontSize: 12, color: "color-mix(in srgb, var(--color-text) 55%, transparent)" }}>
+              {wipRows.length === 1 ? "one copy" : `${wipRows.length} copies`} of work that was never saved — open the job, start the ticket or assessment there, and it comes back with what you typed
+            </span>
+          </div>
+          <TableScroll><table className="table table-wide">
+            <thead>
+              <tr><th>What</th><th>Job</th><th>Project + client</th><th>Kept</th><th></th></tr>
+            </thead>
+            <tbody>
+              {wipRows.map(r => (
+                <tr key={r.key}>
+                  <td>{r.what}{r.ticketId && <div style={{ fontSize: 11, color: "color-mix(in srgb, var(--color-text) 55%, transparent)" }}>changes to {r.ticketId}</div>}</td>
+                  <td style={{ fontFamily: "var(--font-heading)", fontWeight: 600 }}>
+                    {r.jobNumber || <span style={{ fontWeight: 400, fontSize: 12, color: "color-mix(in srgb, var(--color-text) 55%, transparent)" }}>{wipJobLabel(r)}</span>}
+                  </td>
+                  <td>{r.project}<div style={{ fontSize: 11, color: "color-mix(in srgb, var(--color-text) 55%, transparent)" }}>{r.client}</div></td>
+                  <td>{wipWhen(r.at)}</td>
+                  <td style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
+                    {/* No door to the job when nothing here could name it —
+                        this device has never read that job and has no signal
+                        to read it now. The copy stays listed, and stays
+                        discardable, which is the honest pair of answers. */}
+                    {onOpenJob && (r.jobRecord || r.jobNumber) &&
+                      <Btn variant="secondary" onClick={() => openWipJob(r)}>Open job</Btn>}
+                    <Btn variant="secondary" onClick={() => discardWip(r)}>Discard</Btn>
+                  </td>
+                </tr>
+              ))}
+            </tbody>
+          </table></TableScroll>
+        </Blueprint>
+      )}
 
       <div style={{ display: "grid", gridTemplateColumns: "repeat(2, 1fr)", gap: 16, marginBottom: 20 }} className="grid-2col">
         <Blueprint className="stat-tile">

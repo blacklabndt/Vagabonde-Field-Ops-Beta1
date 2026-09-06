@@ -32,6 +32,14 @@ Cloudflare Worker `solitary-snowflake-ee22` (assets + the `/approve` and
   DB fix waits as a draft under `supabase/handover/` (probes beside it) —
   a draft, not history, until it is applied and filed under migrations.
   Nothing is waiting there now. The latest is
+  `20260906135356_a_worker_keeps_their_own_serials.sql` (probes in
+  `supabase/handover/probes-20260906135356-a-worker-keeps-their-own-serials.sql`):
+  `set_own_dosimetry(tld, drd, alarm)`, a definer RPC any signed-in, unlocked
+  account may call to write the three serial columns on its OWN profile row
+  and nothing else — the JHA builder's "Keep these on my profile" button,
+  because profiles_update wants the users tab the field does not hold. The
+  screen falls back (PGRST202 or a message naming the function) to keeping
+  the serials on the assessment alone. Before it,
   `20260906033223_the_error_log_can_be_cleared.sql` (probes in
   `supabase/handover/probes-20260906033223-the-error-log-can-be-cleared.sql`):
   `clear_function_errors()`, an Admin-only definer RPC behind the Admin

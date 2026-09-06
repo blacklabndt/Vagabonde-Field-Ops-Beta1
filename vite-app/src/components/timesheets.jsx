@@ -4,8 +4,9 @@ import { Db } from "../db.js";
 // The dose ledger calls one RPC that has no Db wrapper of its own; the sign-in
 // screen reaches for the client the same way.
 import { sbClient } from "../config.js";
-import { Blueprint, Btn, TableScroll, TagX, ErrorBox, RowsPerPage, useRowsPerPage , Loading, PdfLink, StatusTag, downloadCsv } from "./common.jsx";
+import { Blueprint, Btn, TableScroll, TagX, ErrorBox, RowsPerPage, useRowsPerPage , Loading, PdfLink, StatusTag, downloadCsv, Dialog } from "./common.jsx";
 import { makeZip, safeFilename, saveBlob } from "../zip.js";
+import { runInOrder, approvalProgressLine, approvalRunSummary } from "../approvalRun.js";
 
 // Timesheets — hours per person per pay period, built from ticket crew rows.
 //
@@ -133,6 +134,27 @@ export function TimesheetsScreen({ currentUser }) {
   const [roster, setRoster] = useState([]);
   // Shared with the board, the tracker and the equipment register.
   const [pageSize, setPageSize] = useRowsPerPage();
+
+  // ── Signing off several people at once ─────────────────────────────────
+  // Six people every fortnight, each one two screens away, was the whole of
+  // payroll day. The awaiting tab already knows who is outstanding; these
+  // hold who has been ticked there and how a run of them is going.
+  //
+  // A ref, not state, for the stop: it is asked between people and a
+  // re-render is not what makes the answer true.
+  const [picked, setPicked] = useState(() => new Set());
+  const [askApprove, setAskApprove] = useState(false);
+  const [batchRunning, setBatchRunning] = useState(false);
+  const [batchStopping, setBatchStopping] = useState(false);
+  const [batchProgress, setBatchProgress] = useState("");
+  const [batchResult, setBatchResult] = useState("");
+  const stopBatch = useRef(false);
+  // A tick means "this person, this fortnight". Carrying it across a period
+  // change would sign off hours the admin never looked at.
+  useEffect(() => {
+    setPicked(new Set());
+    setBatchResult("");
+  }, [period.start]);
 
   // Which load is the current one. A pay period can hold thousands of crew
   // rows and takes seconds to fetch, so switching period twice in a row means
@@ -267,6 +289,15 @@ export function TimesheetsScreen({ currentUser }) {
   // roster member with no entries is not waiting — there is nothing to
   // approve — so the count is work outstanding, not people outstanding.
   const awaiting = selectable.filter(p => p.entries.length && !approvalFor(p.profileId));
+  // Read back out of the live list rather than kept as its own array, so a
+  // person who was signed off since the tick — by the per-person button, or
+  // by the run that just finished — leaves the selection with the list.
+  const chosen = awaiting.filter(p => picked.has(p.profileId));
+  const togglePick = id => setPicked(prev => {
+    const next = new Set(prev);
+    if (next.has(id)) next.delete(id); else next.add(id);
+    return next;
+  });
 
   // Every export button goes through this, so none of them can forget to
   // clear the busy flag on the way out — a download that fails and leaves the
@@ -297,14 +328,8 @@ export function TimesheetsScreen({ currentUser }) {
       if (approved) {
         await Db.unapproveTimesheet({ profileId: person.profileId, start: period.start });
       } else {
-        // The document is built from exactly what is on screen, before the
-        // row is written: approving means freezing these figures, so if the
-        // PDF cannot be produced the period stays unapproved.
-        const JsPDF = await loadJsPdf();
-        const pdfBytes = buildTimesheetPdf(JsPDF, person, period, currentUser.name);
-        await Db.approveTimesheet({
-          profileId: person.profileId, start: period.start, end: period.end,
-          approvedBy: currentUser.id, pdfBytes
+        await approvePersonPeriod({
+          person, period, approvedBy: currentUser.id, approverName: currentUser.name
         });
       }
       const fresh = await Db.listApprovals({ start: period.start });
@@ -313,6 +338,52 @@ export function TimesheetsScreen({ currentUser }) {
       setError(e.message || "Couldn't update the approval.");
     }
     setBusy(false);
+  };
+
+  // The ticked people, one after another, each through the same routine the
+  // per-person button runs. Sequential and not a pool: each one renders a PDF
+  // in this browser, so the wait is the render and four at once would only
+  // cost the laptop memory.
+  const approveChosen = async () => {
+    setAskApprove(false);
+    // The list is fixed here, before anything is written — the run must not
+    // grow or shrink under its own progress line.
+    const list = chosen;
+    if (!list.length) return;
+    // Which load this run belongs to, for the same reason the single approval
+    // keeps one: an admin who changes period mid-run has a newer load in
+    // flight, and this run's refresh must not put the old fortnight back.
+    const mine = loadSeq.current;
+    stopBatch.current = false;
+    setBatchStopping(false);
+    setBatchRunning(true);
+    setBatchResult("");
+    setBatchProgress(approvalProgressLine(1, list.length, list[0].name));
+    setError("");
+
+    const out = await runInOrder(
+      list,
+      p => approvePersonPeriod({ person: p, period, approvedBy: currentUser.id, approverName: currentUser.name }),
+      {
+        shouldStop: () => stopBatch.current,
+        onStart: (n, total, p) => setBatchProgress(approvalProgressLine(n, total, p.name))
+      }
+    );
+
+    setBatchProgress("");
+    setBatchResult(approvalRunSummary({
+      done: out.done, failed: out.failed, notStarted: out.notStarted,
+      stopped: out.stopped, total: list.length
+    }));
+    // Whoever did not get signed off stays ticked, so pressing the button
+    // again is the retry — the alternative is hunting for them in the list.
+    setPicked(new Set([...out.failed.map(f => f.item.profileId), ...out.notStarted.map(p => p.profileId)]));
+    setBatchRunning(false);
+    setBatchStopping(false);
+    stopBatch.current = false;
+    // The people just signed off have to leave the tab, and the approvals
+    // this wrote are what says so.
+    if (mine === loadSeq.current) load(period);
   };
 
   return (
@@ -441,12 +512,45 @@ export function TimesheetsScreen({ currentUser }) {
       ) : view === "awaiting" ? (
         <div>
           <ErrorBox>{error}</ErrorBox>
-          <div style={{ marginBottom: 14 }}>
-            <select className="input" value={period.start} style={{ width: "auto", minHeight: 38 }}
+          <div style={{ marginBottom: 14, display: "flex", gap: 8, alignItems: "center", flexWrap: "wrap" }}>
+            {/* Held still while a run is going: the run is signing off this
+                fortnight, and switching underneath it would leave the
+                progress line naming people from a period nobody is on. */}
+            <select className="input" value={period.start} style={{ width: "auto", minHeight: 38 }} disabled={batchRunning}
               onChange={e => setPeriod(periods.find(p => p.start === e.target.value) || periods[0])}>
               {periods.map(p => <option key={p.start} value={p.start}>{payPeriodLabel(p)}</option>)}
             </select>
+            {isAdmin && awaiting.length > 0 && (<>
+              <Btn variant="secondary" style={{ minHeight: 38 }} disabled={batchRunning}
+                onClick={() => setPicked(new Set(awaiting.map(p => p.profileId)))}>Tick all</Btn>
+              <Btn variant="secondary" style={{ minHeight: 38 }} disabled={batchRunning || !picked.size}
+                onClick={() => setPicked(new Set())}>Clear</Btn>
+              {/* Same gate as the per-person button beside a timesheet:
+                  approval is an admin's act, in the policy as well as here. */}
+              <Btn variant="primary" style={{ minHeight: 38, marginLeft: "auto" }}
+                disabled={!chosen.length || batchRunning || busy}
+                onClick={() => setAskApprove(true)}
+                title="Builds each person's timesheet PDF and signs their period off, one after another.">
+                {batchRunning ? "Approving…" : `Approve ${chosen.length} period${chosen.length === 1 ? "" : "s"}`}
+              </Btn>
+              {/* A run of a dozen sign-offs has to be callable off — the
+                  admin spots the wrong name on the second one, not the last.
+                  It starts no more; the person in hand is finished, because
+                  a PDF half-way to the bucket is not a state to stop in. */}
+              {batchRunning && (
+                <Btn variant="secondary" style={{ minHeight: 38 }} disabled={batchStopping}
+                  onClick={() => { stopBatch.current = true; setBatchStopping(true); }}
+                  title="Finishes the timesheet being signed off and leaves the rest.">
+                  {batchStopping ? "Stopping…" : "Stop"}
+                </Btn>
+              )}
+            </>)}
           </div>
+          {(batchProgress || batchResult) && (
+            <div style={{ fontSize: 13, color: "color-mix(in srgb, var(--color-text) 65%, transparent)", marginBottom: 14 }}>
+              {batchProgress || batchResult}
+            </div>
+          )}
           {loading ? (
             <Loading />
           ) : !awaiting.length ? (
@@ -460,6 +564,13 @@ export function TimesheetsScreen({ currentUser }) {
               <TableScroll><table className="table">
                 <thead>
                   <tr>
+                    {isAdmin && (
+                      <th style={{ width: 34 }}>
+                        <input type="checkbox" aria-label="Select everyone awaiting approval" disabled={batchRunning}
+                          checked={awaiting.length > 0 && chosen.length === awaiting.length}
+                          onChange={e => setPicked(e.target.checked ? new Set(awaiting.map(p => p.profileId)) : new Set())} />
+                      </th>
+                    )}
                     <th>Name</th>
                     <th style={{ width: 80 }}>Entries</th>
                     <th style={{ width: 80 }}>Reg hrs</th>
@@ -471,6 +582,12 @@ export function TimesheetsScreen({ currentUser }) {
                 <tbody>
                   {awaiting.map(p => (
                     <tr key={p.profileId}>
+                      {isAdmin && (
+                        <td>
+                          <input type="checkbox" aria-label={`Select ${p.name}`} disabled={batchRunning}
+                            checked={picked.has(p.profileId)} onChange={() => togglePick(p.profileId)} />
+                        </td>
+                      )}
                       <td>{p.name}{p.isSub ? <span style={{ fontSize: 11, opacity: .6 }}> · Subcontractor</span> : ""}</td>
                       <td className="tabular">{p.entries.length}</td>
                       <td className="tabular">{hours(p.straight)}</td>
@@ -478,7 +595,8 @@ export function TimesheetsScreen({ currentUser }) {
                       <td className="tabular">{hours(p.dose)}</td>
                       {/* Review, not Approve: signing off hours nobody looked
                           at is exactly what this screen exists to prevent. */}
-                      <td><Btn variant="secondary" onClick={() => { setSelected(p.profileId); setView("period"); }}>Review</Btn></td>
+                      <td><Btn variant="secondary" disabled={batchRunning}
+                        onClick={() => { setSelected(p.profileId); setView("period"); }}>Review</Btn></td>
                     </tr>
                   ))}
                 </tbody>
@@ -515,8 +633,11 @@ export function TimesheetsScreen({ currentUser }) {
                   )}
                   {/* Approval is a control, not a formality: signing off your
                       own hours is not one. */}
+                  {/* Held while a batch is running: the two paths write the
+                      same table and reload the same approvals, and a
+                      sign-off pressed here mid-run would race that reload. */}
                   {isAdmin && <Btn variant={approved ? "secondary" : "primary"} style={{ marginLeft: "auto" }}
-                    onClick={toggleApproval} disabled={busy}>
+                    onClick={toggleApproval} disabled={busy || batchRunning}>
                     {approved ? "Reopen" : "Approve period"}
                   </Btn>}
                 </div>
@@ -618,6 +739,33 @@ export function TimesheetsScreen({ currentUser }) {
         </div>
       )}
       </>)}
+
+      {/* Approving is a signature on somebody's pay, and a batch of them is a
+          batch of signatures — so it names every person and the fortnight
+          before it starts, and reopening one afterwards is a separate act on
+          each timesheet. */}
+      {askApprove && chosen.length > 0 && (
+        <Dialog title={`Approve ${chosen.length} timesheet${chosen.length === 1 ? "" : "s"}`} maxWidth={480}
+          onClose={() => setAskApprove(false)}
+          actions={<>
+            <Btn variant="secondary" onClick={() => setAskApprove(false)}>Cancel</Btn>
+            <Btn variant="primary" onClick={approveChosen}>Approve {chosen.length} period{chosen.length === 1 ? "" : "s"}</Btn>
+          </>}>
+          <div style={{ fontSize: 14 }}>
+            Sign off {payPeriodLabel(period)} for {chosen.length === 1 ? "this person" : "these people"}? Each one gets a timesheet PDF built from the hours on this screen.
+          </div>
+          <ul style={{ margin: 0, paddingLeft: 20, fontSize: 14, maxHeight: 220, overflowY: "auto" }}>
+            {chosen.map(p => (
+              <li key={p.profileId}>
+                {p.name} — {hours(p.straight + p.ot)} h over {p.entries.length} {p.entries.length === 1 ? "entry" : "entries"}
+              </li>
+            ))}
+          </ul>
+          <div style={{ fontSize: 12, color: "color-mix(in srgb, var(--color-text) 65%, transparent)" }}>
+            They are done one after another and can be stopped part way. Reopening an approval afterwards is one timesheet at a time.
+          </div>
+        </Dialog>
+      )}
     </div>
   );
 }
@@ -778,6 +926,23 @@ function loadJsPdf() {
     });
   }
   return jspdfPromise;
+}
+
+// What approving one person's period actually is, in one place: the PDF built
+// from the figures the admin is looking at, then the row that points at it.
+// Both buttons run this — the per-person "Approve period" and the batch on the
+// awaiting tab — rather than each building its own document, because a batch
+// approval that froze a different sheet from the single one would be a second
+// definition of what an approval means.
+async function approvePersonPeriod({ person, period, approvedBy, approverName }) {
+  // The document is built before the row is written: approving means freezing
+  // these figures, so if the PDF cannot be produced the period stays open.
+  const JsPDF = await loadJsPdf();
+  const pdfBytes = buildTimesheetPdf(JsPDF, person, period, approverName);
+  await Db.approveTimesheet({
+    profileId: person.profileId, start: period.start, end: period.end,
+    approvedBy, pdfBytes
+  });
 }
 
 // The document that approval freezes: the same figures as the Excel export
