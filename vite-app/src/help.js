@@ -34,7 +34,7 @@ export const HELP = {
   jha: {
     heading: "JHA builder",
     body: [
-      "From this screen you can build your JHA... Self explanitory"
+      "From this screen you can build your JHA... Self explanatory"
     ]
   },
   upload: {
