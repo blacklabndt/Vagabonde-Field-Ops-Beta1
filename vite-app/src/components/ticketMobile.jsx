@@ -5,6 +5,7 @@ import { Blueprint, Btn, TagX, Field, ErrorBox, emailIn, NoJobSelected, QueuedPa
 import { OfflineQueue } from "../offlineQueue.js";
 import { OfflineCache } from "../offlineCache.js";
 import { savingLabel, deviceOffline } from "../savingWords.js";
+import { overwroteKey, overwroteWords } from "../overwriteNote.js";
 
 // Stored ticket lines back into the two on-screen lists, matched by label
 // against the client's catalog — what's offered, in what order, at what
@@ -414,6 +415,24 @@ export function TicketMobileScreen({ job, jobRecord, currentUser, onSaved, ticke
   // two jobs on the go don't overwrite each other.
   const wipKey = `ticket.wip.${ticket || (job && job.dbId)}`;
   const [recovered, setRecovered] = useState(null);
+
+  // The replay's note that this ticket's queued copy wrote over somebody
+  // else's save. The toast that said so is long gone by the time the ticket
+  // is reopened; this stays until it is dismissed, and only on the device
+  // whose replay it was. A new ticket has no id and no history to overwrite.
+  const [overwrote, setOverwrote] = useState(null);
+  useEffect(() => {
+    if (!ticket) { setOverwrote(null); return undefined; }
+    let live = true;
+    OfflineCache.read(overwroteKey(ticket))
+      .then(hit => { if (live) setOverwrote(hit && hit.value ? hit.value.at || true : null); })
+      .catch(() => {});
+    return () => { live = false; };
+  }, [ticket]);
+  const dismissOverwrote = () => {
+    setOverwrote(null);
+    OfflineCache.remove(overwroteKey(ticket));
+  };
 
   useEffect(() => {
     if (!job || loadingTicket) return;
@@ -998,6 +1017,21 @@ export function TicketMobileScreen({ job, jobRecord, currentUser, onSaved, ticke
               Brought back automatically — losing a day's entry is the bad
               outcome here, and an untouched form is never stored — but said
               out loud, with a way to throw it away. */}
+          {overwrote && (
+            <div role="status" style={{
+              fontSize: 12, padding: "8px 10px",
+              border: "1px solid var(--color-accent-700)",
+              background: "color-mix(in srgb, var(--color-accent) 8%, transparent)",
+              display: "flex", alignItems: "center", gap: 8, flexWrap: "wrap"
+            }}>
+              <span>{overwroteWords(overwrote === true ? null : overwrote)}</span>
+              <button type="button" onClick={dismissOverwrote}
+                style={{ marginLeft: "auto", background: "none", border: "none", textDecoration: "underline", cursor: "pointer", color: "inherit", font: "inherit", padding: 0, whiteSpace: "nowrap" }}>
+                I've checked
+              </button>
+            </div>
+          )}
+
           {recovered && (
             <div style={{
               fontSize: 12, padding: "8px 10px",

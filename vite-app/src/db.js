@@ -2901,7 +2901,13 @@ export const Db = {
     // appearing in Open tickets' "half-entered on this device" strip,
     // offering to open a ticket that no longer exists — from the editor's
     // Cancel and from the bulk cancel alike, which both come through here.
-    const forgetTicketWip = async id => { try { await OfflineCache.remove("ticket.wip." + id); } catch (_) { /* the copy is a convenience */ } };
+    // The overwrite note (overwriteNote.js) goes with it: a banner about a
+    // ticket that no longer exists would be read on a number a later ticket
+    // may reuse.
+    const forgetTicketWip = async id => {
+      try { await OfflineCache.remove("ticket.wip." + id); } catch (_) { /* the copy is a convenience */ }
+      try { await OfflineCache.remove("ticket.overwrote." + id); } catch (_) { /* likewise */ }
+    };
     const { data: row, error: rErr } = await sbClient.from("tickets").select("status").eq("id", ticketId).maybeSingle();
     if (rErr) throw rErr;
     // Two people cancelling the same mistake: the second should hear it's

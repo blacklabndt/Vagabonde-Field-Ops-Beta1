@@ -248,7 +248,11 @@ Cloudflare Worker `solitary-snowflake-ee22` (assets + the `/approve` and
   per ticket in `lastKnownTicketFingerprint`), the replay fingerprints the
   row before writing, and when the row differs from both the base and the
   payload somebody else saved in between: it still writes, then raises one
-  forced toast and checkpoints `overwroteNewer`. No base, no comparison.
+  forced toast, checkpoints `overwroteNewer` and leaves a note in the device
+  cache (`overwriteNote.js`, `ticket.overwrote.<id>`) that the editor shows
+  as a banner when that ticket is reopened, until "I've checked" removes
+  it; `deleteTicket` forgets it with the recovery copy. No base, no
+  comparison.
 - The ticket editor and the JHA builder end in a fixed `.screen-foot` bar
   (z-index 50, under the banner, drawer and dialogs) carrying the running
   total or "N required left" and the primary button; the pages pad their

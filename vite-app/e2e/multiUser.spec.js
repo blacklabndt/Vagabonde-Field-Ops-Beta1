@@ -340,3 +340,57 @@ test("a draft cancelled under an open editor refuses the late save honestly", as
     await b.ctx.close();
   }
 });
+
+test("a queued save that wrote over another device's edit leaves a banner on the draft", async ({ browser }) => {
+  const a = await newDevice(browser);
+  const b = await newDevice(browser);
+  try {
+    const jobNumber = await scoutJob(a.page, 2);
+    const rx = await ticketRx(a.page);
+    await cancelAllDrafts(a.page, jobNumber, rx);
+    sweepAfter = [{ jobNumber, rx, state: STATE }];
+    await toTicketScreen(a.page, 2);
+    await a.page.getByRole("button", { name: "Save draft" }).click();
+    await settledJobDetail(a.page);
+
+    // Both devices open the same draft before either edits.
+    await openDraft(a.page, rx);
+    await openJob(b.page, jobNumber);
+    await openDraft(b.page, rx);
+
+    // A loses the signal and saves 3 welds into the outbox. B, online, saves
+    // 7 in the meantime — the save A's replay will write over.
+    await addFilmLine(a.page, 3);
+    await a.ctx.setOffline(true);
+    await a.page.getByRole("button", { name: "Save draft" }).click();
+    await expect(a.page.getByText("Saved on this device")).toBeVisible({ timeout: 15_000 });
+    await a.page.getByRole("button", { name: "Done" }).click();
+
+    await addFilmLine(b.page, 7);
+    await b.page.getByRole("button", { name: "Save draft" }).click();
+    await expect(b.page.getByText("Job detail")).toBeVisible({ timeout: 20_000 });
+
+    // Back in range: the replay lands, says so once, and leaves its note.
+    await a.ctx.setOffline(false);
+    await expect(a.page.getByRole("button", { name: /queued|won't sync/ })).toHaveCount(0, { timeout: 30_000 });
+
+    // The banner is on the reopened draft, and dismissing it is remembered.
+    await openJob(a.page, jobNumber);
+    await openDraft(a.page, rx);
+    const banner = a.page.getByText(/your queued copy replaced changes somebody else had saved/);
+    await expect(banner).toBeVisible({ timeout: 20_000 });
+    await a.page.getByRole("button", { name: "I've checked" }).click();
+    await expect(banner).toHaveCount(0);
+    // The device that saved last, online, has no such note: nothing of its
+    // own was replaced.
+    await openJob(b.page, jobNumber);
+    await openDraft(b.page, rx);
+    await expect(b.page.getByRole("button", { name: "Save draft" })).toBeEnabled({ timeout: 15_000 });
+    await expect(b.page.getByText(/your queued copy replaced/)).toHaveCount(0);
+
+    await cancelOpenTicket(a.page);
+  } finally {
+    await a.ctx.close();
+    await b.ctx.close();
+  }
+});

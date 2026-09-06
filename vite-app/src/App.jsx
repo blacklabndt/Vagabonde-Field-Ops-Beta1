@@ -12,6 +12,7 @@ import { HelpDialog } from "./components/helpDialog.jsx";
 import { helpFor } from "./help.js";
 import { OfflineQueue } from "./offlineQueue.js";
 import { ticketFingerprint, replacedNewerWork } from "./ticketFingerprint.js";
+import { overwroteKey } from "./overwriteNote.js";
 import { OfflineCache } from "./offlineCache.js";
 import { SwUpdates } from "./swUpdates.js";
 import { restoreSession, IDENTITY_KEY } from "./session.js";
@@ -474,6 +475,10 @@ export function App() {
         // replaced nothing.
         if (overwrote && !linesRefused && id === payload.ticketId) {
           Toasts.show(`Your queued copy of ${id} replaced changes somebody else saved while you were out of range — open the ticket and check the figures.`, "error", true);
+          // And a copy that outlives the toast: the editor shows it as a
+          // banner when this ticket is next opened on this device, until the
+          // technician says they have looked (overwriteNote.js).
+          try { await OfflineCache.put(overwroteKey(id), { at: Date.now() }); } catch (_) { /* the toast was said */ }
           await checkpoint({ overwroteNewer: true });
         }
       }
