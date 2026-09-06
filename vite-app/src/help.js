@@ -52,40 +52,25 @@ export const HELP = {
   mytickets: {
     heading: "Open tickets",
     body: [
-      "Your own tickets that still have to go out to the client. Once a ticket is sent for approval it leaves this list — this is the to-do, not the archive. The Billing tracker is where every ticket lives.",
-      "Above the list, \"Half-entered on this device\" is work that was never saved at all: a ticket or an assessment the phone closed on you. Open the job and start the ticket or assessment there and it comes back with what you typed.",
-      "Open assessments ride along too — hazard assessments filed but not closed out at the end of the day.",
-      "Discarding a half-entered copy cannot be undone, and it is only on this device. Deleting drafts deletes the saved records."
+      "On this screen you can see all of your own open tickets that have yet to be sent to your clients. Think of this screen as your to-do list for the end of each day"
     ]
   },
   chat: {
     heading: "Team chat",
     body: [
-      "One room for the whole crew: text, pictures, voice notes, GIFs, replies and pins. The drawer carries an unread badge, and a line marks where you left off.",
-      "Messages are permanent once sent — the wording cannot be edited by anyone. Pinning and unpinning is an Admin's.",
-      "The room forgets. Anything not pinned is deleted after 30 days, pictures and voice notes with it. Pin what has to stay.",
-      "A job number in a message becomes a link only if it is a real job on file. Numbers are freeform here, so nothing is guessed from the shape of the text.",
-      "Push notifications go to the devices signed in on this account. On a shared tablet the notifications follow whoever signed in last."
+      "A bunch of degenerates getting into nonsense here, but every once and a while the boss might post something important, keep an eye on the pinned posts at the top of the screen"
     ]
   },
   files: {
     heading: "Files",
     body: [
-      "The crew's shared documents — procedures, forms, certificates — in a private bucket that only signed-in staff can read.",
-      "Folders are part of a file's path rather than records of their own, so the listing cannot drift from what is actually stored. + New folder makes one as soon as a file goes into it.",
-      "Upload files, or drop them onto the table, and they land in the folder you are looking at. The breadcrumb walks back up.",
-      "The search box searches every folder, not just this one, and lists the matches from elsewhere above the table with an Open folder button.",
-      "These are shared documents. Job paperwork — assessments, reports, invoices — belongs on the job, not here."
+      "Templates, decay charts, study material and other important docs can be stored here"
     ]
   },
   contacts: {
     heading: "Contacts",
     body: [
-      "The directory of people at each client and contractor: who signs, who approves, who to phone at 02:00.",
-      "This is what every other screen pre-fills a rep from. A new job, a ticket's approval email and a report's recipient all start from the primary contact for that organisation, so keeping one person marked primary is what stops the app guessing.",
-      "The toggle switches between clients and contractors; the search finds a person by name, email or phone across both.",
-      "Technicians can edit this, not only the office — the person who finds out the site rep's new number is usually the one standing on the lease.",
-      "Changing a contact does not rewrite tickets or jobs already filed. Those keep the name and address they were sent to."
+      "All the client and contractor contact info, make sure its correct, this is the same info that will be used to send reports and billing out"
     ]
   },
   equipment: {
@@ -94,26 +79,21 @@ export const HELP = {
       "The fleet: exposure devices, survey meters, dosimeters and tools, with serials, calibration dates and who has each one.",
       "The two tiles at the top only appear when there is something to act on — anything overdue for calibration, and anything due inside 30 days. Overdue means pull it from service.",
       "Assigning equipment to a person is what makes the JHA builder pre-fill their kit. If a worker's dosimeter is wrong on an assessment, it is wrong here.",
-      "The filters are by kind; the search covers serial, type and the person it is assigned to.",
-      "Adding and editing is for the office. Everyone with the screen can read it, which is the point — a serial number is needed on the lease, not at a desk."
+      "The filters are by kind; the search covers serial, type and the person it is assigned to."
     ]
   },
   timesheets: {
     heading: "Timesheets",
     body: [
-      "Hours, solo hours, dose and mileage per person per pay period. None of it is typed here: every figure comes from the crew rows on billing tickets, so a wrong number is fixed on the ticket it came from, not on this screen.",
-      "Technicians, Helpers and Coordinators see their own hours here. Admins see everyone. The screen shows you your own even where the database would allow a little more.",
-      "An Admin approves a period, which is what marks it done for payroll. Export to Excel builds a two-sheet workbook of the period.",
-      "The dose ledger beside it is milliroentgens per person per calendar quarter and year — the figures a nuclear energy worker's record needs. The database adds it up, so a whole year is a few dozen numbers rather than tens of thousands of rows.",
-      "Solo hours appear here and are never billed to a client."
+      "The most important page, double check that your hours are correct before sending it off for approval, you dont want anything missed!"
     ]
   },
   rates: {
     heading: "Rate admin",
     body: [
       "The rate cards. This screen is not a reference — it is the billing menu: the lines here, in this order, are the dropdowns a technician gets on the ticket screen and the line order on the invoice the client sees.",
-      "There is a house card, and each client can have their own. A client set to follow the default takes the house prices live, so a change to the house card moves them too. A client with their own card is on their own prices.",
-      "Publish matters exactly once per card. After it has been published, edits go live as they save — which is why the button disappears. There is no second confirmation.",
+      "There is a house card, and each client can have their own. A client set to follow the default takes the house prices live, so a change to the house card changes them too. A client with their own card is on their own prices.",
+      "Publish matters exactly once per card. After it has been published, edits go live as they save",
       "\"Restore removed lines\" puts back any standard line missing from a schedule at zero, ready to be priced. A job override prices one line differently for one job. Every price change is logged with who made it; the history is on each line.",
       "Prices are for Admins and Technicians: the screen opens for anyone given the Rate admin section, but the database hands other roles no figures and refuses their edits."
     ]
@@ -131,10 +111,9 @@ export const HELP = {
   users: {
     heading: "Users & access",
     body: [
-      "Accounts, their role, and which screens each one gets. New accounts are created here and arrive with a link to set their own password; nobody has to be told a password.",
-      "The tick boxes are permission, not decoration. A screen someone does not hold is a screen the database refuses them, buckets and all — so removing a tab to tidy up a menu also revokes access to that work. Strip every tab and the account can read nothing at all.",
-      "Job detail, the JHA builder, report upload and the billing ticket never appear in anybody's menu; they open from a job. Their permissions are still set here, and still matter.",
-      "Changing somebody's role is an Admin's act. Holding this screen lets you grant screens, never rank.",
+      "Accounts, their role, and which screens each one gets. New accounts are created here and will be sent a link to set their own password",
+      "The tick boxes are a permission. A screen someone does not hold is a screen the database refuses them — so removing a tab to tidy up a menu also revokes access to that page altogether. Strip every tab and the account can read nothing at all.",
+      "Job detail, the JHA builder, report upload and the billing ticket never appear in anybody's menu; they open from a job. Their permissions are still set here.",
       "An account with work on file is locked rather than deleted — the foreign keys are what keep their name on tickets and assessments. Unlock account lifts the ban and puts the role's usual screens back."
     ]
   },
