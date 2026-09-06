@@ -120,7 +120,7 @@ export const HELP = {
     heading: "Timesheets",
     body: [
       "Hours, solo hours, dose and mileage per person per pay period. None of it is typed here: every figure comes from the crew rows on billing tickets, so a wrong number is fixed on the ticket it came from, not on this screen.",
-      "Technicians and Helpers see their own hours and nobody else's. Admins and Coordinators see everyone. That is the database's rule, not the screen's.",
+      "Technicians, Helpers and Coordinators see their own hours here. Admins see everyone. The screen shows you your own even where the database would allow a little more.",
       "An Admin approves a period, which is what marks it done for payroll. Export to Excel builds a two-sheet workbook of the period.",
       "The dose ledger beside it is milliroentgens per person per calendar quarter and year — the figures a nuclear energy worker's record needs. The database adds it up, so a whole year is a few dozen numbers rather than tens of thousands of rows.",
       "Solo hours appear here and are never billed to a client."

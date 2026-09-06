@@ -5,7 +5,7 @@ import { acceptsNumberText } from "../numberInput.js";
 import { Blueprint, Btn, CheckBox, TagX, Field, Dialog, ErrorBox, Switch, splitContact, hazardTagVariant, NoJobSelected, ConnectionBar, QueuedPanel, useMissingFields, useScreenFoot } from "./common.jsx";
 import { OfflineQueue } from "../offlineQueue.js";
 import { OfflineCache } from "../offlineCache.js";
-import { hasNoSerials, trimmedSerials, isMissingSetOwnDosimetry } from "../dosimetryPrompt.js";
+import { hasNoSerials, trimmedSerials, isMissingSetOwnDosimetry, dosimetryAskedFor, markDosimetryAsked } from "../dosimetryPrompt.js";
 import { savingLabel, deviceOffline } from "../savingWords.js";
 
 // The JHA (FLHA) — filed at the start of the day, closed out at the end.
@@ -33,13 +33,6 @@ const BLANK_EQUIP = {
 };
 
 const BLANK_KIT = { unit: "", idCode: "", tld: "", drd: "", alarm: "" };
-
-// Who has already been offered the "keep these serials" panel this session.
-// Module-level rather than component state because the builder is unmounted
-// every time the tech leaves the screen, and an offer that came back on every
-// job would be nagging rather than helping. Keyed by profile id, so a shared
-// tablet asks the next person in their own right.
-const dosimetryAsked = new Set();
 
 const PPE_CHECKS = [
   { key: "hardHat", label: "Hard hat" },
@@ -318,13 +311,13 @@ export function JhaBuilderScreen({ job, jobRecord, contacts, currentUser, onSubm
   // one, and nothing they can reach has ever written it back — so the same
   // three numbers were typed again on the next job, and the one after. Asked
   // only when both lists have answered and the kit really is empty, and only
-  // once per person per session (dosimetryAsked, above): the panel is a help,
+  // once per person per session (dosimetryPrompt.js, cleared when the session ends): the panel is a help,
   // not a gate, and the form works exactly as before if it is dismissed.
   useEffect(() => {
-    if (!equipReady || dosimetryAsked.has(currentUser.id)) return;
+    if (!equipReady || dosimetryAskedFor(currentUser.id)) return;
     const me = people.find(p => p.id === currentUser.id);
     if (!me || !hasNoSerials(kitOf(me, equipment))) return;
-    dosimetryAsked.add(currentUser.id);
+    markDosimetryAsked(currentUser.id);
     setAskDosimetry(true);
   }, [people, equipment, equipReady, currentUser.id]);
 
@@ -628,14 +621,8 @@ export function JhaBuilderScreen({ job, jobRecord, contacts, currentUser, onSubm
           </div>
           <Field label="Exposure device (R.E.D.) serial"><input className="input" value={equip.redSerial} placeholder="Delta 880" onChange={e => setEquip(p => ({ ...p, redSerial: e.target.value }))} /></Field>
           <Field label="Device surface survey (mR/h)">
-            {/* Kept as a string, not a number, so an unfilled box stays blank
-                rather than reading as a surveyed 0.0 mR/h. A text input with a
-                decimal keypad, not type="number" — the same lesson as the dose
-                dialog and NumField: on a phone, a number input hands back ""
-                for anything the browser considers half-typed or locale-wrong
-                (a comma decimal, a stray key), so a reading that was visibly
-                on screen arrived here empty. The filter only ever admits
-                digits and separators, which also covers a pasted minus. */}
+            {/* A keystroke that would leave something other than a reading is
+                refused outright rather than filtered — "1e6" used to land as 16. */}
             <input className="input" type="text" inputMode="decimal" value={equip.redSurveyMr}
               onChange={e => { const v = e.target.value; if (acceptsNumberText(v, 0.1)) setEquip(p => ({ ...p, redSurveyMr: v })); }} />
           </Field>

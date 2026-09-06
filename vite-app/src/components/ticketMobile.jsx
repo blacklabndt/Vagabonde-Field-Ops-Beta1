@@ -193,7 +193,7 @@ export function TicketMobileScreen({ job, jobRecord, currentUser, onSaved, ticke
   const [queued, setQueued] = useState(false);
   // The footer is on screen whenever the form is (not the no-job or queued
   // panels); the toast reads this to keep clear of it.
-  useScreenFoot(!!job && !queued);
+  useScreenFoot(!!job && !queued && !loadError && !!rates && !loadingTicket);
   // Set once the ticket row exists, so a retry emails rather than re-inserts.
   // A reopened draft is already in the database, so it starts true and every
   // save is an update.

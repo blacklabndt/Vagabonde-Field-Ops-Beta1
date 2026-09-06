@@ -18,12 +18,11 @@ function fileSize(bytes) {
 }
 
 export function FilesScreen({ currentUser }) {
-  // Every role has the files tab, and the bucket's delete policy follows the
-  // tab — so the procedures library was one mis-tap from anyone. Deleting is
-  // an Admin's or a Coordinator's, folder or single file: the drive holds the
-  // RT procedure and the report template, one confirm() is the whole guard,
-  // and there is no undo. The gate was on folders alone, which left the two
-  // files that matter most reachable by the row × beside them.
+  // Deleting is an Admin's or a Coordinator's, folder or single file: the
+  // drive holds the RT procedure and the report template, one confirm() is
+  // the whole guard, and there is no undo. The bucket's delete policy says the
+  // same since 20260906181829 — this is the courtesy in front of that gate,
+  // not the gate; a refused delete comes back from db.js in words.
   const canDelete = !!currentUser && (currentUser.role === "Admin" || currentUser.role === "Coordinator");
   const [prefix, setPrefix] = useState("");
   const [folders, setFolders] = useState([]);

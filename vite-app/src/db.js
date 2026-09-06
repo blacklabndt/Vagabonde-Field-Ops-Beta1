@@ -1459,6 +1459,12 @@ export const Db = {
     const existing = async () => {
       const { data: already, error: keyErr } = await sbClient.from("jhas").select().eq("client_key", clientKey).maybeSingle();
       if (keyErr) throw keyErr;
+      // The row that landed while its answer was lost never had its PDF
+      // rendered either — the render is fired from the insert path, which
+      // that first attempt never reached. Rendering here is idempotent
+      // (close-out renders over the same key), and without it the filed
+      // assessment carried a pdf_key with nothing behind it.
+      if (already) this.renderJhaPdf(already.id).catch(e => console.warn("JHA on file, but the PDF didn't render:", e.message));
       return already;
     };
     if (clientKey) {
@@ -2247,9 +2253,14 @@ export const Db = {
     return path;
   },
 
+  // Storage's remove does not error on an object the delete policy declines:
+  // it comes back absent from the answer. So the answer is checked, the way
+  // every zero-row update in this file is — the policy is Admin/Coordinator
+  // (20260906181829) and a refused delete has to read as one.
   async deleteSharedFile(path) {
-    const { error } = await sbClient.storage.from("shared").remove([path]);
+    const { data, error } = await sbClient.storage.from("shared").remove([path]);
     if (error) throw error;
+    if (!data || !data.length) throw plainError("That file wasn't deleted — deleting from the shared drive is an Admin's or a Coordinator's.");
   },
 
   // Removing a folder means removing everything under it — Storage has no
@@ -2273,8 +2284,12 @@ export const Db = {
     // `remove` takes a bounded list, so delete in batches rather than handing
     // it a folder's worth of keys in one call.
     for (let i = 0; i < keys.length; i += 100) {
-      const { error } = await sbClient.storage.from("shared").remove(keys.slice(i, i + 100));
+      const batch = keys.slice(i, i + 100);
+      const { data, error } = await sbClient.storage.from("shared").remove(batch);
       if (error) throw error;
+      if ((data || []).length < batch.length) {
+        throw plainError("Not everything in that folder was deleted — deleting from the shared drive is an Admin's or a Coordinator's.");
+      }
     }
   },
 
@@ -2881,6 +2896,12 @@ export const Db = {
   // Approved and invoiced tickets are never cancellable — by then it is the
   // client's document, and a correction is a new ticket.
   async deleteTicket(ticketId) {
+    // A reopened draft's recovery copy is keyed by the ticket id
+    // (ticketMobile's wipKey). Left behind, a cancelled ticket went on
+    // appearing in Open tickets' "half-entered on this device" strip,
+    // offering to open a ticket that no longer exists — from the editor's
+    // Cancel and from the bulk cancel alike, which both come through here.
+    const forgetTicketWip = async id => { try { await OfflineCache.remove("ticket.wip." + id); } catch (_) { /* the copy is a convenience */ } };
     const { data: row, error: rErr } = await sbClient.from("tickets").select("status").eq("id", ticketId).maybeSingle();
     if (rErr) throw rErr;
     // Two people cancelling the same mistake: the second should hear it's
@@ -2889,6 +2910,7 @@ export const Db = {
     // first.
     if (!row) {
       await assertSessionAlive();
+      await forgetTicketWip(ticketId);
       throw plainError(`Ticket ${ticketId} is already gone — it was cancelled on another device.`, { ticketGone: true });
     }
     if (row.status === "Approved" || row.status === "Invoiced") {
@@ -2914,6 +2936,7 @@ export const Db = {
     // belt-and-braces sweep and expect to find nothing.
     await sbClient.from("ticket_crew").delete().eq("ticket_id", ticketId).then(() => {}, () => {});
     await sbClient.from("ticket_lines").delete().eq("ticket_id", ticketId).then(() => {}, () => {});
+    await forgetTicketWip(ticketId);
   },
 
   // The last ticket raised on this job, with its lines and crew — what "start

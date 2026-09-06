@@ -218,11 +218,11 @@ export function ContactsScreen({ currentUser }) {
 
               {!contactsLoading && pageCount > 1 && (
                 <div style={{ display: "flex", alignItems: "center", gap: 10, padding: "14px 0 0" }}>
-                  <Btn variant="secondary" onClick={() => setPage(p => Math.max(0, p - 1))} disabled={safePage === 0}>← Previous</Btn>
+                  <Btn variant="secondary" onClick={() => setPage(Math.max(0, safePage - 1))} disabled={safePage === 0}>← Previous</Btn>
                   <span style={{ fontSize: 13, color: "color-mix(in srgb, var(--color-text) 60%, transparent)" }}>
                     Page {safePage + 1} of {pageCount} · {sorted.length} people
                   </span>
-                  <Btn variant="secondary" onClick={() => setPage(p => Math.min(pageCount - 1, p + 1))} disabled={safePage >= pageCount - 1}>Next →</Btn>
+                  <Btn variant="secondary" onClick={() => setPage(Math.min(pageCount - 1, safePage + 1))} disabled={safePage >= pageCount - 1}>Next →</Btn>
                 </div>
               )}
 

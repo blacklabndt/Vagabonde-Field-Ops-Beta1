@@ -44,3 +44,12 @@ export function isMissingSetOwnDosimetry(error) {
   const msg = String(error.message || "");
   return msg.includes("set_own_dosimetry") && /could not find|does not exist|not found/i.test(msg);
 }
+
+// Who has been offered the serials panel this session, by profile id. Marked
+// when the panel is shown, so a dismissal is respected for the rest of the
+// session; cleared when a session ends (App.jsx), so a tablet that runs for
+// a week asks the next person in their own right rather than never again.
+const asked = new Set();
+export const dosimetryAskedFor = id => asked.has(id);
+export const markDosimetryAsked = id => { asked.add(id); };
+export const forgetDosimetryAsked = () => { asked.clear(); };

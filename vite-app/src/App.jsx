@@ -5,6 +5,7 @@ import { Db } from "./db.js";
 import { tabList, Blueprint, Btn, ErrorBox, ErrorBoundary, TagX, Toast, Loading, Switch } from "./components/common.jsx";
 import { Toasts } from "./toastBus.js";
 import { forgetHeldDrafts } from "./chatDrafts.js";
+import { forgetDosimetryAsked } from "./dosimetryPrompt.js";
 import { QueueBadge, QueueDialog } from "./components/queuePanel.jsx";
 import { FeatureRequestDialog } from "./components/featureRequest.jsx";
 import { HelpDialog } from "./components/helpDialog.jsx";
@@ -417,7 +418,6 @@ export function App() {
             ticketFingerprint(payload.lines, payload.crew, payload.delays),
             await currentTicketFingerprint(id))
           : false;
-        if (payload.baseFingerprint && !payload.overwroteChecked) await checkpoint({ overwroteChecked: true });
         try {
           // The reps ride along: the payload is the whole ticket as the field
           // left it, and a rep edited on a reopened draft is part of it.
@@ -466,6 +466,14 @@ export function App() {
           Toasts.show(`Your queued copy of ${id} replaced changes somebody else saved while you were out of range — open the ticket and check the figures.`, "error", true);
           await checkpoint({ overwroteNewer: true });
         }
+      }
+      // The question is recorded as asked only once the lines have landed:
+      // written before the update, a save that then failed on the radio
+      // would come back with the question skipped and write over the
+      // office's correction in silence — the one case the question is for.
+      // Not on the refusal (lines never landed) and not on the re-raise.
+      if (payload.baseFingerprint && !payload.overwroteChecked && !linesRefused && id === payload.ticketId) {
+        await checkpoint({ overwroteChecked: true });
       }
       // Crew is a delete-then-insert, so replaying it is harmless.
       await Db.saveCrewForTicket(id, payload.crew);
@@ -557,6 +565,37 @@ export function App() {
   // True when this session was restored from what the device remembered
   // rather than from a live token — see the recheck below.
   const restoredOffline = useRef(false);
+
+  // Everything of the person's that lives in this component's state, put
+  // back. One function for both ways a session ends — Sign out, and the
+  // lapsed-session recheck just below. Declared up here, above the screen's
+  // early returns: the recheck effect is registered on the first render,
+  // which returns early while the session is still being checked, and a
+  // function declared below that return is not initialised when the
+  // listener captures it. The recheck used to call
+  // setCurrentUser(null) alone: with the drawer open when it fired, the
+  // focus trap never released, the page stayed scroll-locked on the sign-in
+  // screen, and the drawer came up open over the next person's board.
+  const clearSessionState = () => {
+    setMenuOpen(false);
+    setMenuVisible(false);
+    setChatUnread(0);
+    // And the data that was theirs: the open job and its record, the ticket
+    // being edited, the draft list behind the badge. All of it survived into
+    // the next session before, and the draft list in particular rendered
+    // the last technician's tickets to the next until a refetch replaced it.
+    setMyTickets([]);
+    setBootError("");
+    setMyOpenJhas([]);
+    setActiveJob(null);
+    setJobRecord(EMPTY_JOB_RECORD);
+    setActiveTicket(null);
+    setTicketSeed(null);
+    setContextScreen("");
+    forgetHeldDrafts();
+    forgetDosimetryAsked();
+    setCurrentUser(null);
+  };
 
   // Coming back into range. Usually supabase-js refreshes the token and
   // everything carries on. If it can't, the account really is signed out, and
@@ -869,7 +908,9 @@ export function App() {
     };
     window.addEventListener("popstate", onPop);
     return () => window.removeEventListener("popstate", onPop);
-  }, [currentUser, activeJob]);
+    // screen as well: the failed-Back fallback writes the screen that is
+    // showing back into the bar, and a closure without it wrote a stale one.
+  }, [currentUser, activeJob, screen]);
 
   const loadReferenceData = async () => {
     setLoadError("");
@@ -1092,32 +1133,6 @@ export function App() {
     // count resolves. Zeroing chatUnread also drives the badge effect to
     // clear the OS icon.
     clearSessionState();
-  };
-
-  // Everything of the person's that lives in this component's state, put
-  // back. One function for both ways a session ends — Sign out, and the
-  // lapsed-session recheck below — because the recheck used to call
-  // setCurrentUser(null) alone: with the drawer open when it fired, the
-  // focus trap never released, the page stayed scroll-locked on the sign-in
-  // screen, and the drawer came up open over the next person's board.
-  const clearSessionState = () => {
-    setMenuOpen(false);
-    setMenuVisible(false);
-    setChatUnread(0);
-    // And the data that was theirs: the open job and its record, the ticket
-    // being edited, the draft list behind the badge. All of it survived into
-    // the next session before, and the draft list in particular rendered
-    // the last technician's tickets to the next until a refetch replaced it.
-    setMyTickets([]);
-    setBootError("");
-    setMyOpenJhas([]);
-    setActiveJob(null);
-    setJobRecord(EMPTY_JOB_RECORD);
-    setActiveTicket(null);
-    setTicketSeed(null);
-    setContextScreen("");
-    forgetHeldDrafts();
-    setCurrentUser(null);
   };
 
   // Opening a specific ticket from a job. Deliberately not gated on the tab:
