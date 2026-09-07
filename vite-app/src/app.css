@@ -492,8 +492,9 @@ tbody tr.clickable { cursor: pointer; }
   /* Anything typed or tapped gets a thumb-sized target. */
   .input, .btn, select.input { min-height: 46px; font-size: 16px; }
   /* …except the "?" circle, which that floor stretched into a 40×46 oval.
-     It stays a circle at the bar's own 40px, glyph size unchanged. */
-  .topbar-help { min-height: 0; width: 40px; height: 40px; font-size: 16px; }
+     It matches the initials chip beside it (30px, per Kyle), so the two
+     read as one row of small marks rather than a button and a badge. */
+  .topbar-help { min-height: 0; width: 30px; height: 30px; font-size: 14px; }
   .page { padding: 16px 12px 56px; }
   .page h2 { font-size: 27px; }
   .job-record-grid { gap: 8px !important; }
