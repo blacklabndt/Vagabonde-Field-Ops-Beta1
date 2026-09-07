@@ -100,6 +100,13 @@ export function JobDetailScreen({ job, currentUser, onStartJha, onOpenTicket, on
   const [jhas, setJhas] = useState([]);
   const [reports, setReports] = useState([]);
   const [tickets, setTickets] = useState([]);
+  // Daily billing shows five tickets at a time. A long job runs to dozens of
+  // days, and the card is one of four on a phone screen: a technician looking
+  // for today's draft was scrolling past a month of signed bills to reach
+  // the report card underneath. The count and the total below the table are
+  // still over every ticket — paging is how the list is read, not what the
+  // job adds up to. Newest first, so today's draft is on the first page.
+  const [ticketPage, setTicketPage] = useState(0);
   const [loading, setLoading] = useState(true);
 
   // Split so a mutation on one card (uploading a report, closing a JHA)
@@ -166,7 +173,7 @@ export function JobDetailScreen({ job, currentUser, onStartJha, onOpenTicket, on
     await Promise.all([refreshJhas(), refreshReports(), refreshTickets()]);
     setLoading(false);
   };
-  useEffect(() => { if (job && job.dbId) refresh(); }, [job ? job.dbId : null]);
+  useEffect(() => { if (job && job.dbId) { setTicketPage(0); refresh(); } }, [job ? job.dbId : null]);
 
   // The record is derived from the job row and the contact directory, so it
   // reloads whenever you open a different job instead of showing the last one.
@@ -251,6 +258,11 @@ export function JobDetailScreen({ job, currentUser, onStartJha, onOpenTicket, on
   // of dollars is the one thing CLAUDE.md forbids outright.
   const ticketTotal = tickets.reduce((s, t) => s + Math.round(Number(t.amount || 0) * 100), 0) / 100;
   const awaitingApproval = tickets.some(t => t.status === "Awaiting approval");
+  // Clamped rather than reset: a ticket cancelled off the last page leaves
+  // the reader on the page that still exists.
+  const ticketPageCount = Math.max(1, Math.ceil(tickets.length / TICKETS_PER_PAGE));
+  const safeTicketPage = Math.min(ticketPage, ticketPageCount - 1);
+  const shownTickets = tickets.slice(safeTicketPage * TICKETS_PER_PAGE, safeTicketPage * TICKETS_PER_PAGE + TICKETS_PER_PAGE);
 
   // Who may remove this job.
   //
@@ -479,7 +491,7 @@ export function JobDetailScreen({ job, currentUser, onStartJha, onOpenTicket, on
               <tbody>
                 {loading && <LoadingRow cols={seesPrices ? 6 : 5} />}
                 {!loading && tickets.length === 0 && <tr><td colSpan={seesPrices ? 6 : 5} style={{ color: "color-mix(in srgb, var(--color-text) 55%, transparent)" }}>None raised yet.</td></tr>}
-                {tickets.map(t => {
+                {shownTickets.map(t => {
                   // A draft on an open job is still being built, so its row
                   // opens the billing screen. Everything else opens read-only.
                   //
@@ -523,8 +535,21 @@ export function JobDetailScreen({ job, currentUser, onStartJha, onOpenTicket, on
                       <td>{t.date}</td><td>{t.tech}</td>{seesPrices && <td className="tabular">{money(t.amount)}</td>}
                       <td><StatusTag status={t.status} /></td>
                       <td style={{ textAlign: "right" }}>
+                        <div style={{ display: "flex", gap: 8, justifyContent: "flex-end", alignItems: "center", flexWrap: "wrap" }}>
+                          {/* The whole row opens the ticket, but nothing on a
+                              phone says so — there is no hover, and a tooltip
+                              never shows. A button that says View is how a
+                              technician learns that a sent bill can be read
+                              back from here. It opens exactly what the row
+                              tap opens. */}
+                          {open && !editable && (
+                            <Btn variant="ghost" onClick={e => { e.stopPropagation(); open(); }}>View</Btn>
+                          )}
+                          {editable && (
+                            <Btn variant="ghost" onClick={e => { e.stopPropagation(); open(); }}>Open</Btn>
+                          )}
                         {canWithdraw && (
-                          <div style={{ display: "flex", gap: 8, justifyContent: "flex-end", alignItems: "center" }}>
+                          <>
                             {rowError[t.id] && <span style={{ fontSize: 11, color: "var(--color-accent-700)", maxWidth: 320, textAlign: "left" }}>{rowError[t.id]}</span>}
                             <Btn variant="ghost" disabled={complete || withdrawingId === t.id}
                               title={complete ? "Reopen the job first — a withdrawn ticket reopens as a draft, and drafts can't be edited on a complete job" : undefined}
@@ -542,14 +567,24 @@ export function JobDetailScreen({ job, currentUser, onStartJha, onOpenTicket, on
                                 Cancel and edit
                               </Btn>
                             )}
-                          </div>
+                          </>
                         )}
+                        </div>
                       </td>
                     </tr>
                   );
                 })}
               </tbody>
             </table></TableScroll>
+            {!loading && ticketPageCount > 1 && (
+              <div style={{ display: "flex", alignItems: "center", gap: 10, padding: "10px 0 0" }}>
+                <Btn variant="secondary" onClick={() => setTicketPage(Math.max(0, safeTicketPage - 1))} disabled={safeTicketPage === 0}>← Previous</Btn>
+                <span style={{ fontSize: 13, color: "color-mix(in srgb, var(--color-text) 60%, transparent)" }}>
+                  Page {safeTicketPage + 1} of {ticketPageCount} · {tickets.length} tickets
+                </span>
+                <Btn variant="secondary" onClick={() => setTicketPage(Math.min(ticketPageCount - 1, safeTicketPage + 1))} disabled={safeTicketPage >= ticketPageCount - 1}>Next →</Btn>
+              </div>
+            )}
             <div className="strip" style={{ gridTemplateColumns: seesPrices ? "repeat(2, 1fr)" : "1fr", marginTop: 14 }}>
               <div><div className="strip-label">Tickets raised</div><div className="strip-value">{tickets.length}</div></div>
               {seesPrices && <div><div className="strip-label">Ticket total · before GST</div><div className="strip-value">{money(ticketTotal)}</div></div>}
@@ -759,6 +794,9 @@ export function JobDetailScreen({ job, currentUser, onStartJha, onOpenTicket, on
 //
 // The one thing it does write is the approval email, which changes nothing on
 // the ticket except that it has been sent again.
+// How many of a job's tickets Daily billing shows at once.
+const TICKETS_PER_PAGE = 5;
+
 function TicketViewDialog({ ticketId, jobRecord, onClose, onSent, onWithdraw, canEditAfter, canWithdraw }) {
   const [ticket, setTicket] = useState(null);
   const [loading, setLoading] = useState(true);
