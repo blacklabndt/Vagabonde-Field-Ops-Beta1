@@ -484,7 +484,7 @@ export function JobDetailScreen({ job, currentUser, onStartJha, onOpenTicket, on
                 ? "The day's tickets, as they were raised. Billing is the technician's to fill in."
                 : complete
                   ? "This job is complete. Tap a ticket to read it or send it to the client again."
-                  : "Tap a draft to add the day's welds, hours and crew. Tap a sent ticket to read it."}
+                  : "Tap your own draft to add the day's welds, hours and crew. Anyone else's ticket, and every sent one, opens to read."}
             </div>
             <TableScroll><table className="table">
               <thead><tr><th>Ticket</th><th>Date</th><th>Technician</th>{seesPrices && <th>Amount</th>}<th>Status</th><th></th></tr></thead>
@@ -504,7 +504,14 @@ export function JobDetailScreen({ job, currentUser, onStartJha, onOpenTicket, on
                   // …and only for an account that may raise one: without the
                   // ticket tab the editor opens onto an empty rate card, so
                   // "open this draft" is an invitation to file a $0 day.
-                  const editable = t.status === "Draft" && !complete && canRaiseTickets;
+                  // …and only for the technician whose ticket it is, or an
+                  // Admin. Somebody else's draft opens read-only like a sent
+                  // one: a technician taking over a job needs to see how the
+                  // last one billed it, not to change it — the database
+                  // refuses the save anyway (can_write_ticket), and an editor
+                  // that cannot save is a trap, not a courtesy.
+                  const mine = t.techId === currentUser.id;
+                  const editable = t.status === "Draft" && !complete && canRaiseTickets && (isAdmin || mine);
                   // Reading a ticket is reading its bill; without the prices
                   // the row is information enough and opens nothing.
                   //
@@ -525,7 +532,7 @@ export function JobDetailScreen({ job, currentUser, onStartJha, onOpenTicket, on
                     <tr key={t.id} onClick={open || undefined}
                       tabIndex={open ? 0 : undefined}
                       role={open ? "button" : undefined}
-                      title={editable ? "Open this draft to add the day's charges" : open ? "Read this ticket" : undefined}
+                      title={editable ? "Open this draft to add the day's charges" : open ? (t.status === "Draft" && !mine ? `Read ${t.tech}'s draft — only an admin can edit another technician's ticket` : "Read this ticket") : undefined}
                       // Only the row's own key presses: an Enter on the cancel
                       // button bubbles up here too, and would open the ticket
                       // it just cancelled.

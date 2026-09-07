@@ -36,6 +36,12 @@ Cloudflare Worker `solitary-snowflake-ee22` (assets + the `/approve` and
   DB fix waits as a draft under `supabase/handover/` (probes beside it) —
   a draft, not history, until it is applied and filed under migrations.
   Nothing is waiting there now. The latest is
+  `20260907044223_a_ticket_is_edited_by_its_technician_or_an_admin.sql` —
+  `private.can_write_ticket`, the gate behind every ticket_lines and
+  ticket_crew write, is the technician's own or an Admin's; the Coordinator
+  arm it carried since the baseline is gone (the tickets UPDATE policy keeps
+  its Coordinator arm for the tracker's chase and query columns, which are
+  the office's and not the bill). Probes beside it. Before it,
   `20260906181829_the_shared_drive_is_deleted_by_the_office.sql` — the
   `shared delete` storage policy needs Admin or Coordinator as well as the
   files tab (the Files screen's × was a courtesy with no gate behind it);
@@ -693,6 +699,16 @@ session has set `app.confirm_total_wipe = 'yes'`.
   for every account for three minutes after round three's migration until
   the live probe caught it. Probe every new invoker function as a
   non-owner before calling it done.
+- One technician never edits another's ticket; an Admin edits anyone's
+  (per Kyle). Three gates say so and must agree: Job detail opens another
+  technician's draft read-only (`editable` wants `isAdmin || mine`, the row
+  title says why, the button says View), the editor refuses to load a
+  ticket whose `technician_id` is not the signed-in account's unless it is
+  an Admin (`loadDraft`, for the tracker and anything else that reaches it
+  by id), and `private.can_write_ticket` is own-or-Admin in the database.
+  Reading is not editing: any account that sees prices reads any ticket's
+  invoice, which is how a technician taking over a job sees how the last
+  one billed it.
 - Job detail's Create ticket dialog inserts nothing: it hands a seed (work
   date, this ticket's reps) to the editor, which saves — and queues — like
   a ticket started from Home.

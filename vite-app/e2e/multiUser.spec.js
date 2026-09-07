@@ -258,7 +258,7 @@ test("two technicians racing on one job never collide — each keeps their own n
   }
 });
 
-test("another technician's draft refuses an outsider's save, in plain words", async ({ browser }) => {
+test("another technician's draft opens to read, never to edit", async ({ browser }) => {
   test.skip(!HAS_SECOND, "Set E2E_EMAIL2/E2E_PASSWORD2 for cross-account tests");
   const a = await newDevice(browser);
   const b = await newDevice(browser, STATE2);
@@ -282,15 +282,16 @@ test("another technician's draft refuses an outsider's save, in plain words", as
     await settledJobDetail(a.page);
 
     await openJob(b.page, jobNumber);
-    await openDraft(b.page, rx);
-
-    // …but his save must be refused in words a tech can act on — not RLS
-    // jargon, and never a silent success that saved nothing.
-    await addFilmLine(b.page, 5);
-    await b.page.getByRole("button", { name: "Save draft" }).click();
-    const alert = b.page.getByRole("alert");
-    await expect(alert).toBeVisible({ timeout: 15_000 });
-    await expect(alert).toContainText(/another technician/i);
+    // …but tapping it opens the field invoice to read, not the editor: only
+    // an admin edits another technician's ticket. The row says so, the
+    // button says View, and no Save draft ever appears.
+    const row = b.page.locator("tr", { hasText: rx }).first();
+    await expect(row).toBeVisible({ timeout: 20_000 });
+    await expect(row).toHaveAttribute("title", /only an admin can edit/i);
+    await row.getByRole("button", { name: "View" }).click();
+    await expect(b.page.getByRole("dialog").getByText(/^Field invoice/)).toBeVisible({ timeout: 20_000 });
+    await expect(b.page.getByRole("button", { name: "Save draft" })).toHaveCount(0);
+    await b.page.getByRole("dialog").getByRole("button", { name: "Close" }).click();
 
     // Aaron's draft is exactly as he left it: no lines.
     await openJob(a.page, jobNumber);

@@ -414,6 +414,10 @@ they came from, so set it past the highest number restored —
   the tracker) makes the client's link stop working and the ticket a draft
   again; **Cancel and edit** does that and opens it. A ticket the client
   has already signed cannot be pulled back this way.
+- **A technician needs to see how the last person billed a job** — open
+  the job, tap the other technician's ticket or its **View** button, and the
+  field invoice opens to read. Only the technician who raised a ticket, or
+  an Admin, can edit it; a Helper sees the list without prices, by design.
 - **A client is GST exempt, or charged the wrong rate** — Rate admin, the
   client's card, **GST rate**. Admin only; it changes every ticket priced
   from then on and nothing already sent.

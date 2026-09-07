@@ -344,6 +344,15 @@ export function TicketMobileScreen({ job, jobRecord, currentUser, onSaved, ticke
   const loadDraft = async () => {
     try {
       const [row, savedCrew] = await Promise.all([Db.getTicket(ticket), Db.listCrewForTicket(ticket)]);
+      // Somebody else's ticket, and this is not an Admin: the editor stops
+      // here rather than filling a form the database will refuse to save.
+      // Job detail already opens such a ticket read-only; this is the guard
+      // behind that button, for the tracker and anything else that reaches
+      // the editor by id.
+      if (row.technician_id && row.technician_id !== currentUser.id && currentUser.role !== "Admin") {
+        setLoadError("This is another technician's ticket. Only an admin can edit someone else's ticket — open it from Job detail to read it.");
+        return;
+      }
       draftRows.current = row.ticket_lines || [];
       const { welds, others, orphans } = linesToForm(row.ticket_lines, true, rates);
       setWeldLines(welds);
